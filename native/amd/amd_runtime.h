@@ -3,18 +3,31 @@
 // Everything NVIDIA about the worker lives behind one interface - init the
 // engine once, then per frame hand it a colour resource and get the processed
 // result back on the same command list. The AMD runtime (dlssnr_amd_pass1.dll,
-// from the DLSS-NR-on-AMD project) offers the same shape of interface, but a
-// very different mechanism: it exports NOTHING. There is no CreateFeature, no
+// the DLSS-NR-on-AMD project's runtime) offers the same shape of interface, but
+// a very different mechanism: it exports NOTHING. There is no CreateFeature, no
 // EvaluateFeature - the DLL is driven by writing to fixed offsets inside its
 // image and calling three internal addresses.
 //
 // That makes every offset below a hard contract with ONE binary. A wrong
 // offset does not return an error - it jumps into whatever is there. So the
-// loader hashes the file first and refuses anything it does not recognise
-// rather than guessing. The contract was read out of two working
-// implementations (OptiScaler's PreSR path, and the Magpie experimental fork's
-// AMD backend that reuses it) and re-verified line by line - see
-// dlss5/tmp/amd-red-research/SPEC-MAGPIE.md for the full reference.
+// loader checks size + sha256 first and refuses anything it does not recognise
+// rather than guessing.
+//
+// --- which build this table belongs to -------------------------------------
+//
+// The pinned image is danielblnc v0.2.14 with the five in-place patches that
+// the ecosystem's external hosts apply to it: the first two disable the
+// runtime's own hook-install thread and its own notify call, so the DLL does
+// not fight the host for ExecuteCommandLists ("the two cannot both hold the
+// wheel"). Both working external hosts - OptiScaler's PreSR path and the
+// Magpie fork - drive exactly this image. Its size and hash are enforced here.
+//
+// The stock upstream images are DIFFERENT and refused: vanilla v0.2.14 is
+// 1062237... and the newer releases moved the whole data region (v0.2.17:
+// +0x16A20..+0x16BB0; v0.3.0: again), so their tables are different. If a
+// newer build is ever wanted, the recipe is in
+// dlss5/tmp/amd-red-research/SPEC-OPTISCALER.md section 12, and every RVA must
+// be re-derived against that image before anything is written.
 //
 // The user supplies the runtime and the weights: they are third-party binaries
 // that cannot be redistributed (NVIDIA-derived weights). This module never
@@ -39,10 +52,10 @@ inline constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
 inline constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
 inline constexpr const wchar_t *kHipName = L"amdhip64_7.dll";
 
-// The one build this driver knows how to drive. sha256 of dlssnr_amd_pass1.dll
-// (DLSS-NR-on-AMD - the build both working implementations pin). A different
-// build is refused, loudly - its layout may differ and the failure mode is a
-// jump into nothing.
+// The one build this table belongs to (see the header comment). Size is a
+// hard gate too: it catches truncation and re-extraction mistakes before the
+// hash does any work.
+inline constexpr uint64_t kRuntimeSize = 7156224;
 inline constexpr uint8_t kRuntimeSha256[32] = {
     0x3c, 0x9c, 0xa1, 0x3f, 0x0f, 0x5f, 0xc3, 0x6a, 0x69, 0x0b, 0xa4, 0x24,
     0xc4, 0x57, 0x00, 0x3b, 0xcf, 0xcc, 0x10, 0x80, 0xb4, 0xb7, 0x85, 0x97,
@@ -51,13 +64,15 @@ inline constexpr uint8_t kRuntimeSha256[32] = {
 
 // --- offsets inside the runtime image -------------------------------------
 //
-// All RVAs, added to the module base. Grouped by role; the names follow the
-// working implementations so a future reader can diff the three.
+// All RVAs, added to the module base. The table is independently verified in
+// SPEC-OPTISCALER.md (section 4): entry points against the PE function table,
+// every data RVA against the writable .data section bounds.
 namespace rva {
-// The three callable addresses.
-inline constexpr uintptr_t kInit = 0x12380;    // bool(void *ctx, const std::string *weights)
-inline constexpr uintptr_t kRecord = 0xa0b0;   // void(Packet *)
-inline constexpr uintptr_t kNotify = 0x4640;   // void(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *)
+// The callable addresses.
+inline constexpr uintptr_t kInit = 0x12380;      // bool(void *ctx, const std::string *weights)
+inline constexpr uintptr_t kRecord = 0xa0b0;     // void(Packet *)
+inline constexpr uintptr_t kNotify = 0x4640;     // void(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *)
+inline constexpr uintptr_t kShutdown = 0xc520;   // void(void) - stops the engine's workers
 
 // One-time bindings (written by the host before Init).
 inline constexpr uintptr_t kDevice = 0x764c8;   // ID3D12Device * (host AddRefs)
@@ -80,30 +95,46 @@ inline constexpr uintptr_t kLocalStructure = 0x76e34;
 inline constexpr uintptr_t kSkinStructure = 0x76e38;
 inline constexpr uintptr_t kCharMask = 0x76e40;
 inline constexpr uintptr_t kToneChannels = 0x76e44;
+
+// History control.
 inline constexpr uintptr_t kHistory = 0x765f0;      // void *, nullptr invalidates
 inline constexpr uintptr_t kWantHistory = 0x765f8;  // uint8
 
-// Read-only status.
-inline constexpr uintptr_t kJobCounter = 0x76d74;   // UINT, jobs recorded
-inline constexpr uintptr_t kStatusFlag = 0x767fa;   // uint8, non-zero after record = refused
-inline constexpr uintptr_t kSyncCounter = 0x76c14;  // UINT, jobs completed
+// Status and accounting (read-only for the host).
+inline constexpr uintptr_t kJobCounter = 0x76d74;    // UINT, jobs recorded
+inline constexpr uintptr_t kStatusFlag = 0x767fa;    // uint8, non-zero after record = engine gave up
+inline constexpr uintptr_t kSyncCounter = 0x76c14;   // UINT, jobs completed
+inline constexpr uintptr_t kTimeoutCounter = 0x76c18;  // UINT, engine-side GPU wait timeouts
 
-// Deliberately NOT written by the host - the engine maintains both itself:
-//   0x76c44  wait allowance / iteration ceiling (writing it fights the engine)
-//   0x76e20  Tonemap (the ini file has the last word)
+// Frame-acceptance machinery.
+inline constexpr uintptr_t kPendingList = 0x76d68;  // ID3D12CommandList * - equals the list iff the
+                                                    // engine accepted the record; the real acceptance
+                                                    // test (record's void return says nothing)
+inline constexpr uintptr_t kAbortWord = 0x76c68;    // volatile LONG - stale watchdog abort token,
+                                                    // cleared by the host after each accepted record
+
+// Deliberately NOT written by the host:
+//   0x76c44  wait allowance / iteration ceiling. The engine maintains it and
+//            shortens its own budget after each timeout; writing it fights the
+//            engine (documented in both reference implementations).
+//   0x76e20  Tonemap. The ini file keeps the last word; its own default is -1.
 }  // namespace rva
 
 // --- the job packet --------------------------------------------------------
 //
 // 0x50 bytes, laid out exactly as the engine reads it. The state fields are NOT
 // reconciled against the real resource state: the reference writes the same
-// fixed token (4) for colour, motion, depth and exposure alike, including where
-// the resource demonstrably sits in a different state. It is a token the engine
+// fixed token for colour, motion, depth and exposure alike, including where the
+// resource demonstrably sits in a different state. It is a token the engine
 // expects, not a barrier description.
 //
 // Note: `colour` must be the SAME resource the result is read back from - the
 // engine works in place. Pointing it at a separate output resource leaves the
 // engine staring at an empty texture.
+//
+// Also: the packet conveys no render size, no jitter and no camera-cut reset,
+// and the void return of the record call is not an acceptance signal - the
+// kPendingList check after the call is.
 #pragma pack(push, 8)
 struct Packet {
     ID3D12CommandList *list;
@@ -152,14 +183,15 @@ public:
     Runtime(const Runtime &) = delete;
     Runtime &operator=(const Runtime &) = delete;
 
-    // Loads the runtime and the HIP library, checks the hash, binds the
+    // Loads the runtime and the HIP library, checks size + hash, binds the
     // device and queue the caller already owns, selects the HIP device that
     // matches the D3D12 adapter (by LUID - the two APIs enumerate in their own
-    // orders), then calls Init with the weights path.
+    // orders), then runs the init sequence and calls Init with the weights
+    // path.
     //
-    // `runtime_dir` is where the three files live (worker's own folder by
-    // default; BYO folder honored by the caller). Returns false and logs a
-    // reason on any mismatch - never throws, never guesses.
+    // `runtime_dir` is where the files live (worker's own folder by default;
+    // BYO folder honored by the caller). Returns false and logs a reason on
+    // any mismatch - never throws, never guesses.
     bool Load(const std::wstring &runtime_dir, ID3D12Device *device,
               ID3D12CommandQueue *queue);
 
@@ -181,23 +213,47 @@ public:
     // caller's output resource is simply the colour resource.
     //
     // Must be called between the caller's Begin/EndCommands, on the worker's
-    // single command-list thread.
+    // single command-list thread. Returns true when the engine ACCEPTED the
+    // record (verified against the pending-list marker, not the void return).
+    //
+    // After the caller submits the list, call Notify() and then wait - see
+    // JobCount() / SyncCount() - before touching the colour resource again.
     bool Record(ID3D12CommandList *list, ID3D12Resource *colour,
                 ID3D12Resource *motion, ID3D12Resource *depth = nullptr,
                 ID3D12Resource *exposure = nullptr,
                 float scale_x = 1.0f, float scale_y = 1.0f);
 
     // Tells the engine the recorded work has been submitted on `queue`.
+    // Call AFTER the host's ExecuteCommandLists, never before: a capture-wait
+    // kernel launched early can occupy the GPU while the captured frame is
+    // still queued on the CPU.
     void Notify(ID3D12CommandQueue *queue, ID3D12CommandList *list);
 
+    // Waits until the engine's completed-jobs counter reaches `wanted` (a
+    // snapshot taken after Record). Returns false on timeout - the caller
+    // should then skip the frame and invalidate history rather than disable
+    // the effect; a single slow frame (first frames build the pipeline) is a
+    // frame to skip, not a verdict.
+    bool WaitJobs(uint32_t wanted, uint32_t timeout_ms) const;
+
+    // Stops the engine's workers. Call only after every submission has
+    // drained (the engine's threads must not be stopped under live work).
+    void Shutdown();
+
     // Engine job accounting, for the wait loop and for diagnostics.
-    // `wanted` is a snapshot taken after Record; poll `Completed()` until it
-    // reaches `wanted` - NOT a fence, the network runs on the engine's own
-    // worker and a queue fence says nothing about it.
-    uint32_t RecordedJobs() const;
-    uint32_t CompletedJobs() const;
-    // True when the engine flagged the last recorded frame as refused.
-    bool LastRecordRefused() const;
+    // Snapshot JobCount() after Record; poll SyncCount() until it reaches the
+    // snapshot - NOT a fence, the network runs on the engine's own worker and
+    // a queue fence says nothing about it.
+    uint32_t JobCount() const;
+    uint32_t SyncCount() const;
+
+    // Monotonically increasing engine-side GPU-wait timeout count. When it
+    // grows, the engine gave up on a frame: treat the output as stale, skip
+    // the frame and invalidate history before the next record.
+    uint32_t TimeoutCount() const;
+
+    // True when the engine latched its own failure (status flag non-zero).
+    bool FailedOnEngineSide() const;
 
     // History control: a loading screen or a >250 ms gap leaves history
     // describing a scene that is no longer there; invalidate before the next

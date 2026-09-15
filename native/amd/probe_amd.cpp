@@ -117,16 +117,19 @@ done:
     return out;
 }
 
-// hipDevicePropertiesR0600 fills a ~1 KB struct; the working reference uses a
-// 4096-byte, 8-byte aligned buffer because a smaller one is a stack overrun,
-// not an error return. The name is the first field - that is all this probe
-// prints. The adapter LUID (the field the driver actually matches on) lives at
-// byte offset 272.
-struct alignas(8) HipProps {
-    unsigned char raw[4096];
+// hipDevicePropertiesR0600 fills a ~1 KB struct; the working references use an
+// oversized buffer (4096 / 8192, 8-/16-byte aligned) because a smaller one is
+// a stack overrun, not an error return. The name is the first field - that is
+// what this probe prints. The adapter LUID (the field the driver matches on)
+// lives at byte offset 272: name[256], uuid[16], luid[8].
+struct alignas(16) HipProps {
+    unsigned char raw[8192];
 };
 
 constexpr size_t kHipPropsLuidOffset = 272;
+
+// The known build (see amd_runtime.h).
+constexpr unsigned long long kKnownRuntimeSize = 7156224;
 
 FILE *g_out = nullptr;
 
@@ -177,6 +180,7 @@ int wmain(int argc, wchar_t **argv) {
         {kRuntimeName, true}, {kWeightsName, true}, {kIniName, false},
     };
     bool runtime_present = false;
+    unsigned long long runtime_size = 0;
     for (const auto &it : items) {
         unsigned long long size = 0;
         const std::wstring p = dir + L"\\" + it.name;
@@ -185,7 +189,10 @@ int wmain(int argc, wchar_t **argv) {
         if (there) {
             const double mb = static_cast<double>(size) / (1024.0 * 1024.0);
             out("  (%.1f MB)", mb);
-            if (wcscmp(it.name, kRuntimeName) == 0) runtime_present = true;
+            if (wcscmp(it.name, kRuntimeName) == 0) {
+                runtime_present = true;
+                runtime_size = size;
+            }
         } else if (it.required) {
             out("   <- required");
         }
@@ -193,9 +200,14 @@ int wmain(int argc, wchar_t **argv) {
     }
     out("\n");
 
-    // --- 2. the hash ------------------------------------------------------
+    // --- 2. size and hash -------------------------------------------------
     bool hash_match = false;
     if (runtime_present) {
+        // The size gate runs first: the table belongs to one exact image, and
+        // a truncated or re-extracted file fails here without hashing.
+        const bool size_ok = runtime_size == kKnownRuntimeSize;
+        out("size %llu bytes (known build: %llu) %s\n", runtime_size,
+            kKnownRuntimeSize, size_ok ? "OK" : "<- differs");
         bool ok = false;
         const std::string hex = sha256_hex(dir + L"\\" + kRuntimeName, &ok);
         if (ok) {
@@ -251,10 +263,11 @@ int wmain(int argc, wchar_t **argv) {
     for (int i = 0; i < count; ++i) {
         HipProps props{};
         if (get_props(&props, i) == 0) {
-            // LUID at byte 272 identifies the adapter; the DXGI name is not in
-            // this struct, so read the LUID and let the caller compare it.
+            // name[256] is the first field; the adapter LUID (the field the
+            // driver matches on) sits at +272.
+            const char *name = reinterpret_cast<const char *>(props.raw);
             const LUID *luid = reinterpret_cast<const LUID *>(props.raw + kHipPropsLuidOffset);
-            out("  [%d] LUID %08lX:%08lX\n", i,
+            out("  [%d] %s  (LUID %08lX:%08lX)\n", i, name,
                 static_cast<unsigned long>(luid->HighPart),
                 static_cast<unsigned long>(luid->LowPart));
         } else {
