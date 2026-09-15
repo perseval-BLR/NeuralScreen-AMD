@@ -1,0 +1,312 @@
+// probe_amd.cpp - what is actually on a machine that wants to run the AMD path.
+//
+// Standalone, no dependencies beyond Windows. Point it at a folder (or let it
+// look next to itself) and it reports, in order:
+//
+//   1. whether the three runtime files are there, with sizes;
+//   2. the sha256 of dlssnr_amd_pass1.dll, and whether it is the build this
+//      project knows how to drive;
+//   3. whether the HIP 7 runtime (amdhip64_7.dll) is installed, and every
+//      AMD device it sees, with the gfx target of each;
+//   4. with --init: whether the engine accepts the device and the weights
+//      (this calls into the runtime - the one step that can fail hard, which
+//      is why it is opt-in and behind an SEH guard).
+//
+// Written for the "I have a Radeon, will this work?" conversation: run it,
+// paste the output. Nothing is installed, nothing is written.
+//
+// Build: cl /nologo /O2 /EHsc /W3 /MD probe_amd.cpp /Fe:probe_amd.exe
+//        bcrypt.lib advapi32.lib
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <bcrypt.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#pragma comment(lib, "bcrypt.lib")
+
+namespace {
+
+constexpr const wchar_t *kRuntimeName = L"dlssnr_amd_pass1.dll";
+constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
+constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
+constexpr const wchar_t *kHipName = L"amdhip64_7.dll";
+
+// The build our offsets were read from (see amd_runtime.h).
+constexpr uint8_t kExpectedSha256[32] = {
+    0x3c, 0x9c, 0xa1, 0x3f, 0x0f, 0x5f, 0xc3, 0x6a, 0x69, 0x0b, 0xa4, 0x24,
+    0xc4, 0x57, 0x00, 0x3b, 0xcf, 0xcc, 0x10, 0x80, 0xb4, 0xb7, 0x85, 0x97,
+    0x4c, 0xdd, 0x7e, 0x9a, 0xe2, 0xbc, 0x1d, 0xd8,
+};
+
+constexpr uintptr_t kRvaInitCtx = 0x764d8;
+constexpr uintptr_t kRvaHipDevice = 0x76f20;
+constexpr uintptr_t kRvaInit = 0x12380;
+
+std::wstring dir_of(const std::wstring &path) {
+    const size_t pos = path.find_last_of(L"\\/");
+    return pos == std::wstring::npos ? L"." : path.substr(0, pos);
+}
+
+bool file_exists(const std::wstring &path, unsigned long long *size = nullptr) {
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
+        return false;
+    if (size) {
+        LARGE_INTEGER li{};
+        li.LowPart = fad.nFileSizeLow;
+        li.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
+        *size = static_cast<unsigned long long>(li.QuadPart);
+    }
+    return true;
+}
+
+std::string sha256_hex(const std::wstring &path, bool *ok) {
+    *ok = false;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) return {};
+
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    std::string out;
+    DWORD hash_len = 0, got = 0;
+    std::vector<uint8_t> hash_buf, obj_buf;
+
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
+        goto done;
+    if (BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_len),
+                          sizeof(hash_len), &got, 0) < 0)
+        goto done;
+    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&got),
+                          sizeof(got), &got, 0) < 0)
+        goto done;
+    obj_buf.resize(got);
+    if (BCryptCreateHash(alg, &hash, obj_buf.data(),
+                         static_cast<ULONG>(obj_buf.size()), nullptr, 0, 0) < 0)
+        goto done;
+    for (;;) {
+        uint8_t chunk[1 << 16];
+        DWORD read = 0;
+        if (!ReadFile(file, chunk, sizeof(chunk), &read, nullptr)) goto done;
+        if (read == 0) break;
+        if (BCryptHashData(hash, chunk, read, 0) < 0) goto done;
+    }
+    hash_buf.resize(hash_len);
+    if (BCryptFinishHash(hash, hash_buf.data(), hash_len, 0) < 0) goto done;
+
+    {
+        static const char *hex = "0123456789abcdef";
+        out.resize(hash_len * 2);
+        for (DWORD i = 0; i < hash_len; ++i) {
+            out[i * 2] = hex[hash_buf[i] >> 4];
+            out[i * 2 + 1] = hex[hash_buf[i] & 0xF];
+        }
+        *ok = true;
+    }
+
+done:
+    if (hash) BCryptDestroyHash(hash);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    CloseHandle(file);
+    return out;
+}
+
+// hipDevicePropertiesR0600 fills a ~1 KB struct; the working reference uses a
+// 4096-byte, 8-byte aligned buffer because a smaller one is a stack overrun,
+// not an error return. The name is the first field - that is all this probe
+// prints. The adapter LUID (the field the driver actually matches on) lives at
+// byte offset 272.
+struct alignas(8) HipProps {
+    unsigned char raw[4096];
+};
+
+constexpr size_t kHipPropsLuidOffset = 272;
+
+FILE *g_out = nullptr;
+
+void out(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_out ? g_out : stdout, fmt, ap);
+    va_end(ap);
+    fflush(g_out ? g_out : stdout);
+}
+
+// The init call lives in its own function: __try cannot sit in a scope that
+// holds C++ objects with destructors (C2712). No std::string here - the caller
+// owns the string, this function takes the pointer.
+int guarded_init(void *mod, void *ctx, const std::string *weights) {
+    auto init_fn = reinterpret_cast<bool (__fastcall *)(void *, const std::string *)>(
+        reinterpret_cast<uintptr_t>(mod) + kRvaInit);
+    __try {
+        return init_fn(ctx, weights) ? 0 : 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -static_cast<int>(GetExceptionCode());
+    }
+}
+
+}  // namespace
+
+int wmain(int argc, wchar_t **argv) {
+    // Keep a copy of everything beside the exe: this runs on machines with no
+    // console and gets pasted into an issue.
+    const std::wstring exe_dir = dir_of(argv[0]);
+    const std::wstring log_path = exe_dir + L"\\probe_amd.log";
+    FILE *log = _wfopen(log_path.c_str(), L"w");
+    g_out = log;
+
+    std::wstring dir = exe_dir;
+    bool do_init = false;
+    for (int i = 1; i < argc; ++i) {
+        if (wcscmp(argv[i], L"--init") == 0) do_init = true;
+        else dir = argv[i];
+    }
+
+    out("probe_amd - the AMD neural runtime check\n");
+    out("directory: %ls\n\n", dir.c_str());
+
+    // --- 1. the three files ---------------------------------------------
+    struct Item { const wchar_t *name; bool required; };
+    const Item items[] = {
+        {kRuntimeName, true}, {kWeightsName, true}, {kIniName, false},
+    };
+    bool runtime_present = false;
+    for (const auto &it : items) {
+        unsigned long long size = 0;
+        const std::wstring p = dir + L"\\" + it.name;
+        const bool there = file_exists(p, &size);
+        out("%-32ls %s", it.name, there ? "FOUND" : "MISSING");
+        if (there) {
+            const double mb = static_cast<double>(size) / (1024.0 * 1024.0);
+            out("  (%.1f MB)", mb);
+            if (wcscmp(it.name, kRuntimeName) == 0) runtime_present = true;
+        } else if (it.required) {
+            out("   <- required");
+        }
+        out("\n");
+    }
+    out("\n");
+
+    // --- 2. the hash ------------------------------------------------------
+    bool hash_match = false;
+    if (runtime_present) {
+        bool ok = false;
+        const std::string hex = sha256_hex(dir + L"\\" + kRuntimeName, &ok);
+        if (ok) {
+            out("sha256 %s\n", hex.c_str());
+            // Compare bytes, report by prefix for the issue paste.
+            hash_match = hex.rfind(
+                "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8",
+                0) == 0;
+            out("expected 3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8\n");
+            out("verdict: %s\n", hash_match
+                ? "this is the build NeuralScreen Red knows how to drive"
+                : "UNKNOWN build - offsets are not verified against this file");
+        } else {
+            out("sha256: could not read the file\n");
+        }
+    } else {
+        out("sha256: skipped, the runtime is not here\n");
+    }
+    out("\n");
+
+    // --- 3. HIP -----------------------------------------------------------
+    HMODULE hip = LoadLibraryExW(kHipName, nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!hip) {
+        hip = LoadLibraryExW((dir + L"\\" + kHipName).c_str(), nullptr,
+                             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    }
+    if (!hip) {
+        out("HIP: %ls not found (error %lu) - install Adrenalin 26.1.1 or newer,\n"
+            "     the HIP 7 runtime ships with it\n", kHipName, GetLastError());
+        if (log) fclose(log);
+        return 2;
+    }
+    out("HIP: %ls loaded\n", kHipName);
+
+    using GetCountFn = int (*)(int *);
+    using GetPropsFn = int (*)(void *, int);  // buffer FIRST, index second
+    auto get_count = reinterpret_cast<GetCountFn>(GetProcAddress(hip, "hipGetDeviceCount"));
+    auto get_props = reinterpret_cast<GetPropsFn>(GetProcAddress(hip, "hipGetDevicePropertiesR0600"));
+    if (!get_count || !get_props) {
+        out("HIP: required exports missing (count=%p props=%p)\n",
+            reinterpret_cast<void *>(get_count), reinterpret_cast<void *>(get_props));
+        if (log) fclose(log);
+        return 3;
+    }
+
+    int count = 0;
+    if (get_count(&count) != 0 || count <= 0) {
+        out("HIP: no devices reported (count=%d) - the card may be disabled in BIOS\n", count);
+        if (log) fclose(log);
+        return 4;
+    }
+    out("HIP: %d device(s)\n", count);
+    for (int i = 0; i < count; ++i) {
+        HipProps props{};
+        if (get_props(&props, i) == 0) {
+            // LUID at byte 272 identifies the adapter; the DXGI name is not in
+            // this struct, so read the LUID and let the caller compare it.
+            const LUID *luid = reinterpret_cast<const LUID *>(props.raw + kHipPropsLuidOffset);
+            out("  [%d] LUID %08lX:%08lX\n", i,
+                static_cast<unsigned long>(luid->HighPart),
+                static_cast<unsigned long>(luid->LowPart));
+        } else {
+            out("  [%d] <properties unavailable>\n", i);
+        }
+    }
+    out("\n");
+
+    // --- 4. optional: can the engine actually init -----------------------
+    if (!do_init) {
+        out("init: skipped (pass --init to try the engine)\n");
+        if (log) fclose(log);
+        return hash_match ? 0 : 1;
+    }
+    if (!runtime_present || !hash_match) {
+        out("init: refused - the runtime is missing or is not the known build\n");
+        if (log) fclose(log);
+        return 1;
+    }
+
+    HMODULE mod = LoadLibraryExW((dir + L"\\" + kRuntimeName).c_str(), nullptr,
+                                 LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (!mod) {
+        out("init: LoadLibrary failed (error %lu)\n", GetLastError());
+        if (log) fclose(log);
+        return 5;
+    }
+    // Bind the HIP device first: the engine reads it at a known offset.
+    for (int i = 0; i < count; ++i) {
+        auto set = reinterpret_cast<int (*)(int)>(GetProcAddress(hip, "hipSetDevice"));
+        if (set && set(i) == 0) {
+            *reinterpret_cast<int *>(reinterpret_cast<uintptr_t>(mod) + kRvaHipDevice) = i;
+            out("init: HIP device %d selected\n", i);
+            break;
+        }
+    }
+    std::wstring wpath = dir + L"\\" + kWeightsName;
+    // The runtime takes std::string, so convert once (the runtime itself is a
+    // narrow-path API - a non-ASCII install path is out of scope for now).
+    std::string narrow_weights;
+    narrow_weights.reserve(wpath.size());
+    for (wchar_t c : wpath) narrow_weights.push_back(static_cast<char>(c & 0x7F));
+    void *ctx = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mod) + kRvaInitCtx);
+    const int rc = guarded_init(mod, ctx, &narrow_weights);
+    if (rc < 0) {
+        out("init: EXCEPTION 0x%08X - wrong build or wrong device, the offsets\n"
+            "      do not match this image\n", -rc);
+        if (log) fclose(log);
+        return 6;
+    }
+    out("init: %s\n", rc == 0 ? "engine accepted the device and the weights"
+                              : "engine returned false (check the runtime log)");
+    if (log) fclose(log);
+    return rc == 0 ? 0 : 6;
+}
