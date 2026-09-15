@@ -323,7 +323,7 @@ else:
           + ". It is a development build - do NOT upload it to that tag. "
             "Bump the version, build, then tag.")
 version_txt = (
-    f"NeuralScreen {VERSION}\n"
+    f"NeuralScreen AMD {VERSION}\n"
     f"commit: {commit}\n"
     + tag_line +
     f"runtime: nvngx_dlssnr.dll sha256 {dll_sha}\n"

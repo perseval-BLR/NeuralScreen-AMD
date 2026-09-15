@@ -179,9 +179,13 @@ def shipped_config_defaults():
     if head.get("frame_generation") is not False:
         problems.append(f"frame_generation={head.get('frame_generation')!r} "
                         f"- a fresh install must be opt-in")
-    if head.get("motion_backend") != "cpu":
+    if head.get("motion_backend") != "amd":
+        # This build IS the AMD one: the neural pass on a Radeon is what it
+        # does out of the box, and a fresh install that shipped with the
+        # pass switched off would look broken on the very machines it is
+        # for. "cpu"/"nvofa" stay reachable from the menu.
         problems.append(f"motion_backend={head.get('motion_backend')!r} "
-                        f"- cpu is the default")
+                        f"- amd is the default on this build")
     for key in ("intensity", "local_tone", "local_structure", "skin_structure"):
         if key not in head or head[key] is None:
             continue
@@ -193,7 +197,7 @@ def shipped_config_defaults():
             problems.append(f"{key}={head[key]!r} - Natural says {natural[key]}")
     if problems:
         return False, "HEAD config is not the product default: " + "; ".join(problems)
-    return True, "multiplier 2, FG off, CPU motion, Natural's four sliders"
+    return True, "multiplier 2, FG off, AMD neural pass, Natural's four sliders"
 
 
 def zip_integrity():
@@ -296,7 +300,7 @@ def zip_integrity():
         m = re.search(r'VERSION = "([^"]+)"', packer)
         if not m:
             return False, "build_release_zip.py has no VERSION"
-        if f"NeuralScreen {m.group(1)}" not in vt:
+        if f"NeuralScreen AMD {m.group(1)}" not in vt:
             return False, f"VERSION.txt version does not match {m.group(1)}"
     return True, f"{zpath.stat().st_size} bytes, all files, the hook, a default config, a truthful manifest"
 

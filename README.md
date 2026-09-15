@@ -1,5 +1,20 @@
 # NeuralScreen AMD
 
+> [!IMPORTANT]
+> **This is an experimental build.** The AMD neural pass has never run on a
+> real Radeon: it was written against the specifications of two working
+> implementations and verified by compilation and tests, but there was no AMD
+> card on this bench. **The point of this release is to collect logs from real
+> cards**, so the launch can be brought up to working order.
+>
+> Run it on your Radeon and attach to an issue: `NeuralScreen.log` next to
+> the program, `native\probe_amd.log` (the probe, `native\probe_amd.exe`) and
+> your card model with the driver version.
+>
+> The logs are written always, with nothing to turn on: every refusal names
+> itself (`native/AMD.md` explains each line), and even "nothing worked" is a
+> result - the log shows exactly where it stopped.
+
 **DLSS 5-class neural rendering on an AMD Radeon, applied to your whole
 Windows desktop in real time.** Everything on screen — games, video, photos —
 goes through the same neural network that DLSS 5 games use, and comes back
@@ -9,50 +24,46 @@ sharper.
 > **[TECHNICAL.md](TECHNICAL.md)**. Русская версия:
 > **[README.ru.md](README.ru.md)** / **[TECHNICAL.ru.md](TECHNICAL.ru.md)**.
 
-> **Notice.** Not affiliated with NVIDIA; NVIDIA, DLSS and the NVIDIA logo
-> are NVIDIA Corporation's trademarks. The bundled NVIDIA runtimes
-> (`nvngx_dlssnr.dll`, `nvngx_dlssg.dll`) are NVIDIA's property, included
-> unmodified, research/educational use only, no warranty, use at your own
-> risk. Rights holders: say the word and the next build ships without them.
+> **Notice.** Not affiliated with NVIDIA or AMD. NVIDIA, DLSS and the NVIDIA
+> logo are NVIDIA Corporation's trademarks. The neural pass drives a
+> third-party runtime that is not bundled — its licence forbids it; see
+> `native/AMD.md`. Rights holders: say the word and it ships without it.
 
-## How it looks
+| Menu, light | Menu, dark | Settings | Window list |
+|---|---|---|---|
+| ![light](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-light.png) | ![dark](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-dark.png) | ![settings](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-settings.png) | ![windows](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-windows.png) |
 
-<table>
-<tr>
-<td><img src="https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-light.png" alt="Menu, light theme" width="400"></td>
-<td><img src="https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-dark.png" alt="Menu, dark theme" width="400"></td>
-</tr>
-<tr>
-<td><img src="https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-settings.png" alt="Settings" width="400"></td>
-<td><img src="https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-windows.png" alt="Window list" width="400"></td>
-</tr>
-</table>
-
-*One menu inside the overlay, in a light and a dark theme; the settings page;
-the window list — and the **Before / after wipe** slider that splits the
-screen down the middle.*
+*One menu inside the overlay; the **Before / after wipe** slider splits the
+screen down the middle to show what the effect does.*
 
 ## What you need
 
 - **Windows 11**, or Windows 10 — reported working.
-- **An NVIDIA RTX card:**
+- **An AMD Radeon RX 7000 / 9000 card** (RDNA3 / RDNA4) — this is the card
+  the neural pass runs on. Anything else, RX 6000 included, is not
+  supported: the program starts and says so in its menu (**card not
+  supported**), and the picture stays unprocessed.
 
   | Cards | Status |
   |---|---|
-  | **RTX 50** / **RTX 40** / **RTX 30** | ✅ works |
-  | **RTX 20** (Turing) | ❌ below the minimum architecture — the program starts, the picture is not processed |
-  | **Hybrid laptops (Optimus)** | ✅ works; on the iGPU display the capture falls back to a slower path |
+  | **RX 9000 / 7000** (RDNA4 / RDNA3) | ✅ supported; ~30 ms per megapixel on a 9070 XT, slower on RDNA3 (no FP8 — the network runs in FP16) |
+  | **RX 6000** (RDNA2) and older | ❌ card not supported — the program works, processing does not |
+  | **NVIDIA RTX** | ❌ not used by this build — see the main project branch |
 
-- **The latest NVIDIA driver, and Windows up to date.** Not a formality: the
-  neural runtime talks to the driver directly, and an old driver is the
-  commonest reason it refuses to start or the picture never appears.
-- **Nothing installed.** The release archive brings its own Python.
+- **AMD Adrenalin 26.1.1 or newer, and Windows up to date.** Not a formality:
+  the pass needs the HIP 7 runtime that ships with the driver, and an old
+  driver is the commonest reason it refuses to start.
+- **The neural runtime** — third-party, installed once by hand: step by step
+  in **[native/AMD.md](native/AMD.md)**. Without it the program still starts
+  and logs what is missing.
+- **Nothing else installed.** The release archive brings its own Python.
 
 ## Install
 
 1. Download the archive from [Releases](https://github.com/perseval-BLR/DLSS5-NeuralScreen/releases)
-   and unpack it anywhere. Everything is inside, including NVIDIA's runtime.
-2. Run **`NeuralScreen.exe`**.
+   and unpack it anywhere.
+2. Set up the neural runtime — **[native/AMD.md](native/AMD.md)**, two commands.
+3. Run **`NeuralScreen.exe`**.
 
 Windows will probably warn you about an unknown publisher — the program is not
 signed with a paid certificate. Click *More info* → *Run anyway*, or use
@@ -73,7 +84,6 @@ the menu. The hotkeys are on the numpad, so **Num Lock has to be on**.
 |---|---|
 | **Num2** | open / close the menu |
 | **Num1** | neural rendering on / off |
-| **Num7** | frame generation on / off |
 | **Num3** | screenshot |
 | **Num0** | start / stop recording, with sound |
 | **Num4** / **Num6** | processing resolution down / up |
@@ -109,27 +119,18 @@ on it, red when it is not.
 - **Model** — *which* network produces the picture, as opposed to how
   strongly. Three of them, and they are three different outputs rather than
   three strengths: **Default** suits a desktop, **Natural** and **Cinematic**
-  are tuned for games and soften photographs and small text. Measured on a
-  desktop capture, fine detail against the untouched frame: Default
-  **+18.7%**, Natural **−11.4%**, Cinematic **−23.4%**. A saved preset keeps
-  the model it was saved with.
+  are tuned for games and soften photographs and small text. A saved preset
+  keeps the model it was saved with.
 - **Before / after wipe** — leaves the left part of the screen unprocessed so
   you can see what the effect is doing. Back to 0 when done.
 - **Boost** — on by default. The network runs at a reduced resolution and a
-  slider under the switch chooses which: measured on a 5070 Ti at 4K,
-  **45.7 → 72.6 frames** at the default step and **83.4** at the lowest.
-  The picture stays sharp — the network's result is composed onto your
-  original frame, so text and edges keep full resolution. Turn it off to
-  compare.
-- **DLSS 4.5 FG** — Frame Generation, off by default, with a ×2 / ×3 / ×4
-  multiplier beside the switch (and on **Num7**). DLSS-G's own desktop
-  build: the depth is flat and the motion is estimated, there is no engine
-  cooperation, so UI and text can distort — the known cost of the approach.
-  The header pairs the two honest rates when they differ: "47 / 111 fps" is
-  the network's output, then what the presenter shows. DLSS-G has a hardware
-  floor of its own: on a card below Ada the runtime refuses and **the switch
-  flips back off with a short notice** — no silent ON. Validated on RTX
-  50-series; adapters beyond it are unconfirmed.
+  slider under the switch chooses which. The picture stays sharp — the
+  network's result is composed onto your original frame, so text and edges
+  keep full resolution. On AMD this is the main speed lever: the network
+  costs about 30 ms per megapixel. Turn it off to compare.
+- **DLSS 4.5 FG** — Frame Generation: **not functional on this build.** It
+  rides on NVIDIA's optical-flow runtime, which a Radeon does not have; the
+  switch stays off.
 
 Everything else is behind the sliders icon: which monitor is processed and
 which card does it, HDR compatibility, the screenshot folder, Spout2 output,
@@ -138,11 +139,10 @@ assignments, the theme — and the language, of which there are **12**: English,
 Russian, French, German, Spanish, Italian, Portuguese, Polish, Ukrainian,
 Chinese, Japanese and Korean.
 
-## Swapping a runtime
+## The runtime
 
-Everything ships in the archive. To run your own runtime build (a newer
-DLSS-G, say), drop the DLL into **`native/libraries/`** — it wins over the
-bundled copy; `nr_dll` / `NS_NR_DLL` remain the NR override.
+The neural pass drives a third-party runtime that is not bundled — its
+licence forbids redistribution. How to prepare it: **[native/AMD.md](native/AMD.md)**.
 
 ## Recording and screenshots
 
