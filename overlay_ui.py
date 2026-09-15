@@ -744,9 +744,10 @@ class OverlayMenu:
             toggle("hdr", s.get("hdr_mode", "HDR compatibility"),
                    bool(self.state.get("hdr")),
                    hint=s.get("hdr_mode_hint", ""))
-            choice("motion_backend", s.get("motion_backend", "Motion estimation"),
-                   self.state.get("motion_backend", "cpu"), ["cpu", "nvofa"],
-                   labels=["CPU DIS", s.get("motion_nvofa", "NVOFA (experimental)")],
+            choice("motion_backend", s.get("motion_backend", "Neural pass and motion"),
+                   self.state.get("motion_backend", "cpu"), ["cpu", "nvofa", "amd"],
+                   labels=["CPU DIS", s.get("motion_nvofa", "NVOFA (experimental)"),
+                           s.get("motion_amd", "AMD (Radeon RDNA3+)")],
                    hint=s.get("motion_hint", "Restarts the worker; CPU fallback if unavailable"))
             # The screenshot folder: a plain button that opens the folder
             # picker (issue #20). The current value is shown as the caption

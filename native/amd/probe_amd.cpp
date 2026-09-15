@@ -75,7 +75,7 @@ std::string sha256_hex(const std::wstring &path, bool *ok) {
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
     std::string out;
-    DWORD hash_len = 0, got = 0;
+    DWORD hash_len = 0, obj_len = 0, got = 0;
     std::vector<uint8_t> hash_buf, obj_buf;
 
     if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
@@ -83,10 +83,14 @@ std::string sha256_hex(const std::wstring &path, bool *ok) {
     if (BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_len),
                           sizeof(hash_len), &got, 0) < 0)
         goto done;
-    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&got),
-                          sizeof(got), &got, 0) < 0)
+    // obj_len and got are separate variables: passing one DWORD as both the
+    // output buffer and the written-count leaves `got` holding the count, and
+    // a 4-byte hash object is too small - the failure looks like an unreadable
+    // file rather than a wrong size.
+    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&obj_len),
+                          sizeof(obj_len), &got, 0) < 0)
         goto done;
-    obj_buf.resize(got);
+    obj_buf.resize(obj_len);
     if (BCryptCreateHash(alg, &hash, obj_buf.data(),
                          static_cast<ULONG>(obj_buf.size()), nullptr, 0, 0) < 0)
         goto done;

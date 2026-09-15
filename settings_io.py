@@ -525,11 +525,15 @@ def work_scale_cap(st) -> float:
 #: token list each, and the lists had already drifted apart - a rename in
 #: the worker would have blinded one of them and left the other working,
 #: which is the worst shape for a bug like this to take.
-NR_VERDICT_OK = ("feature 18 ready",)
+NR_VERDICT_OK = ("feature 18 ready",
+                 "[amd] ===== AMD path active =====",)  # both neural passes
 NR_VERDICT_FAIL = ("feature 18 create failed",   # [pure], the direct refusal
                    "NR feature unavailable",     # [video], SAFE PASSTHROUGH
                    "NGX unavailable",            # [host], nothing came up
-                   "no NVIDIA adapter found")    # [host], nothing to run on
+                   "no NVIDIA adapter found",    # [host], nothing to run on
+                   "no AMD adapter found",       # [host], the AMD path asked for a Radeon
+                   "AMD neural pass unavailable",  # [video], the AMD request failed
+                   "[amd] the runtime did not come up:")  # [amd], the engine's own reason
 
 
 def nr_verdict(lines):

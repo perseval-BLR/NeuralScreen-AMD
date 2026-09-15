@@ -193,9 +193,16 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         return false;
     }
     found_hash_ = to_hex(actual, 32);
-    for (int i = 0; i < 32; ++i) {
-        if (actual[i] != kRuntimeSha256[i]) {
-            last_error_ = "dlssnr_amd_pass1.dll is not the build these offsets "
+    {
+        bool patched = true, stock = true;
+        for (int i = 0; i < 32; ++i) {
+            if (actual[i] != kRuntimeSha256Patched[i]) patched = false;
+            if (actual[i] != kRuntimeSha256Stock[i]) stock = false;
+        }
+        if (patched) kind_ = ImageKind::Patched;
+        else if (stock) kind_ = ImageKind::Stock;
+        else {
+            last_error_ = "dlssnr_amd_pass1.dll is not a build these offsets "
                           "belong to (found " + found_hash_ + "); refusing rather "
                           "than guessing";
             return false;

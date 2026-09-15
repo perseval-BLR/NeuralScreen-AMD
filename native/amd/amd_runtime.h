@@ -55,12 +55,27 @@ inline constexpr const wchar_t *kHipName = L"amdhip64_7.dll";
 // The one build this table belongs to (see the header comment). Size is a
 // hard gate too: it catches truncation and re-extraction mistakes before the
 // hash does any work.
+//
+// Two images are known: the stock v0.2.14 payload, and the same image with the
+// five in-place patches the ecosystem's hosts apply (byte-identical table - the
+// patches change bytes, not layout). The patched one is the tested path; the
+// stock one is accepted so a machine that only has v0.2.14 still runs and
+// reports, but it will try to drive itself at the same time as the host and is
+// expected to misbehave (the patch's own reason: "the two cannot both hold the
+// wheel").
 inline constexpr uint64_t kRuntimeSize = 7156224;
-inline constexpr uint8_t kRuntimeSha256[32] = {
+inline constexpr uint8_t kRuntimeSha256Patched[32] = {
     0x3c, 0x9c, 0xa1, 0x3f, 0x0f, 0x5f, 0xc3, 0x6a, 0x69, 0x0b, 0xa4, 0x24,
     0xc4, 0x57, 0x00, 0x3b, 0xcf, 0xcc, 0x10, 0x80, 0xb4, 0xb7, 0x85, 0x97,
     0x4c, 0xdd, 0x7e, 0x9a, 0xe2, 0xbc, 0x1d, 0xd8,
 };
+inline constexpr uint8_t kRuntimeSha256Stock[32] = {
+    0x10, 0x62, 0x23, 0x72, 0x3f, 0xd9, 0x26, 0x6c, 0x44, 0xd3, 0x8d, 0xc2,
+    0xfb, 0x77, 0x93, 0x39, 0x48, 0xab, 0x37, 0x80, 0x3f, 0x46, 0xbf, 0xce,
+    0xa2, 0xba, 0xe3, 0xa0, 0xa4, 0x74, 0xac, 0x84,
+};
+
+enum class ImageKind { Unknown, Stock, Patched };
 
 // --- offsets inside the runtime image -------------------------------------
 //
@@ -198,6 +213,11 @@ public:
     // True once Load() finished and the engine is usable.
     bool Ready() const { return ready_; }
 
+    // Which of the two known images was found (Stock when the host and the
+    // runtime would both try to drive the frame; Patched when the runtime's
+    // own hook installer is off and only the host drives).
+    ImageKind Kind() const { return kind_; }
+
     // Why not ready, one line, for the log and the UI.
     const std::string &LastError() const { return last_error_; }
 
@@ -262,6 +282,7 @@ public:
 
 private:
     bool ready_ = false;
+    ImageKind kind_ = ImageKind::Unknown;
     std::string last_error_;
     std::string found_hash_;
 

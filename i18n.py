@@ -1710,15 +1710,17 @@ STRINGS = {
 
 for _strings in STRINGS.values():
     _strings.update({
-        "motion_backend": "Motion estimation",
+        "motion_backend": "Neural pass and motion",
         "motion_nvofa": "NVOFA (experimental)",
+        "motion_amd": "AMD (Radeon RDNA3+)",
         "motion_hint": "Restarts worker; CPU fallback if unavailable",
         "motion_fallback": "NVOFA unavailable - using CPU DIS",
         "motion_restarted": "Motion backend changed - worker restarted",
     })
 STRINGS["ru"].update({
-    "motion_backend": "Расчёт движения",
+    "motion_backend": "Нейропроход и движение",
     "motion_nvofa": "NVOFA (эксперимент)",
+    "motion_amd": "AMD (Radeon RDNA3+)",
     "motion_hint": "Перезапуск; при ошибке возврат на CPU",
     "motion_fallback": "NVOFA недоступен — используется CPU DIS",
     "motion_restarted": "Метод расчёта движения изменён",

@@ -58,6 +58,12 @@
 
 #include "../src/feed_ipc.h"
 
+// The AMD neural pass (Radeon RDNA3+). The driver and its shaders are ordinary
+// headers; the bridge that wires them into this file is included near the
+// video helpers, after the types it needs.
+#include "amd/amd_runtime.h"
+#include "amd/amd_shaders.h"
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -1113,6 +1119,19 @@ static int SelectedAdapterIndex()
     return static_cast<int>(value);
 }
 
+// Whether this process was asked to run the AMD neural pass. Read early (the
+// adapter has to be picked before anything else), so the bridge's own copy of
+// the predicate is not available yet - the two read the same variables.
+static bool AmdPathRequestedEarly()
+{
+    char v[16] = {};
+    const DWORD got = GetEnvironmentVariableA("NS_MOTION_BACKEND", v, sizeof(v));
+    if (got > 0 && got < sizeof(v) && _stricmp(v, "amd") == 0) return true;
+    memset(v, 0, sizeof(v));
+    const DWORD got2 = GetEnvironmentVariableA("NS_AMD", v, sizeof(v));
+    return got2 > 0 && got2 < sizeof(v) && v[0] == '1';
+}
+
 
 //: The adapter the network ACTUALLY runs on, as a DXGI index. NS_GPU is a
 //: wish: an index that is not a usable NVIDIA adapter falls back to the
@@ -1162,6 +1181,13 @@ static bool InitDisguise()
     // The whole list is logged either way: the index printed here is what
     // NS_GPU takes, so one run tells the user what to choose.
     const int want = SelectedAdapterIndex();
+    // The AMD path lives on a Radeon, so the "NVIDIA only" rule is what would
+    // keep it from starting at all: on a Radeon-only machine the loop below
+    // finds nothing and the worker exits with "no NVIDIA adapter found". When
+    // the AMD path was asked for, the vendor rule accepts 0x1002 as well, and
+    // the chosen card is whichever vendor the machine actually has.
+    const bool amd_path = AmdPathRequestedEarly();
+    const uint32_t wanted_vendor = amd_path ? 0x1002u : 0x10DEu;
     IDXGIAdapter1 *nvidia = nullptr;
     IDXGIAdapter1 *chosen = nullptr;
     int nvidia_idx = -1;
@@ -1182,7 +1208,7 @@ static bool InitDisguise()
             i, desc.Description, desc.VendorId,
             (unsigned long long)(desc.DedicatedVideoMemory >> 20),
             (unsigned)desc.AdapterLuid.HighPart, (unsigned)desc.AdapterLuid.LowPart);
-        const bool usable = desc.VendorId == 0x10DE &&
+        const bool usable = desc.VendorId == wanted_vendor &&
                             !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
         if (want >= 0 && static_cast<int>(i) == want && usable)
         { chosen = candidate; chosen_idx = static_cast<int>(i); continue; }
@@ -1191,8 +1217,8 @@ static bool InitDisguise()
         candidate->Release();
     }
     if (want >= 0 && chosen == nullptr)
-        Log("[host] NS_GPU=%d is not a usable NVIDIA adapter - using the first one",
-            want);
+        Log("[host] NS_GPU=%d is not a usable %s adapter - using the first one",
+            want, amd_path ? "AMD" : "NVIDIA");
     if (chosen != nullptr)
     {
         if (nvidia != nullptr) nvidia->Release();
@@ -1200,7 +1226,13 @@ static bool InitDisguise()
         nvidia_idx = chosen_idx;
         Log("[host] adapter %d selected by NS_GPU", want);
     }
-    if (nvidia == nullptr) { factory->Release(); Log("[host] no NVIDIA adapter found"); return false; }
+    if (nvidia == nullptr)
+    {
+        factory->Release();
+        Log(amd_path ? "[host] no AMD adapter found - the AMD neural pass needs a Radeon"
+                     : "[host] no NVIDIA adapter found");
+        return false;
+    }
     // From here on this is THE adapter: the capture and the duplication read
     // it instead of NS_GPU, so a wish that could not be granted cannot split
     // the pipeline across two cards (issue #34).
@@ -5233,6 +5265,10 @@ static bool DownloadVideoFrame(VideoState &v, std::vector<BYTE> &packed,
 
 #include "frame_generation.inl"
 
+// The AMD neural pass, wired in here: it needs VideoState, the command-list
+// helpers and the shader typedefs above, and RunVideo below calls into it.
+#include "amd/amd_bridge.inl"
+
 static bool ReShadeHasFeature18()
 {
     char path[MAX_PATH] = {};
@@ -5634,12 +5670,25 @@ static int RunVideo()
     int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
                 NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
     NVSDK_NGX_Result create_result = NVSDK_NGX_Result_Fail;
-    // In nr_small mode the feature is created at the work resolution and told
-    // nothing about the screen: it is handed a work-sized frame and returns a
-    // work-sized one, and the scaling on both sides is ours.
-    if (!CreateFeature(vh.width, vh.height, flags, &create_result,
-                       (v.nr_small || !upscale) ? 0 : vh.full_w,
-                       (v.nr_small || !upscale) ? 0 : vh.full_h))
+    // The AMD path replaces the feature end to end. It is asked for through
+    // NS_MOTION_BACKEND=amd (the menu's own switch, next to the NVIDIA/CUP
+    // motion choice) or NS_AMD=1 (a hand test). When it is asked for, no NGX
+    // call is made at all: the engine brings its own device/queue bindings,
+    // and the feature library would only refuse the Radeon anyway.
+    if (AmdRequested())
+    {
+        if (!AmdInit())
+        {
+            // The request failed (no runtime, no HIP, wrong build). The worker
+            // keeps running and passes the raw frame through, exactly as it
+            // does when a feature create is refused - a stranger's log then
+            // carries the reason instead of a dead overlay.
+            Log("[video] AMD neural pass unavailable - SAFE PASSTHROUGH");
+        }
+    }
+    else if (!CreateFeature(vh.width, vh.height, flags, &create_result,
+                            (v.nr_small || !upscale) ? 0 : vh.full_w,
+                            (v.nr_small || !upscale) ? 0 : vh.full_h))
     {
         if (g_submission_failed) return 3;
         // A feature-create refusal is not a reason to kill the desktop
@@ -5768,6 +5817,9 @@ static int RunVideo()
             SafeReleaseFeature(h.feature);
             h.feature = nullptr;
             ReleaseVideoTextures(v);
+            // The AMD engine surfaces are sized by the network extent, which
+            // is about to change - they are rebuilt on the next evaluate.
+            AmdOnVideoResize();
             // 3. New options (profile/params travel with the command).
             // VideoResizeCmd has the same packed layout as VideoHeader.
             memcpy(&g_video_options, &rc, sizeof(g_video_options));
@@ -5784,16 +5836,26 @@ static int RunVideo()
                 if (!WriteExact(g_wire, &bad, sizeof(bad))) return 3;
             }
             NVSDK_NGX_Result rr = NVSDK_NGX_Result_Fail;
-            if (!CreateFeature(rc.width, rc.height, flags, &rr,
-                               (v.nr_small || !rup) ? 0 : rc.full_w,
-                               (v.nr_small || !rup) ? 0 : rc.full_h))
+            if (AmdRequested())
+            {
+                // The AMD engine survives a resize: it keeps its device and
+                // its counters, and only the surfaces changed (the bridge
+                // released them a few lines up). A reload here would restart
+                // the engine's worker threads for nothing.
+                rr = AmdActive() ? NVSDK_NGX_Result_Success : NVSDK_NGX_Result_Fail;
+                if (rr != NVSDK_NGX_Result_Success)
+                    Log("[video] RNSZ: the AMD pass is not running - SAFE PASSTHROUGH");
+            }
+            else if (!CreateFeature(rc.width, rc.height, flags, &rr,
+                                    (v.nr_small || !rup) ? 0 : rc.full_w,
+                                    (v.nr_small || !rup) ? 0 : rc.full_h))
             {
                 if (g_submission_failed) return 3;
                 h.feature = nullptr;
                 Log("[video] RNSZ: feature create failed at %ux%u - SAFE PASSTHROUGH",
                     rc.width, rc.height);
             }
-            warmup_done = (h.feature == nullptr);   // only warm a real NR feature
+            warmup_done = !NrReady();   // only warm a real neural pass
             VideoResizeAck ack = { RESIZE_ACK_MAGIC, 1u, static_cast<uint32_t>(rr), 0u, fh.pts };
             if (!WriteExact(g_wire, &ack, sizeof(ack))) return 10;
             g_force_next_frame = true;   // the new setting must be shown on the next frame
@@ -6063,7 +6125,7 @@ static int RunVideo()
                 // picture even when it did not change. So does anything that
                 // changes what the picture WOULD show - see g_last_out_*.
                 const bool want_bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 ||
-                                         h.feature == nullptr;
+                                         !NrReady();
                 const bool split_on = (fh.reserved & FRAME_FLAG_SPLIT) != 0;
                 const UINT split_cw = v.upscale ? v.full_w : v.w;
                 const uint32_t split_x = split_on
@@ -6122,12 +6184,12 @@ static int RunVideo()
             // the present's fence still cannot complete before it. It is
             // also the mode where frames are cheapest and most numerous, so
             // it is the one with the most round trips to save.
-            defer_tail = !g_hdr_capture && warmup_done && h.feature != nullptr &&
+            defer_tail = !g_hdr_capture && warmup_done && NrReady() &&
                 PresentModeActive(v) &&
                 (fh.reserved & (FRAME_FLAG_BYPASS | FRAME_FLAG_SPLIT | FRAME_FLAG_WANT_PIXELS)) == 0;
             // This frame is being processed: remember what it will show, so the
             // next unchanged frame can tell whether anything differs.
-            g_last_out_bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 || h.feature == nullptr;
+            g_last_out_bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 || !NrReady();
             g_last_out_split_on = (fh.reserved & FRAME_FLAG_SPLIT) != 0;
             g_last_out_split_x = g_last_out_split_on
                 ? SplitXFromFlags(fh.reserved, v.upscale ? v.full_w : v.w) : 0u;
@@ -6153,10 +6215,10 @@ static int RunVideo()
         }
         if (!warmup_done)
         {
-            // No feature (SAFE PASSTHROUGH): nothing to warm up - the raw
+            // No neural pass (SAFE PASSTHROUGH): nothing to warm up - the raw
             // frame goes out as-is. Evaluating with a null handle would
             // fault inside NGX.
-            if (h.feature == nullptr)
+            if (!NrReady())
             {
                 warmup_done = true;
             }
@@ -6165,16 +6227,16 @@ static int RunVideo()
                 const uint32_t warmup = (std::min)(240u, (std::max)(1u, g_video_options.warmup));
                 for (uint32_t i = 0; i < warmup; ++i)
                 {
-                    if (!EvaluateVideo(v, i == 0 ? 1 : 0)) return 7;
+                    if (!EvaluateVideoAny(v, i == 0 ? 1 : 0)) return 7;
                 }
                 warmup_done = true;
-                Log("[pure] direct feature 18 confirmed after %u discarded warmup frames", warmup);
+                Log("[pure] the neural pass confirmed after %u discarded warmup frames", warmup);
             }
         }
         const UINT previous_hdr_split = g_hdr_split;
         g_hdr_split = (fh.reserved & FRAME_FLAG_SPLIT) ?
             SplitXFromFlags(fh.reserved, v.upscale ? v.full_w : v.w) : UINT_MAX;
-        const bool bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 || h.feature == nullptr;
+        const bool bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 || !NrReady();
         g_fg_reset = frame == 0 || fh.reset != 0 || bypass
                      || previous_hdr_split != g_hdr_split
                      || (stall_pending && source_fresh);
@@ -6185,8 +6247,8 @@ static int RunVideo()
         if (!bypass)
         {
             const double t_eval = PhaseNow();
-            const bool ev_ok = EvaluateVideo(v, (frame == 0 || fh.reset != 0) ? 1 : 0,
-                                             defer_tail ? &eval_done : nullptr);
+            const bool ev_ok = EvaluateVideoAny(v, (frame == 0 || fh.reset != 0) ? 1 : 0,
+                                                defer_tail ? &eval_done : nullptr);
             PhaseAdd(PH_EVAL, t_eval);
             if (!ev_ok) return 9;
             if (defer_tail && eval_done <= upload_done)
@@ -6581,7 +6643,22 @@ int main(int argc, char **argv)
     g_show_window = !test && !video && !hide; // video/probe hosts remain hidden
 
     if (!InitDisguise()) return 1;
-    if (!InitNgx()) { Log("[host] NGX unavailable"); return 1; }
+    // On the AMD path NGX is not merely unnecessary, it is unavailable by
+    // definition: the whole point is a machine without an RTX card. The NGX
+    // init failure is therefore not fatal there - the video loop calls into
+    // the AMD bridge instead. Everything else (--test, a game PID) still
+    // needs NGX, so the failure stays fatal for those.
+    if (!InitNgx())
+    {
+        // On the AMD path this is expected and not a failure - but the line
+        // must not read as one: the menu latches its verdict on the token
+        // "NGX unavailable", and on a Radeon that would mark the pass dead
+        // before it ever starts.
+        if (video && AmdPathRequestedEarly())
+            Log("[host] the NGX library is not present - expected on the AMD path, carrying on");
+        else
+        { Log("[host] NGX unavailable"); return 1; }
+    }
     SpoutBridgeInit(h.dev);
 
     if (test) return RunTest();

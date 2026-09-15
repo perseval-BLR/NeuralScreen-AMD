@@ -119,17 +119,20 @@ _ADAPTERS: list | None = None
 
 
 def list_adapters() -> list[tuple[int, str]]:
-    """NVIDIA cards as [(dxgi_index, name), ...], in EnumAdapters1 order.
+    """Cards as [(dxgi_index, name), ...], in EnumAdapters1 order.
 
     The index is what matters: it is what the worker's NS_GPU takes and what
     its "[host] adapter N: ..." lines print, so the menu and the log agree on
     which card is which.
 
-    Only NVIDIA, and never the software renderer: the network cannot run
-    anywhere else, and the capture has to sit on the same card as the network
-    (the frame reaches D3D12 through a shared handle, which does not cross
-    adapters). A machine with one card gets a one-item list, and the menu
-    hides the choice.
+    Only the vendors a neural pass can run on, and never the software
+    renderer: the network cannot run anywhere else, and the capture has to
+    sit on the same card as the network (the frame reaches D3D12 through a
+    shared handle, which does not cross adapters). 0x10DE is NVIDIA and
+    0x1002 is AMD - the AMD path (Radeon RDNA3+) is asked for by the same
+    menu switch that picks the motion backend, so both vendors are listed and
+    the worker decides from its own environment which one it needs. A machine
+    with one card gets a one-item list, and the menu hides the choice.
 
     Enumerated once per process and kept: menu_payload runs on every frame
     while the menu is open, and two DXGI enumerations per frame cost more
@@ -148,8 +151,9 @@ def list_adapters() -> list[tuple[int, str]]:
     try:
         for idx, adapter in enumerate(enum_dxgi_adapters()):
             desc = Device(adapter).desc
-            # 0x10DE is NVIDIA; flag 2 is DXGI_ADAPTER_FLAG_SOFTWARE.
-            if desc.VendorId != 0x10DE or (getattr(desc, "Flags", 0) & 2):
+            # 0x10DE is NVIDIA, 0x1002 is AMD; flag 2 is
+            # DXGI_ADAPTER_FLAG_SOFTWARE.
+            if desc.VendorId not in (0x10DE, 0x1002) or (getattr(desc, "Flags", 0) & 2):
                 continue
             out.append((idx, str(desc.Description).strip()))
     except Exception as exc:
