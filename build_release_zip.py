@@ -156,18 +156,31 @@ def _skip(path: str) -> bool:
         return True
     if norm == "native/SpoutDX.lib":
         return True
+    # The maintainer's own tools: the AMD preparation script and the worker
+    # test driver live in tools/ and ship with the repository. The preparation
+    # script DOES ship (the user runs it) - see the extra list; the worker
+    # driver does not (it needs the built worker and a terminal).
+    if norm == "tools/test_amd_worker.py":
+        return True
     # The worker's source, the NGX headers and the import library are not
     # something the program runs: the archive carries the built DLLs. It could
     # not be rebuilt from the archive in any case - spout_bridge.cpp is
     # dev-only - so shipping half a source tree only invited the question.
     # The repository has all of it.
-    # ... except the two images the program LOADS at run time: the tray icon
-    # (tray.py) and the window icon (taskbar.py). Excluded, they do not crash
-    # anything - both have a fallback - so a build would ship with the wrong
-    # icons and nothing would say why. Named one by one rather than by
-    # extension: the rule is "these two files", and a .png dropped into
-    # native/ tomorrow is still developer baggage.
-    RUNTIME_ASSETS = ("native/neuralscreen.ico",)
+    # ... except the files the program itself runs or hands to the user:
+    #   native/neuralscreen.ico - the tray icon (tray.py)
+    #   native/probe_amd.exe    - the AMD probe the user runs by hand
+    #   native/AMD.md           - the AMD path's instructions
+    #   native/tools/*.py       - the user-facing helper scripts
+    # Excluded, they do not crash anything - but the AMD path would be
+    # undiscoverable and undiagnosable, which is worse. Named one by one
+    # rather than by extension: the rule is "these files", and a .exe dropped
+    # into native/ tomorrow is still developer baggage.
+    RUNTIME_ASSETS = (
+        "native/neuralscreen.ico",
+        "native/probe_amd.exe",
+        "native/AMD.md",
+    )
     if (norm.startswith("native/") and not norm.endswith(".dll")
             and norm not in RUNTIME_ASSETS):
         return True
