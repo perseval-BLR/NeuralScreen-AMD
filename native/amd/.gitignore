@@ -1,0 +1,3 @@
+native/amd/*.exe
+native/amd/*.obj
+native/amd/*.log
