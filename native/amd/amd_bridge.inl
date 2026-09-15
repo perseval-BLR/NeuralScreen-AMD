@@ -36,6 +36,10 @@ struct AmdState
     bool requested = false;   // the machine was asked for the AMD path
     bool active = false;      // runtime loaded, engine ready, frames flow
     bool failed = false;      // latched off after a hard failure
+    //: The card is not a Radeon. A different verdict from `failed`: nothing
+    //: is broken and nothing can be fixed, so the menu says "card not
+    //: supported" rather than "no neural pass".
+    bool unsupported = false;
     bool srgb = true;         // decode sRGB on the way in, encode on the way out
     float shoulder = 0.85f;   // highlight roll-off anchor (see amd_shaders.h)
     float intensity = 1.0f;   // native <-> processed mix, 1.0 = the engine's own frame
@@ -83,21 +87,14 @@ static const char *AmdImageKindName(amd_nr::ImageKind k)
 }
 
 // NS_MOTION_BACKEND=amd (the menu's own switch) or NS_AMD=1 pick the AMD path.
-// Both exist because the menu writes the first one and a hand test wants the
-// second without touching the motion setting.
+// This build defaults to it: no choice recorded means "amd". This is the same
+// predicate the early adapter code uses (AmdPathRequestedEarly) - one source
+// of truth, called from both places.
 static bool AmdRequested()
 {
     static int cached = -1;
-    if (cached >= 0) return cached == 1;
-    char v[16] = {};
-    bool on = false;
-    const DWORD got = GetEnvironmentVariableA("NS_MOTION_BACKEND", v, sizeof(v));
-    if (got > 0 && got < sizeof(v) && _stricmp(v, "amd") == 0) on = true;
-    memset(v, 0, sizeof(v));
-    const DWORD got2 = GetEnvironmentVariableA("NS_AMD", v, sizeof(v));
-    if (got2 > 0 && got2 < sizeof(v) && v[0] == '1') on = true;
-    cached = on ? 1 : 0;
-    return on;
+    if (cached < 0) cached = AmdPathRequestedEarly() ? 1 : 0;
+    return cached == 1;
 }
 
 static std::wstring AmdWorkerDir()
@@ -654,6 +651,24 @@ static bool AmdInit()
     if (shgot > 0 && shgot < sizeof(sh)) g_amd.shoulder = static_cast<float>(atof(sh));
     g_amd.shoulder = (std::max)(0.05f, (std::min)(0.99f, g_amd.shoulder));
     Log("[amd] srgb %s, highlight shoulder %.2f", g_amd.srgb ? "on" : "off", g_amd.shoulder);
+
+    // The card check comes first, because it is the one answer the user can
+    // act on: everything else (a missing runtime, an old driver) has a fix,
+    // and "this is not a Radeon" does not. The program itself keeps running
+    // either way - this only decides whether the pass is attempted, and the
+    // sentence the menu shows.
+    if (!g_radeon_present && !g_amd_any_gpu_flag)
+    {
+        Log("[amd] this GPU is not supported by the AMD neural pass - it needs "
+            "a Radeon RX 7000 or 9000 (RDNA3/RDNA4)");
+        Log("[amd] the card in this machine: %s",
+            g_amd_card_name.empty() ? "(unknown)" : g_amd_card_name.c_str());
+        Log("[amd] the program itself keeps running; the picture is not processed");
+        Log("[amd] ===== AMD path off - the raw frame passes through =====");
+        g_amd.unsupported = true;
+        g_amd.failed = true;
+        return false;
+    }
 
     if (!g_amd.runtime.Load(g_amd.dir, h.dev, h.queue))
     {

@@ -1,9 +1,12 @@
-# AMD / Radeon (experimental)
+# NeuralScreen AMD - the Radeon neural pass
 
-NeuralScreen can run its neural pass on an **AMD Radeon RX 7000 / 9000**
-(RDNA3 / RDNA4) instead of an NVIDIA card. This is experimental: it is the
-same kind of neural rendering, but through a different runtime, and it has
-been tested far less. It either works or it tells you exactly why it did not -
+NeuralScreen AMD runs its neural pass on an **AMD Radeon RX 7000 / 9000**
+(RDNA3 / RDNA4). The program itself starts on any machine: on a card the pass
+does not support it opens, captures and shows its menu as usual, and the
+status line says **card not supported** instead of processing the picture.
+
+The pass is experimental: it is the same kind of neural rendering, but through
+a different runtime, and it has been tested far less. It either works or it tells you exactly why it did not -
 and the "why" is what makes the next fix possible.
 
 **Requirements**

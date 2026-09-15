@@ -227,8 +227,10 @@ class OverlayMenu:
             "split": 0.0,
             # Which card this is and whether NR runs on it. gpu_ok:
             # True/False/None (None - the worker has not answered yet).
+            # gpu_unsupported says the reason was the hardware itself.
             "gpu_text": "",
             "gpu_ok": None,
+            "gpu_unsupported": False,
             "window_mode": False,
             "monitor": "0",
             "monitors": [],
@@ -1850,6 +1852,11 @@ class OverlayMenu:
         if paused:
             return str(s.get("status_off", "not processing")), False
         if failed:
+            # "not supported" is about the hardware and nothing the user
+            # installs will change it; "no neural pass" is everything else
+            # (a missing runtime, an old driver) and reads as fixable.
+            if self.state.get("gpu_unsupported"):
+                return str(s.get("gpu_unsupported", "card not supported")), True
             return str(s.get("gpu_no_nr", "no neural pass")), True
         if bool(self.state.get("idle")):
             return str(s.get("idle_short", "idle")), False

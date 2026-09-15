@@ -288,6 +288,7 @@ class _Pipeline:
         "environment",
         "frame_index",
         "gpu_ok",
+        "gpu_unsupported",
         "gpu_alerted",
         "gpu_switch_pending",
         "fg_alerted",

@@ -34,6 +34,8 @@ def main():
 
     assert all(normalize_backend(v) == "cpu" for v in [None, {}, [], 1, "gpu", "CPU"])
     assert normalize_backend("nvofa") == "nvofa"
+    # The AMD pass is a backend value of its own on this build.
+    assert normalize_backend("amd") == "amd"
     assert _payload()["motion_backend"] == "cpu"
     assert _payload(dict(GOOD, motion_backend="nvofa"))["motion_backend"] == "nvofa"
     with tempfile.TemporaryDirectory() as tmp:
@@ -83,7 +85,8 @@ def main():
     try:
         menu = build(); menu.page = "settings"; paint(menu)
         item = find(menu, "choice", "motion_backend")
-        assert item and item.payload == ["cpu", "nvofa"]
+        assert item and item.payload == ["cpu", "nvofa", "amd"]
+        assert menu._pick("motion_backend", "amd") == [("motion_backend", "amd")]
         assert menu._pick("motion_backend", "nvofa") == [("motion_backend", "nvofa")]
     finally:
         pygame.quit()

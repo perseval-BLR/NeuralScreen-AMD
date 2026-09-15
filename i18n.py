@@ -1710,20 +1710,26 @@ STRINGS = {
 
 for _strings in STRINGS.values():
     _strings.update({
-        "motion_backend": "Neural pass and motion",
-        "motion_nvofa": "NVOFA (experimental)",
-        "motion_amd": "AMD (Radeon RDNA3+)",
+        "motion_backend": "Neural pass",
+        "motion_nvofa": "NVOFA motion (NVIDIA)",
+        "motion_amd": "AMD Radeon (RDNA3+)",
         "motion_hint": "Restarts worker; CPU fallback if unavailable",
         "motion_fallback": "NVOFA unavailable - using CPU DIS",
         "motion_restarted": "Motion backend changed - worker restarted",
+        "gpu_unsupported": "card not supported",
+        "gpu_unsupported_long": "This graphics card is not supported by the AMD neural pass - it needs a Radeon RX 7000 or 9000 (RDNA3/RDNA4). The program itself keeps working; the picture is not processed.",
+        "title": "NeuralScreen AMD",
     })
 STRINGS["ru"].update({
-    "motion_backend": "Нейропроход и движение",
-    "motion_nvofa": "NVOFA (эксперимент)",
-    "motion_amd": "AMD (Radeon RDNA3+)",
+    "motion_backend": "Нейропроход",
+    "motion_nvofa": "NVOFA-движение (NVIDIA)",
+    "motion_amd": "AMD Radeon (RDNA3+)",
     "motion_hint": "Перезапуск; при ошибке возврат на CPU",
     "motion_fallback": "NVOFA недоступен — используется CPU DIS",
     "motion_restarted": "Метод расчёта движения изменён",
+    "gpu_unsupported": "карта не поддерживается",
+    "gpu_unsupported_long": "Эта видеокарта не поддерживается: AMD-нейропроходу нужна Radeon RX 7000 или 9000 (RDNA3/RDNA4). Сама программа работает; картинка остаётся без обработки.",
+    "title": "NeuralScreen AMD",
 })
 
 

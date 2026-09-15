@@ -86,7 +86,7 @@ bool SpoutBridgeInit(ID3D12Device *dev)
     g_spout = new spoutDX();
     if (!g_spout->OpenDirectX11(g_d11))
     { fprintf(stderr, "[spout] OpenDirectX11 failed\n"); SpoutBridgeShutdown(); return false; }
-    g_spout->SetSenderName("NeuralScreen");
+    g_spout->SetSenderName("NeuralScreen AMD");
     g_spout->SetSenderFormat(DXGI_FORMAT_R8G8B8A8_UNORM);
 
     g_enabled = true;

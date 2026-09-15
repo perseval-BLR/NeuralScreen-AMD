@@ -1121,15 +1121,26 @@ static int SelectedAdapterIndex()
 
 // Whether this process was asked to run the AMD neural pass. Read early (the
 // adapter has to be picked before anything else), so the bridge's own copy of
-// the predicate is not available yet - the two read the same variables.
+// the predicate is not available yet - it calls this one.
+//
+// This is the AMD build, so the AMD pass is what it does: no choice recorded
+// means "amd". The menu writes NS_MOTION_BACKEND when the user changes the
+// setting - "cpu" or "nvofa" turn the pass off (and leave the NVIDIA path to
+// a hybrid machine or a test), "amd" asks for it. NS_AMD=0 does the same for
+// a one-off run.
 static bool AmdPathRequestedEarly()
 {
     char v[16] = {};
     const DWORD got = GetEnvironmentVariableA("NS_MOTION_BACKEND", v, sizeof(v));
-    if (got > 0 && got < sizeof(v) && _stricmp(v, "amd") == 0) return true;
-    memset(v, 0, sizeof(v));
-    const DWORD got2 = GetEnvironmentVariableA("NS_AMD", v, sizeof(v));
-    return got2 > 0 && got2 < sizeof(v) && v[0] == '1';
+    if (got > 0 && got < sizeof(v))
+    {
+        if (_stricmp(v, "amd") == 0) return true;
+        if (_stricmp(v, "cpu") == 0 || _stricmp(v, "nvofa") == 0) return false;
+    }
+    char a[8] = {};
+    const DWORD agot = GetEnvironmentVariableA("NS_AMD", a, sizeof(a));
+    if (agot > 0 && agot < sizeof(a) && a[0] == '0') return false;
+    return true;
 }
 
 
@@ -1141,6 +1152,18 @@ static bool AmdPathRequestedEarly()
 //: what they used to do (issue #34: a hybrid laptop ran the network on the
 //: 4090 and the capture on the iGPU, and showed nothing).
 static int g_adapter_index = -1;
+//: Whether the adapter chosen above is a Radeon. The AMD neural pass needs
+//: one and nothing else; on any other card the program is still fully alive
+//: (capture, overlay, menu) and simply says the card is not supported.
+//: Set by the adapter loop in InitDisguise, read by the AMD startup.
+static bool g_radeon_present = false;
+//: NS_AMD_ANY_GPU=1 was set: the vendor rule was lifted on purpose, so the
+//: "no Radeon" verdict is suppressed and the rest of the path can be walked
+//: on a machine that has none (see native/AMD.md).
+static bool g_amd_any_gpu_flag = false;
+//: The description of the card chosen above, so the AMD startup can name the
+//: card it refused instead of leaving the user to guess which one it saw.
+static std::string g_amd_card_name;
 //: Kept for QueryVideoMemoryInfo - what this process has on the card right
 //: now. Logged on every feature create, so a leak shows up in a user's log
 //: as a number that climbs instead of "it crashed after a while" (#48).
@@ -1181,16 +1204,15 @@ static bool InitDisguise()
     // The whole list is logged either way: the index printed here is what
     // NS_GPU takes, so one run tells the user what to choose.
     const int want = SelectedAdapterIndex();
-    // The AMD path lives on a Radeon, so the "NVIDIA only" rule is what would
-    // keep it from starting at all: on a Radeon-only machine the loop below
-    // finds nothing and the worker exits with "no NVIDIA adapter found". When
-    // the AMD path was asked for, the vendor rule accepts 0x1002 as well, and
-    // the chosen card is whichever vendor the machine actually has.
+    // The AMD pass needs a Radeon. The rest of the program - the capture,
+    // the overlay, the menu - does not: on a machine with no Radeon this
+    // build still starts, shows its interface, and says the card is not
+    // supported. So the vendor rule here is a PREFERENCE, not a gate.
     //
-    // NS_AMD_ANY_GPU=1 lifts the vendor rule entirely: for testing the rest of
-    // the path (runtime load, HIP check, engine init) on a machine that has no
-    // Radeon. The engine itself still refuses a non-AMD device - this only
-    // gets the worker far enough to say so in its own words.
+    // The order is: NS_GPU if it names a real card, else the preferred
+    // vendor (Radeon on this build), else the first NVIDIA card, else
+    // anything that is not the software renderer - so the program always
+    // has a card to capture on and can report what it found.
     const bool amd_path = AmdPathRequestedEarly();
     bool amd_any_gpu = false;
     {
@@ -1198,11 +1220,11 @@ static bool InitDisguise()
         const DWORD got = GetEnvironmentVariableA("NS_AMD_ANY_GPU", v, sizeof(v));
         amd_any_gpu = amd_path && got > 0 && got < sizeof(v) && v[0] == '1';
     }
-    const uint32_t wanted_vendor = amd_path && !amd_any_gpu ? 0x1002u : 0x10DEu;
-    IDXGIAdapter1 *nvidia = nullptr;
-    IDXGIAdapter1 *chosen = nullptr;
-    int nvidia_idx = -1;
-    int chosen_idx = -1;
+    g_amd_any_gpu_flag = amd_any_gpu;
+
+    // Every hardware adapter, in enumeration order, with the vendor noted.
+    struct Candidate { IDXGIAdapter1 *dev; int idx; uint32_t vendor; };
+    std::vector<Candidate> cards;
     for (UINT i = 0; ; ++i)
     {
         IDXGIAdapter1 *candidate = nullptr;
@@ -1219,33 +1241,69 @@ static bool InitDisguise()
             i, desc.Description, desc.VendorId,
             (unsigned long long)(desc.DedicatedVideoMemory >> 20),
             (unsigned)desc.AdapterLuid.HighPart, (unsigned)desc.AdapterLuid.LowPart);
-        const bool vendor_ok = amd_any_gpu ? (desc.VendorId == 0x10DEu ||
-                                              desc.VendorId == 0x1002u)
-                                           : desc.VendorId == wanted_vendor;
-        const bool usable = vendor_ok && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
-        if (want >= 0 && static_cast<int>(i) == want && usable)
-        { chosen = candidate; chosen_idx = static_cast<int>(i); continue; }
-        if (nvidia == nullptr && usable)
-        { nvidia = candidate; nvidia_idx = static_cast<int>(i); continue; }
-        candidate->Release();
+        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { candidate->Release(); continue; }
+        cards.push_back({candidate, static_cast<int>(i), desc.VendorId});
     }
-    if (want >= 0 && chosen == nullptr)
-        Log("[host] NS_GPU=%d is not a usable %s adapter - using the first one",
-            want, amd_path ? "AMD" : "NVIDIA");
-    if (chosen != nullptr)
+
+    auto take = [&cards](int slot) -> IDXGIAdapter1 *
     {
-        if (nvidia != nullptr) nvidia->Release();
-        nvidia = chosen;
-        nvidia_idx = chosen_idx;
-        Log("[host] adapter %d selected by NS_GPU", want);
+        if (slot < 0 || slot >= static_cast<int>(cards.size())) return nullptr;
+        IDXGIAdapter1 *dev = cards[slot].dev;
+        cards[slot].dev = nullptr;   // ownership moves to the caller
+        return dev;
+    };
+
+    int pick = -1;
+    // 1. NS_GPU names a card outright.
+    if (want >= 0)
+    {
+        for (int k = 0; k < static_cast<int>(cards.size()); ++k)
+            if (cards[k].idx == want) { pick = k; break; }
+        if (pick < 0)
+            Log("[host] NS_GPU=%d is not a usable adapter - choosing for the machine", want);
     }
-    if (nvidia == nullptr)
+    // 2. The vendor this build wants: a Radeon.
+    if (pick < 0 && amd_path && !amd_any_gpu)
+        for (int k = 0; k < static_cast<int>(cards.size()); ++k)
+            if (cards[k].vendor == 0x1002u) { pick = k; break; }
+    // 3. An NVIDIA card (a hybrid machine, or the NVIDIA path on request).
+    if (pick < 0)
+        for (int k = 0; k < static_cast<int>(cards.size()); ++k)
+            if (cards[k].vendor == 0x10DEu) { pick = k; break; }
+    // 4. Anything at all, so the program starts and can say what it found.
+    if (pick < 0 && !cards.empty()) pick = 0;
+
+    if (pick < 0)
     {
+        for (auto &c : cards)
+            if (c.dev != nullptr) c.dev->Release();
         factory->Release();
-        Log(amd_path ? "[host] no AMD adapter found - the AMD neural pass needs a Radeon"
-                     : "[host] no NVIDIA adapter found");
+        Log("[host] no hardware adapter found - the program needs a GPU to capture on");
         return false;
     }
+    const uint32_t picked_vendor = cards[pick].vendor;
+    const int picked_idx = cards[pick].idx;
+    g_radeon_present = picked_vendor == 0x1002u;
+    // The name goes into the AMD startup's "not supported" line, so it is
+    // the card the WORKER picked - not whatever NVAPI would say.
+    {
+        IDXGIAdapter1 *named = cards[pick].dev;
+        DXGI_ADAPTER_DESC1 nd = {};
+        if (named != nullptr && SUCCEEDED(named->GetDesc1(&nd)))
+        {
+            g_amd_card_name.clear();
+            for (wchar_t c : std::wstring(nd.Description))
+                g_amd_card_name.push_back(static_cast<char>(c & 0x7F));
+        }
+    }
+    if (g_radeon_present)
+        Log("[host] adapter %d is the Radeon - the AMD pass runs there", picked_idx);
+    // Every card except the chosen one is released here; the chosen one
+    // moves to the caller.
+    for (int k = 0; k < static_cast<int>(cards.size()); ++k)
+        if (k != pick && cards[k].dev != nullptr) cards[k].dev->Release();
+    IDXGIAdapter1 *nvidia = take(pick);
+    const int nvidia_idx = picked_idx;
     // From here on this is THE adapter: the capture and the duplication read
     // it instead of NS_GPU, so a wish that could not be granted cannot split
     // the pipeline across two cards (issue #34).
@@ -5683,21 +5741,30 @@ static int RunVideo()
     int flags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure |
                 NVSDK_NGX_DLSS_Feature_Flags_DepthInverted;
     NVSDK_NGX_Result create_result = NVSDK_NGX_Result_Fail;
-    // The AMD path replaces the feature end to end. It is asked for through
-    // NS_MOTION_BACKEND=amd (the menu's own switch, next to the NVIDIA/CUP
-    // motion choice) or NS_AMD=1 (a hand test). When it is asked for, no NGX
-    // call is made at all: the engine brings its own device/queue bindings,
-    // and the feature library would only refuse the Radeon anyway.
+    // The AMD path replaces the feature end to end, and on this build it is
+    // what the program does by default (see AmdPathRequestedEarly: the menu
+    // writes "cpu"/"nvofa" to turn it off). When it is on, no NGX call is
+    // made at all: the engine brings its own device/queue bindings, and the
+    // feature library would only refuse the Radeon anyway.
     if (AmdRequested())
     {
         if (!AmdInit())
         {
-            // The request failed (no runtime, no HIP, wrong build). The worker
-            // keeps running and passes the raw frame through, exactly as it
-            // does when a feature create is refused - a stranger's log then
-            // carries the reason instead of a dead overlay.
-            Log("[video] AMD neural pass unavailable - SAFE PASSTHROUGH");
+            // The pass did not start. The reasons are all named in the log -
+            // the card is not a Radeon, the runtime is missing, the driver
+            // is too old - and none of them is fatal to the program: the
+            // worker keeps running and passes the raw frame through, so the
+            // overlay, the menu and the capture all stay alive while the
+            // menu shows the verdict.
+            Log("[video] the neural pass is not running - SAFE PASSTHROUGH");
         }
+    }
+    else if (h.params == nullptr)
+    {
+        // NGX never came up (a Radeon, a stripped driver) and the AMD path
+        // is switched off: there is nothing to create a feature with. The
+        // raw frame passes through and the program stays alive.
+        Log("[video] no neural runtime on this machine - SAFE PASSTHROUGH");
     }
     else if (!CreateFeature(vh.width, vh.height, flags, &create_result,
                             (v.nr_small || !upscale) ? 0 : vh.full_w,

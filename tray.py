@@ -72,7 +72,7 @@ class TrayController:
         self._state.update(kw)
         if self._icon is not None:
             try:
-                self._icon.title = (f"NeuralScreen — NR {'ON' if self._state['nr'] else 'OFF'}"
+                self._icon.title = (f"NeuralScreen AMD — NR {'ON' if self._state['nr'] else 'OFF'}"
                                     f" | scale {self._state['scale']:.2f}")
                 self._icon.update_menu()
             except Exception:

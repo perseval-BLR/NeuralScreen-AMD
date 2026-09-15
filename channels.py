@@ -243,6 +243,7 @@ def forget_verdict(st) -> None:
     same process, so the verdict it gave still stands.
     """
     st.gpu_ok = None
+    st.gpu_unsupported = False
     st.gpu_alerted = False
 
 

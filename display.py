@@ -267,6 +267,12 @@ class Display:
         except Exception:
             pass
         pygame.init()
+        # The window caption is an IDENTIFIER, not the product name: the
+        # test suite finds this window by exactly "NeuralScreen"
+        # (test_focus_z_order, test_monitor_windows), and the worker's own
+        # present window shares the title so FindWindowW can pair them.
+        # The product name the user reads lives in the tray, the taskbar
+        # button and the menu header - see the "title" string in i18n.
         pygame.display.set_caption("NeuralScreen")
         # Borderless windowed instead of FULLSCREEN: a pygame fullscreen window
         # loses its rendering on click/focus (the screen freezes while the loop

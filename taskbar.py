@@ -78,7 +78,7 @@ class TaskbarWindow:
     like a left click on the tray icon.
     """
 
-    def __init__(self, commands: queue.Queue, title: str = "NeuralScreen"):
+    def __init__(self, commands: queue.Queue, title: str = "NeuralScreen AMD"):
         self._commands = commands
         self._title = title
         self._hwnd = None

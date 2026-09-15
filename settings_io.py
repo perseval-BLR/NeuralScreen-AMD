@@ -531,9 +531,20 @@ NR_VERDICT_FAIL = ("feature 18 create failed",   # [pure], the direct refusal
                    "NR feature unavailable",     # [video], SAFE PASSTHROUGH
                    "NGX unavailable",            # [host], nothing came up
                    "no NVIDIA adapter found",    # [host], nothing to run on
-                   "no AMD adapter found",       # [host], the AMD path asked for a Radeon
-                   "AMD neural pass unavailable",  # [video], the AMD request failed
-                   "[amd] the runtime did not come up:")  # [amd], the engine's own reason
+                   "[amd] the runtime did not come up:",  # [amd], the engine's own reason
+                   "the neural pass is not running")      # [video], SAFE PASSTHROUGH
+
+#: The card is not the kind the pass runs on. A verdict of its own: nothing
+#: is broken and nothing the user can install will change it, so the menu
+#: says "card not supported" rather than "no neural pass".
+NR_VERDICT_UNSUPPORTED = ("[amd] this GPU is not supported",
+                          "no AMD adapter found")
+
+
+def nr_verdict_unsupported(lines) -> bool:
+    """Whether the refusal was the HARDWARE rather than a fixable fault."""
+    return any(token in line for line in lines
+               for token in NR_VERDICT_UNSUPPORTED)
 
 
 def nr_verdict(lines):
@@ -542,7 +553,20 @@ def nr_verdict(lines):
     None means the worker has not said yet - which is not a failure. A card
     that takes its time still works, and treating silence as a refusal
     would be worse than the bug the callers guard against.
+
+    The "card not supported" line is an absolute statement about the
+    hardware, and it is emitted BEFORE the pass gives up, so it is checked
+    over the whole window first: newest-first alone would read the later
+    "the neural pass is not running" line as the verdict and lose the
+    reason the user can act on.
+
+    The caller may hand over an iterator (`reversed(...)`), and this walks
+    the lines twice - so it is materialised once, here.
     """
+    lines = list(lines)
+    for line in lines:
+        if any(token in line for token in NR_VERDICT_UNSUPPORTED):
+            return False
     for line in lines:
         if any(token in line for token in NR_VERDICT_OK):
             return True
@@ -566,10 +590,14 @@ def refresh_gpu_ok(st) -> None:
     # architecture" lives inside nvngx_dlssnr.dll and never reaches its
     # stderr), and SAFE PASSTHROUGH is the same verdict - the worker stays
     # alive and shows the raw frame, so: no feature, no NR.
-    verdict = nr_verdict(reversed(st.worker_logs[-80:]))
+    tail = list(st.worker_logs[-80:])
+    verdict = nr_verdict(reversed(tail))
     if verdict is None:
         return
     st.gpu_ok = verdict
+    # Which reason it was. The menu says "card not supported" for the one
+    # the user cannot fix and "no neural pass" for everything else.
+    st.gpu_unsupported = bool(verdict is False and nr_verdict_unsupported(tail))
     if not verdict:
         # The red dot alone was not enough: in issue #29 the user picked a
         # card that cannot run the pass and nothing on screen said so. One
@@ -583,10 +611,22 @@ def refresh_gpu_ok(st) -> None:
             # the people who reported it as a black screen had not seen it
             # at all. The standing version of the same fact is in the menu's
             # status line, for whoever looks later.
-            st.display.alert(UI_STRINGS[st.lang].get(
-                "gpu_nr_fail",
-                "This GPU cannot run the neural pass - the picture stays "
-                "unprocessed"), 8.0)
+            #
+            # The hardware verdict gets its own sentence: "this card is not
+            # supported" is the end of the conversation, while "cannot run
+            # the pass" invites the user to look for a fix that may exist.
+            if st.gpu_unsupported:
+                st.display.alert(UI_STRINGS[st.lang].get(
+                    "gpu_unsupported_long",
+                    "This graphics card is not supported by the AMD neural "
+                    "pass - it needs a Radeon RX 7000 or 9000 (RDNA3/RDNA4). "
+                    "The program keeps working; the picture is not processed."),
+                    10.0)
+            else:
+                st.display.alert(UI_STRINGS[st.lang].get(
+                    "gpu_nr_fail",
+                    "This GPU cannot run the neural pass - the picture stays "
+                    "unprocessed"), 8.0)
 
 
 # FG's own refusal lines, the same shape as NR's: the worker says what the
@@ -856,6 +896,9 @@ def menu_payload(st) -> dict:
         "about": dict(getattr(st, "environment", None) or {},
                       gpu=st.gpu_text or ""),
         "gpu_ok": st.gpu_ok,
+        # The reason behind a failed verdict, when the reason is the card
+        # itself. The menu's status line picks its sentence off this.
+        "gpu_unsupported": bool(getattr(st, "gpu_unsupported", False)),
         "window_mode": st.window_hwnd is not None,
         "monitor_devicename": st.capture.devicename,
         "monitors": monitor_entries,

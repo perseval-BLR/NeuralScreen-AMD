@@ -222,7 +222,7 @@ int wmain(int argc, wchar_t **argv) {
                 0) == 0;
             out("expected 3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8\n");
             out("verdict: %s\n", hash_match
-                ? "this is the build NeuralScreen Red knows how to drive"
+                ? "this is the build NeuralScreen AMD knows how to drive"
                 : "UNKNOWN build - offsets are not verified against this file");
         } else {
             out("sha256: could not read the file\n");

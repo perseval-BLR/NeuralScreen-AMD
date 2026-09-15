@@ -22,7 +22,7 @@
 #include <shlwapi.h>
 #include <string>
 
-static const wchar_t *kTitle = L"NeuralScreen";
+static const wchar_t *kTitle = L"NeuralScreen AMD";
 
 static void Fail(const wchar_t *text)
 {

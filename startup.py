@@ -388,6 +388,7 @@ def bring_up(st) -> None:
     gpu_info = gpu_probe(_working_card_name(st.cfg))
     st.gpu_text = gpu_describe(gpu_info)
     st.gpu_ok: bool | None = None
+    st.gpu_unsupported = False    # the verdict's reason, when it is the card
     st.gpu_alerted = False          # the "cannot run the pass" alert, once per verdict
     st.fg_alerted = False           # the "FG could not start" alert, re-armed by the switch
     st.gpu_switch_pending = False   # set by apply_gpu: a split pipeline is worth an alert
@@ -463,7 +464,7 @@ def bring_up(st) -> None:
     # window gives the program a real taskbar button; clicking it sends
     # the same "settings" command as a left click on the tray (user
     # rule 2026-09-09: the program must always show in the taskbar).
-    st.taskbar = TaskbarWindow(st.tray_commands, "NeuralScreen")
+    st.taskbar = TaskbarWindow(st.tray_commands, "NeuralScreen AMD")
     st.taskbar.start()
     print("[main] taskbar window started")
 

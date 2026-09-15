@@ -1,8 +1,9 @@
-# NeuralScreen
+# NeuralScreen AMD
 
-**NVIDIA's DLSS 5 neural renderer, applied to your whole Windows desktop in
-real time.** Everything on screen — games, video, photos — goes through the
-same neural network that DLSS 5 games use, and comes back sharper.
+**DLSS 5-class neural rendering on an AMD Radeon, applied to your whole
+Windows desktop in real time.** Everything on screen — games, video, photos —
+goes through the same neural network that DLSS 5 games use, and comes back
+sharper.
 
 > The guide below gets you running. How it works and what was measured:
 > **[TECHNICAL.md](TECHNICAL.md)**. Русская версия:
