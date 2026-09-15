@@ -1,0 +1,14 @@
+probe_amd - the AMD neural runtime check
+directory: C:\Users\User\AppData\Local/Temp/amd-user-sim
+
+dlssnr_amd_pass1.dll             FOUND  (6.8 MB)
+dlssnr_on_amd_weights.bin        MISSING   <- required
+dlssnr_on_amd.ini                MISSING
+
+size 7156224 bytes (known build: 7156224) OK
+sha256 3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8
+expected 3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8
+verdict: this is the build NeuralScreen Red knows how to drive
+
+HIP: amdhip64_7.dll not found (error 126) - install Adrenalin 26.1.1 or newer,
+     the HIP 7 runtime ships with it

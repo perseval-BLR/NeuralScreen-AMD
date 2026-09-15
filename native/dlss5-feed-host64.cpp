@@ -1186,8 +1186,19 @@ static bool InitDisguise()
     // finds nothing and the worker exits with "no NVIDIA adapter found". When
     // the AMD path was asked for, the vendor rule accepts 0x1002 as well, and
     // the chosen card is whichever vendor the machine actually has.
+    //
+    // NS_AMD_ANY_GPU=1 lifts the vendor rule entirely: for testing the rest of
+    // the path (runtime load, HIP check, engine init) on a machine that has no
+    // Radeon. The engine itself still refuses a non-AMD device - this only
+    // gets the worker far enough to say so in its own words.
     const bool amd_path = AmdPathRequestedEarly();
-    const uint32_t wanted_vendor = amd_path ? 0x1002u : 0x10DEu;
+    bool amd_any_gpu = false;
+    {
+        char v[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_ANY_GPU", v, sizeof(v));
+        amd_any_gpu = amd_path && got > 0 && got < sizeof(v) && v[0] == '1';
+    }
+    const uint32_t wanted_vendor = amd_path && !amd_any_gpu ? 0x1002u : 0x10DEu;
     IDXGIAdapter1 *nvidia = nullptr;
     IDXGIAdapter1 *chosen = nullptr;
     int nvidia_idx = -1;
@@ -1208,8 +1219,10 @@ static bool InitDisguise()
             i, desc.Description, desc.VendorId,
             (unsigned long long)(desc.DedicatedVideoMemory >> 20),
             (unsigned)desc.AdapterLuid.HighPart, (unsigned)desc.AdapterLuid.LowPart);
-        const bool usable = desc.VendorId == wanted_vendor &&
-                            !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
+        const bool vendor_ok = amd_any_gpu ? (desc.VendorId == 0x10DEu ||
+                                              desc.VendorId == 0x1002u)
+                                           : desc.VendorId == wanted_vendor;
+        const bool usable = vendor_ok && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
         if (want >= 0 && static_cast<int>(i) == want && usable)
         { chosen = candidate; chosen_idx = static_cast<int>(i); continue; }
         if (nvidia == nullptr && usable)

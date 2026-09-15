@@ -27,6 +27,10 @@ files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 extra = [
     # The BYO folder doc ships so user installs have the drop location ready.
     "native/libraries/README.md",
+    # The AMD path's instructions: how to prepare the runtime, how to turn it
+    # on, what the [amd] log lines mean. Same reason as the BYO doc - the
+    # folder it describes is right there.
+    "native/AMD.md",
     "native/nvngx_dlssg.dll",
     "resolution_limits.py",
     "NeuralScreen.exe",
@@ -38,6 +42,11 @@ extra = [
     # feature library checks; without it Neural Rendering does not start.
     "native/nvngx.dll_ns-forwarder.dll",
     "native/nvngx_dlssnr.dll",
+    # The AMD probe: the first thing to run on a Radeon machine. It answers
+    # "are the files here, is this the known build, does HIP see the card"
+    # before any of the pass is wired in - and its log is what a report
+    # should carry when the pass does not start.
+    "native/probe_amd.exe",
 ]
 # tcl/tk stays out of the archive: the tkinter settings window is gone and the
 # whole interface lives in the overlay menu. Nothing in the project imports
