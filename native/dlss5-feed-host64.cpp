@@ -172,6 +172,82 @@ static const char *NgxResultName(NVSDK_NGX_Result r)
     }
 }
 
+static const char *HresultName(HRESULT hr)
+{
+    // Hex alone is not a diagnosis. The user's log is the only evidence we
+    // get, and "0x887A0004" tells them nothing while DXGI_ERROR_UNSUPPORTED
+    // tells them (and us) which family the failure belongs to. Covers the
+    // codes that actually appear at device creation, submission and fence
+    // waits; the NGX codes have their own table above.
+    switch (static_cast<unsigned>(hr))
+    {
+    case 0x00000000: return "S_OK";
+    case 0x887A0001: return "DXGI_ERROR_INVALID_CALL";
+    case 0x887A0002: return "DXGI_ERROR_NOT_FOUND";
+    case 0x887A0004: return "DXGI_ERROR_UNSUPPORTED";
+    case 0x887A0005: return "DXGI_ERROR_DEVICE_REMOVED";
+    case 0x887A0006: return "DXGI_ERROR_DEVICE_HUNG";
+    case 0x887A0007: return "DXGI_ERROR_DEVICE_RESET";
+    case 0x887A000A: return "DXGI_ERROR_WAS_STILL_DRAWING";
+    case 0x887A0020: return "DXGI_ERROR_DRIVER_INTERNAL_ERROR";
+    case 0x887A0022: return "DXGI_ERROR_NOT_CURRENTLY_AVAILABLE";
+    case 0x887A002B: return "DXGI_ERROR_ACCESS_LOST";
+    case 0x887A002D: return "DXGI_ERROR_SDK_COMPONENT_MISSING";
+    // The D3D12 redist family: an empty or stale D3D12\ folder next to the
+    // host (Agility SDK) makes EVERY device create in this process fail with
+    // 0x887E0003, which reads as a driver fault until it is named.
+    case 0x887E0001: return "D3D12_ERROR_ADAPTER_NOT_FOUND";
+    case 0x887E0002: return "D3D12_ERROR_DRIVER_VERSION_MISMATCH";
+    case 0x887E0003: return "D3D12_ERROR_INVALID_REDIST";
+    case 0x80070057: return "E_INVALIDARG";
+    case 0x80004005: return "E_FAIL";
+    case 0x80004002: return "E_NOINTERFACE";
+    case 0x8007000E: return "E_OUTOFMEMORY";
+    default:         return "?";
+    }
+}
+
+// What a device-creation failure means, in the words a stranger's report
+// needs. DXGI_ERROR_UNSUPPORTED is the one that misleads most: it reads as
+// "this GPU cannot do D3D12" when the real cause is usually in the process
+// (a D3D12 debug layer switched on system-wide, a stale Agility redist
+// folder) - and the AMD path is exactly where a user will hit it, because a
+// Radeon in a hybrid machine is a card the driver may refuse.
+static void ExplainDeviceCreateFailure(HRESULT hr)
+{
+    Log("[host] D3D12CreateDevice failed 0x%08X (%s)", hr, HresultName(hr));
+    switch (static_cast<unsigned>(hr))
+    {
+    case 0x887A0004:  // DXGI_ERROR_UNSUPPORTED
+        Log("[host] this is a create-time refusal, not a 'the card cannot do "
+            "D3D12' verdict. The usual causes, in order: a D3D12 debug layer "
+            "switched on for this process (DirectX Control Panel, a leftover "
+            "from a graphics debugger, DLSS5_FEED_D3D12_DEBUG in the "
+            "environment) - clear it and retry; a stale or empty D3D12\\ "
+            "folder next to the program (Agility SDK redist); an adapter the "
+            "installed driver will not hand out (check that the Radeon is the "
+            "selected adapter and its driver is current)");
+        break;
+    case 0x887E0003:  // D3D12_ERROR_INVALID_REDIST
+        Log("[host] D3D12_ERROR_INVALID_REDIST: a D3D12\\ folder next to the "
+            "program is empty or from another SDK version. Delete it (or "
+            "restore the one the archive shipped) and retry");
+        break;
+    case 0x887A0005:  // DEVICE_REMOVED
+    case 0x887A0007:  // DEVICE_RESET
+        Log("[host] the device was already gone before creation finished - "
+            "the previous submission took it down (TDR). The reason is in the "
+            "lines above");
+        break;
+    case 0x8007000E:  // E_OUTOFMEMORY
+        Log("[host] out of memory at device creation - close what is holding "
+            "VRAM (browsers, other overlays) and retry");
+        break;
+    default:
+        break;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -808,15 +884,52 @@ static bool WaitFenceValue(ID3D12Fence *f, UINT64 v, DWORD ms)
     ResetEvent(h.fence_event);
     if (f->GetCompletedValue() >= v) return true;
     if (FAILED(f->SetEventOnCompletion(v, h.fence_event))) return false;
+    // Wait in slices, checking the device between them. A fence that will
+    // never be signalled (the device is gone) otherwise blocks for the whole
+    // timeout - and the timeouts here are seconds: 60 s on an abort, 30 s on
+    // a create. On the AMD path that is not a corner case: a frame costs tens
+    // of milliseconds when it works at all, and the first frames are slow by
+    // design, so a dead device would read as "the program froze" rather than
+    // "the card was removed". Slices bound the worst case to the slice and
+    // let the report name the reason at once.
     const ULONGLONG deadline = GetTickCount64() + ms;
+    const DWORD slice = 250;
     for (;;)
     {
         const ULONGLONG now_ms = GetTickCount64();
-        const DWORD left = now_ms >= deadline ? 0 : (DWORD)(deadline - now_ms);
-        if (WaitForSingleObject(h.fence_event, left) != WAIT_OBJECT_0) return false;
-        const UINT64 now = f->GetCompletedValue();
-        if (now == UINT64_MAX) return false;
-        if (now >= v) return true;
+        if (now_ms >= deadline)
+        {
+            // The last slice never runs past the caller's deadline.
+            if (WaitForSingleObject(h.fence_event, 0) != WAIT_OBJECT_0) return false;
+        }
+        const ULONGLONG left_total = now_ms >= deadline ? 0 : (deadline - now_ms);
+        const DWORD wait_ms = static_cast<DWORD>(
+            left_total < slice ? left_total : slice);
+        const DWORD waited = WaitForSingleObject(h.fence_event, wait_ms);
+        if (waited == WAIT_OBJECT_0)
+        {
+            const UINT64 now = f->GetCompletedValue();
+            if (now == UINT64_MAX) return false;
+            if (now >= v) return true;
+            // A stale signal from an older registration: keep waiting.
+            ResetEvent(h.fence_event);
+            continue;
+        }
+        if (waited != WAIT_TIMEOUT) return false;
+        // Between slices: is the device still there? GetCompletedValue
+        // returns UINT64_MAX once it is removed, and the fence will never be
+        // signalled - fail now instead of at the deadline.
+        if (f->GetCompletedValue() == UINT64_MAX)
+        {
+            Log("[host] fence wait aborted: the device was removed");
+            return false;
+        }
+        if (h.dev != nullptr && FAILED(h.dev->GetDeviceRemovedReason()))
+        {
+            Log("[host] fence wait aborted: %s",
+                HresultName(h.dev->GetDeviceRemovedReason()));
+            return false;
+        }
     }
 }
 
@@ -1316,7 +1429,7 @@ static bool InitDisguise()
     hr = create_device(nvidia, D3D_FEATURE_LEVEL_11_0, __uuidof(ID3D12Device),
                        reinterpret_cast<void **>(&h.dev));
     nvidia->Release();
-    if (FAILED(hr)) { Log("[host] D3D12CreateDevice failed 0x%08X", hr); return false; }
+    if (FAILED(hr)) { ExplainDeviceCreateFailure(hr); return false; }
 
     // DRED breadcrumbs: when the device is removed (TDR on Win10, issue #1)
     // the reason code and the faulting command list are the only way to tell
