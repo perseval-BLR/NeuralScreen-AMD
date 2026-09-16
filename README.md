@@ -1,11 +1,11 @@
 # NeuralScreen AMD
 
 > [!IMPORTANT]
-> **This is an experimental build.** The AMD neural pass has never run on a
-> real Radeon: it was written against the specifications of two working
+> **This is a test build: its purpose is to collect logs from real AMD
+> Radeon cards and see how it goes on them.** The neural pass has never run
+> on a real Radeon: it was written against the specifications of two working
 > implementations and verified by compilation and tests, but there was no AMD
-> card on this bench. **The point of this release is to collect logs from real
-> cards**, so the launch can be brought up to working order.
+> card on this bench.
 >
 > Run it on your Radeon and attach to an issue: `NeuralScreen.log` next to
 > the program, `native\probe_amd.log` (the probe, `native\probe_amd.exe`) and
@@ -15,10 +15,10 @@
 > itself (`native/AMD.md` explains each line), and even "nothing worked" is a
 > result - the log shows exactly where it stopped.
 
-**DLSS 5-class neural rendering on an AMD Radeon, applied to your whole
-Windows desktop in real time.** Everything on screen — games, video, photos —
-goes through the same neural network that DLSS 5 games use, and comes back
-sharper.
+**The aim: DLSS 5-class neural rendering on an AMD Radeon, over the whole
+Windows desktop.** The network is the same one DLSS 5 games use; on a Radeon
+it would go through a different runtime. Whether it comes up at all is what
+this build is meant to find out.
 
 > The guide below gets you running. How it works and what was measured:
 > **[TECHNICAL.md](TECHNICAL.md)**. Русская версия:

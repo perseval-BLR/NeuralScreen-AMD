@@ -4,8 +4,8 @@ How it works, what was measured, and why the decisions went the way
 they did. For installing and using the program see
 [README.md](README.md).
 
-> **This copy belongs to NeuralScreen AMD** - the build whose neural pass runs
-> on a Radeon. The pipeline, the capture, the overlay and the recordings are
+> **This copy belongs to NeuralScreen AMD** - the test build whose neural
+> pass aims at a Radeon. The pipeline, the capture, the overlay and the recordings are
 > the same code the NVIDIA build carries, and this document describes them as
 > measured. The AMD-specific part - the runtime, its preparation and the
 > `[amd]` log lines - is in **[native/AMD.md](native/AMD.md)**. Numbers
