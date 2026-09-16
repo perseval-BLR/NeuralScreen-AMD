@@ -230,6 +230,10 @@ for f in files + extra:
         continue
     uniq.append(norm)
 
+# The license must be in every archive: a build that lost it is not a release.
+if "LICENSE" not in uniq:
+    raise SystemExit("LICENSE is missing from the archive payload. Refusing to build.")
+
 out = f"neuralscreen-amd-v{VERSION}-full.zip"
 
 # The runtime kernel check: the v1.5.0 zip shipped a Blackwell-only DLL as
