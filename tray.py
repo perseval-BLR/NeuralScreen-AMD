@@ -120,7 +120,7 @@ class TrayController:
     def start(self) -> None:
         """Start the tray in its own thread (does not block main)."""
         self._icon = pystray.Icon("neuralscreen", _make_icon(),
-                                  "NeuralScreen", self._build_menu())
+                                  "NeuralScreen AMD", self._build_menu())
         self._set_state()
         self._thread = threading.Thread(target=self._icon.run, daemon=True)
         self._thread.start()

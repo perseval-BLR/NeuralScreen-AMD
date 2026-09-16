@@ -15,7 +15,7 @@ WHAT IT EXPECTS TO FIND
       dlssnr_on_amd_weights.bin      the network weights
 
   The installer builds the weights from a copy of nvngx_dlssnr.dll (build
-  310.8.0.0) that must be in the same folder. NeuralScreen already ships that
+  310.8.0.0) that must be in the same folder. This build already ships that
   file as part of its own NVIDIA path (native/nvngx_dlssnr.dll), so the
   default folder is the program's own native\\ directory:
 
@@ -215,9 +215,9 @@ def main() -> int:
 
     dst.write_bytes(bytes(data))
     print(f"written: {dst}")
-    print("\nNext: in NeuralScreen open the settings page and set "
-          "'Neural pass and motion' to 'AMD (Radeon RDNA3+)', then restart "
-          "the pipeline. The worker's log ([amd] lines) says what happened.")
+    print("\nNext: in NeuralScreen AMD open the settings page and set "
+          "'Neural pass' to 'AMD Radeon (RDNA3+)', then restart the pipeline. "
+          "The worker's log ([amd] lines) says what happened.")
     return 0
 
 

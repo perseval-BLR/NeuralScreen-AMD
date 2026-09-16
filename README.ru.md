@@ -34,7 +34,7 @@ Rendering, применённая ко всему рабочему столу Wi
 
 | Меню, светлая тема | Меню, тёмная тема | Настройки | Список окон |
 |---|---|---|---|
-| ![светлая](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-light.png) | ![тёмная](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-dark.png) | ![настройки](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-settings.png) | ![окна](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-windows.png) |
+| ![светлая](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-main-light.png) | ![тёмная](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-main-dark.png) | ![настройки](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-settings.png) | ![окна](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-windows.png) |
 
 *Одно меню внутри оверлея; ползунок **Шторка до / после** делит экран
 пополам, чтобы было видно, что именно делает эффект.*
@@ -51,7 +51,7 @@ Rendering, применённая ко всему рабочему столу Wi
   |---|---|
   | **RX 9000 / 7000** (RDNA4 / RDNA3) | ✅ поддерживаются; на 9070 XT ~30 мс на мегапиксель, на RDNA3 медленнее (нет FP8 — сеть считает в FP16) |
   | **RX 6000** (RDNA2) и старше | ❌ карта не поддерживается — программа работает, обработки нет |
-  | **NVIDIA RTX** | ❌ на этой сборке не используется — см. основную ветку проекта |
+  | **NVIDIA RTX** | ❌ не цель этой сборки - сборка для NVIDIA: [perseval-BLR/NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) |
 
 - **Драйвер AMD Adrenalin 26.1.1 или новее** и обновлённая Windows. Это не
   формальность: нейропроходу нужен рантайм HIP 7, который ставится вместе с
@@ -64,7 +64,7 @@ Rendering, применённая ко всему рабочему столу Wi
 
 ## Установка
 
-1. Скачайте архив из [Releases](https://github.com/perseval-BLR/DLSS5-NeuralScreen/releases)
+1. Скачайте архив из [Releases](https://github.com/perseval-BLR/NeuralScreen-AMD/releases)
    и распакуйте куда угодно.
 2. Поставьте рантайм нейропрохода — **[native/AMD.md](native/AMD.md)**, это
    две команды.
@@ -164,26 +164,26 @@ Windows, скорее всего, предупредит о неизвестно
 
 **Всё слишком яркое, и ползунки не помогают.** На этом дисплее включён HDR.
 Выключите его (Win+Alt+B) или попробуйте **Совместимость с HDR** в настройках,
-в разделе ЗАХВАТ — это эксперимент; см. [настройку HDR](https://github.com/perseval-BLR/DLSS5-NeuralScreen/blob/main/docs/HDR.md).
+в разделе ЗАХВАТ — это эксперимент; см. [настройку HDR](https://github.com/perseval-BLR/NeuralScreen-AMD/blob/main/docs/HDR.md).
 
 **Клавиша не работает.** Её занял кто-то другой; переназначьте в меню.
 
 ## Известные ограничения
 
 - **Настоящий полноэкранный режим** не позволяет рисовать поверх — только окно без рамки.
-- **HDR-дисплеи:** эксперимент, и он выключен, пока не включите **Совместимость с HDR** (настройки, ЗАХВАТ). Запись и экспорт Spout остаются SDR. См. [настройку и ограничения HDR](https://github.com/perseval-BLR/DLSS5-NeuralScreen/blob/main/docs/HDR.md).
+- **HDR-дисплеи:** эксперимент, и он выключен, пока не включите **Совместимость с HDR** (настройки, ЗАХВАТ). Запись и экспорт Spout остаются SDR. См. [настройку и ограничения HDR](https://github.com/perseval-BLR/NeuralScreen-AMD/blob/main/docs/HDR.md).
 - **Обработка на AMD — экспериментальная.** Отлажена по спецификациям и
   проверена компиляцией, но **живого Radeon под рукой не было**: первый
   настоящий прогон — это ваш. Лог (`native/AMD.md`) построен так, чтобы
   назвать причину; отчёты приветствуются.
-- **Windows 10 — экспериментально:** сделано или починено по логам
-  пользователей, а не проверено здесь.
+- **Windows 10 на Radeon не проверялась:** починено по логам
+  пользователей NVIDIA-сборки, здесь не проверено.
 - **Повёрнутый экран:** поворот на 180° разворачивается обратно при захвате; 90° и 270° пока не обрабатываются — стороны выходят переставленными.
 - **Задержка конвейера** 40–60 мс (17-20 мс с Boost Mode) — для интерактива нормально, для соревновательной игры нет; **разрешение обработки ограничено 2560×1440**, на выходе всегда ваше полное родное разрешение.
 - **Режим окна:** жёсткое мигание панели поверх картинки и рывки при её
-  перетаскивании исправлены в 1.11.0; полировка поведения фокуса и панели
-  задач — при первой смене фокуса оверлей может уйти на задний план — ещё
-  в работе.
+  перетаскивании исправлены в этой сборке; полировка поведения фокуса и
+  панели задач - при первой смене фокуса оверлей может уйти на задний
+  план - ещё в работе.
 
 ## Лицензия
 

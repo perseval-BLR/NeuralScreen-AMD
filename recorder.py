@@ -1,9 +1,10 @@
-"""VideoRecorder - writes NR overlay frames into an MP4 (NVENC + AAC).
+"""VideoRecorder - writes NR overlay frames into an MP4 (hardware or CPU).
 
 Records the frames Python receives from the worker (output_rgba) while
 recording is on (Num0). Frames arrive full-res RGBA8 every ~30 ms; PyAV
-converts them to yuv420p and encodes them through NVENC (AV1, or HEVC/H.264
-on GPUs without an AV1 encoder - the first codec that opens wins).
+converts them to yuv420p and encodes them through the first codec that opens:
+NVENC on NVIDIA (AV1, or HEVC/H.264 on cards without an AV1 encoder), AMF on
+a Radeon, and libx264 as the software floor.
 
 System audio comes from WASAPI loopback (audio.LoopbackCapture) as a second
 track. It is best-effort: a machine without a playback endpoint still records
@@ -63,17 +64,12 @@ class VideoRecorder:
     #: encoder is exactly when the screen must not be held hostage to it.
     FRAME_PUT_TIMEOUT_S = 1.0 / 60.0
 
-    #: NVENC codecs, best first. AV1 is the newest and most efficient, but the
-    #: RTX 30 series has no AV1 encoder at all - on those cards the first
-    #: add_stream() succeeds and the failure only surfaces when the encoder is
-    #: opened. The probe below opens each codec for real and keeps the first
-    #: one that works.
-    CODEC_CHAIN = ("av1_nvenc", "hevc_nvenc", "h264_nvenc")
-
     #: Bitrate and encoder parameters live as class attributes so they can be
     #: changed without touching the constructor (measurements, experiments).
     BIT_RATE = 120_000_000
-    ENCODER_OPTIONS = {
+
+    #: NVENC (NVIDIA) parameters.
+    NVENC_OPTIONS = {
         "preset": "p6",     # p1 fast ... p7 high quality
         "tune": "hq",
         "rc": "vbr",        # not a fixed bitrate: on fast motion the encoder
@@ -82,6 +78,35 @@ class VideoRecorder:
         "maxrate": "250M",
         "bufsize": "500M",
     }
+    #: AMF (Radeon) parameters - different option names, one quality target.
+    #: The NVENC keys above would be rejected here, which is why the options
+    #: travel WITH the codec rather than sitting on the class.
+    AMF_OPTIONS = {
+        "quality": "quality",
+        "rc": "cqp",
+        "qp_i": "16",
+        "qp_p": "18",
+    }
+    #: The software floor: only reached on a machine with no hardware encoder.
+    X264_OPTIONS = {
+        "preset": "veryfast",
+        "crf": "16",
+    }
+
+    #: Codec chain, best first, each entry with its own options. AV1 is the
+    #: newest and most efficient, but the RTX 30 series has no AV1 encoder at
+    #: all - add_stream() succeeds there and the failure only surfaces when
+    #: the encoder is opened. So every candidate is opened for real below and
+    #: the first that works wins: NVENC on NVIDIA, AMF on a Radeon (this
+    #: build's own card), libx264 as the last resort.
+    CODEC_CHAIN = (
+        ("av1_nvenc", NVENC_OPTIONS),
+        ("hevc_nvenc", NVENC_OPTIONS),
+        ("h264_nvenc", NVENC_OPTIONS),
+        ("hevc_amf", AMF_OPTIONS),
+        ("h264_amf", AMF_OPTIONS),
+        ("libx264", X264_OPTIONS),
+    )
 
     #: Audio bitrate. 192 kbit/s of AAC is transparent enough for game sound and
     #: speech, and next to a 120 Mbit/s video track its size does not matter.
@@ -98,6 +123,7 @@ class VideoRecorder:
     def __init__(self, path: str, width: int, height: int, fps: float = 60.0,
                  audio: bool = True):
         self.path = path
+        self.codec_options: dict = {}
         self.width = width
         self.height = height
         self.fps = fps
@@ -148,10 +174,11 @@ class VideoRecorder:
         except Exception as exc:
             print(f"[record] encoder params failed: {exc}", file=sys.stderr)
         # Encoder options are passed as strings through options - PyAV has no
-        # max_bit_rate/rc_buffer_size attributes.
-        if self.ENCODER_OPTIONS:
+        # max_bit_rate/rc_buffer_size attributes. WHICH options: the ones the
+        # chosen codec's family understands (NVENC / AMF / x264).
+        if self.codec_options:
             try:
-                self._stream.options = dict(self.ENCODER_OPTIONS)
+                self._stream.options = dict(self.codec_options)
             except Exception as exc:
                 print(f"[record] encoder options failed: {exc}",
                       file=sys.stderr)
@@ -171,19 +198,21 @@ class VideoRecorder:
         self._started = time.perf_counter()
 
     def _open_video_stream(self, width: int, height: int, fps: float):
-        """Create the video stream with the first NVENC codec that opens.
+        """Create the video stream with the first codec that opens.
 
         add_stream() alone is not a probe: PyAV opens the encoder lazily, at
         the first mux() (start_encoding -> avcodec_open2). On an RTX 30 card
         add_stream("av1_nvenc") succeeds and the recording dies mid-way with
-        "no NVENC capable devices found". So each candidate is opened for
-        real - on a throwaway null-muxer container, because a stream cannot
-        be removed from a container and start_encoding() would re-open a
-        codec context that is still closed. The chosen codec is stored on
-        self.codec for the caller (and the tests).
+        "no NVENC capable devices found"; on a Radeon the whole NVENC block
+        fails the same way and AMF takes over. So each candidate is opened
+        for real - with the options its own family understands - on a
+        throwaway null-muxer container, because a stream cannot be removed
+        from a container and start_encoding() would re-open a codec context
+        that is still closed. The chosen codec and its options are stored on
+        self for the real stream (and the tests).
         """
         rate = int(round(fps))
-        for name in self.CODEC_CHAIN:
+        for name, opts in self.CODEC_CHAIN:
             try:
                 with av.open("null", mode="w", format="null") as probe:
                     stream = probe.add_stream(name, rate=rate)
@@ -194,8 +223,8 @@ class VideoRecorder:
                     stream.bit_rate = self.BIT_RATE
                     stream.gop_size = max(30, rate * 2)
                     stream.max_b_frames = 0
-                    if self.ENCODER_OPTIONS:
-                        stream.options = dict(self.ENCODER_OPTIONS)
+                    if opts:
+                        stream.options = dict(opts)
                     stream.codec_context.open()
             except Exception as exc:                      # noqa: BLE001
                 print(f"[record] {name} unavailable ({exc}) - trying the "
@@ -203,10 +232,11 @@ class VideoRecorder:
                 continue
             print(f"[record] video codec: {name}")
             self.codec = name
+            self.codec_options = opts
             return self._container.add_stream(name, rate=rate)
         raise RuntimeError(
-            "no NVENC encoder available (tried "
-            + ", ".join(self.CODEC_CHAIN) + ")")
+            "no usable video encoder (tried "
+            + ", ".join(n for n, _ in self.CODEC_CHAIN) + ")")
 
     def _open_audio(self) -> None:
         """Start the loopback and add the AAC track. Failure is not fatal."""

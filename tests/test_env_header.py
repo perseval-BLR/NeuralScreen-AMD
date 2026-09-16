@@ -37,7 +37,7 @@ def main() -> int:
         sys.stdout = real_stdout
     text = buf.getvalue()
     print(text.strip())
-    if f"NeuralScreen {ns_main.APP_VERSION}" not in text:
+    if f"NeuralScreen AMD {ns_main.APP_VERSION}" not in text:
         failures.append("the version is missing from the header")
     if "Windows" not in text:
         failures.append("the OS is missing from the header")

@@ -95,9 +95,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     if (!FileThere(dir + L"native\\nvngx_dlssnr.dll"))
     {
         Fail(L"native\\nvngx_dlssnr.dll is missing.\n\n"
-             L"This is NVIDIA's DLSS 5 Neural Rendering runtime. Download it "
-             L"from the release page and put it in the native folder.\n\n"
-             L"See README.md, section Requirements.");
+             L"The neural runtimes read it: on the AMD path the Radeon "
+             L"runtime's installer takes the network weights out of it, and "
+             L"the NVIDIA path loads it directly.\n\n"
+             L"Download the release archive again and unpack the whole "
+             L"thing. See README.md, section What you need.");
         return 1;
     }
     if (!FileThere(dir + L"native\\nvngx.dll"))

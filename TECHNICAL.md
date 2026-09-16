@@ -4,6 +4,14 @@ How it works, what was measured, and why the decisions went the way
 they did. For installing and using the program see
 [README.md](README.md).
 
+> **This copy belongs to NeuralScreen AMD** - the build whose neural pass runs
+> on a Radeon. The pipeline, the capture, the overlay and the recordings are
+> the same code the NVIDIA build carries, and this document describes them as
+> measured. The AMD-specific part - the runtime, its preparation and the
+> `[amd]` log lines - is in **[native/AMD.md](native/AMD.md)**. Numbers
+> measured on an RTX 5070 Ti are marked as such: they are the shared code's
+> numbers, not a Radeon's.
+
 Every number here was measured on this machine - RTX 5070 Ti, driver
 616.56, Windows 11 - and says so where it matters. Where an earlier
 conclusion turned out to be wrong, the correction is kept rather than

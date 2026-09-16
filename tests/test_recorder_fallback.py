@@ -1,6 +1,7 @@
-"""NVENC codec fallback: AV1 -> HEVC -> H.264, decided at open time.
+"""Codec fallback: NVENC AV1 -> HEVC -> H.264, then AMF, then x264.
 
-The recorder must work on RTX 30 cards, which have no AV1 NVENC encoder.
+The recorder must work on RTX 30 cards (no AV1 NVENC encoder) and on a
+Radeon, where the whole NVENC chain fails at open and AMF takes over.
 add_stream() alone is not a probe (PyAV opens the encoder lazily, at the
 first mux), so the probe opens each candidate for real on a throwaway
 null-muxer container. These tests fake that probe:
@@ -141,13 +142,14 @@ def test_fallback_on_open_failure(out: Path, failures: list) -> None:
 
 
 def test_all_codecs_fail_raises(out: Path, failures: list) -> None:
-    real = patch_probe(fail_at_add=("av1_nvenc", "hevc_nvenc", "h264_nvenc"))
+    real = patch_probe(fail_at_add=("av1_nvenc", "hevc_nvenc", "h264_nvenc",
+                                    "hevc_amf", "h264_amf", "libx264"))
     try:
         try:
             VideoRecorder(str(out), W, H, fps=FPS, audio=False)
             failures.append("all codecs failed but the constructor did not raise")
         except RuntimeError as exc:
-            if "no NVENC encoder available" not in str(exc):
+            if "no usable video encoder" not in str(exc):
                 failures.append(f"unexpected error: {exc}")
     finally:
         av.open = real

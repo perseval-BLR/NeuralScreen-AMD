@@ -31,7 +31,7 @@ sharper.
 
 | Menu, light | Menu, dark | Settings | Window list |
 |---|---|---|---|
-| ![light](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-light.png) | ![dark](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-main-dark.png) | ![settings](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-settings.png) | ![windows](https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main/docs/screenshot-windows.png) |
+| ![light](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-main-light.png) | ![dark](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-main-dark.png) | ![settings](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-settings.png) | ![windows](https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main/docs/screenshot-windows.png) |
 
 *One menu inside the overlay; the **Before / after wipe** slider splits the
 screen down the middle to show what the effect does.*
@@ -48,7 +48,7 @@ screen down the middle to show what the effect does.*
   |---|---|
   | **RX 9000 / 7000** (RDNA4 / RDNA3) | ✅ supported; ~30 ms per megapixel on a 9070 XT, slower on RDNA3 (no FP8 — the network runs in FP16) |
   | **RX 6000** (RDNA2) and older | ❌ card not supported — the program works, processing does not |
-  | **NVIDIA RTX** | ❌ not used by this build — see the main project branch |
+  | **NVIDIA RTX** | ❌ not this build's target — the NVIDIA build lives at [perseval-BLR/NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) |
 
 - **AMD Adrenalin 26.1.1 or newer, and Windows up to date.** Not a formality:
   the pass needs the HIP 7 runtime that ships with the driver, and an old
@@ -60,7 +60,7 @@ screen down the middle to show what the effect does.*
 
 ## Install
 
-1. Download the archive from [Releases](https://github.com/perseval-BLR/DLSS5-NeuralScreen/releases)
+1. Download the archive from [Releases](https://github.com/perseval-BLR/NeuralScreen-AMD/releases)
    and unpack it anywhere.
 2. Set up the neural runtime — **[native/AMD.md](native/AMD.md)**, two commands.
 3. Run **`NeuralScreen.exe`**.
@@ -154,19 +154,15 @@ open, on purpose. A red dot with a timer sits in the corner while recording
 Screenshots open a **Save As** dialog; set **Screenshot folder...** in the
 settings once and it will start there every time.
 
-**Recording externally:**
-
-- **OBS (recommended):** turn on **Spout2 output (OBS)** in the settings, then
-  add a **Spout2 Capture** source in OBS. Works in any mode.
-- **NVIDIA App:** it has no Spout input, so use one-window mode — pick the
-  window, record, then switch back to **Fullscreen**. In that mode the overlay
-  is visible to screen capture; in full-screen mode it hides itself.
+**Recording externally:** turn on **Spout2 output (OBS)** in the settings,
+then add a **Spout2 Capture** source in OBS. Works in any mode. Recording
+itself uses the card's own encoder (AMF on a Radeon) or the CPU as the floor.
 
 ## If something is not working
 
 **Nothing appears after launch.** Check `NeuralScreen.log` next to the
-program — it names the cause. The commonest is a missing
-`native\nvngx_dlssnr.dll`.
+program — it names the cause. The commonest is an unprepared neural
+runtime: see **[native/AMD.md](native/AMD.md)**.
 
 **The overlay is invisible in a game.** True fullscreen cannot have anything
 drawn over it — a Windows rule. Switch the game to *borderless*.
@@ -176,20 +172,20 @@ cursor, and the overlay only shows that one. Borderless fixes it.
 
 **Everything is too bright and the sliders do nothing.** HDR is on for that
 display. Turn it off (Win+Alt+B), or try **HDR compatibility** in the
-settings — it is experimental; see [HDR setup](https://github.com/perseval-BLR/DLSS5-NeuralScreen/blob/main/docs/HDR.md).
+settings — it is experimental; see [HDR setup](https://github.com/perseval-BLR/NeuralScreen-AMD/blob/main/docs/HDR.md).
 
 **A key does nothing.** Something else claimed it; reassign it in the menu.
 
 ## Known limitations
 
 - **True fullscreen games** cannot have an overlay drawn over them — borderless or windowed only.
-- **HDR displays:** experimental, and off until you turn on **HDR compatibility** (settings, CAPTURE). Recording and Spout exports stay SDR. See [HDR setup and limitations](https://github.com/perseval-BLR/DLSS5-NeuralScreen/blob/main/docs/HDR.md).
-- **Windows 10 and two NVIDIA cards are experimental** — built or fixed from user logs rather than tested here. Reports welcome.
+- **HDR displays:** experimental, and off until you turn on **HDR compatibility** (settings, CAPTURE). Recording and Spout exports stay SDR. See [HDR setup and limitations](https://github.com/perseval-BLR/NeuralScreen-AMD/blob/main/docs/HDR.md).
+- **Windows 10 is untested on a Radeon here** — built from user logs of the NVIDIA build. Reports welcome.
 - **A rotated display:** 180° is turned back over on capture; 90° and 270° are not handled yet and come out with the sides swapped.
 - **Pipeline latency** is 40–60 ms (17-20ms with Boost Mode) — fine interactively, not competitively; **processing resolution is capped at 2560×1440**, output is always your full native resolution.
-- **Window mode:** the hard blink of the panel over the picture and the drag
-  stutter are fixed in 1.11.0; focus/taskbar polish (the overlay dropping
-  behind on the first focus change) is still in progress.
+- **Window mode:** the panel's hard blink and the drag stutter are fixed in
+  this build; focus/taskbar polish (the overlay dropping behind on the first
+  focus change) is still in progress.
 
 ## License
 

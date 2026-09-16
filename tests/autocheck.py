@@ -201,9 +201,15 @@ def shipped_config_defaults():
 
 
 def zip_integrity():
-    zpath = ROOT / "neuralscreen-v1.11.1-full.zip"
+    # The archive name follows the version in the packer - a hardcoded name
+    # here went stale on every bump and the check then failed for a reason
+    # that had nothing to do with the archive.
+    _src = (ROOT / "build_release_zip.py").read_text(encoding="utf-8")
+    _m = re.search(r'VERSION = "([^"]+)"', _src)
+    zname = f"neuralscreen-amd-v{_m.group(1) if _m else '?'}-full.zip"
+    zpath = ROOT / zname
     if not zpath.is_file():
-        return False, "no neuralscreen-v1.11.1-full.zip"
+        return False, f"no {zname}"
     required = [
         "main.py", "gpuinfo.py", "overlay_ui.py", "i18n.py", "recorder.py",
         "display.py", "guides.py", "hotkeys.py", "tray.py", "capture.py",
@@ -408,13 +414,13 @@ def release_notes_short():
     from json import loads as _loads
     try:
         tag = _loads(subprocess.check_output(
-            ["gh", "release", "list", "-R", "perseval-BLR/DLSS5-NeuralScreen",
+            ["gh", "release", "list", "-R", "perseval-BLR/NeuralScreen-AMD",
              "--json", "tagName", "--limit", "1", "--exclude-drafts"],
             text=True, timeout=60, encoding="utf-8", errors="replace"))[0]["tagName"]
     except Exception:
         return False, "cannot resolve the latest release tag"
     r = subprocess.run(
-        ["gh", "release", "view", tag, "-R", "perseval-BLR/DLSS5-NeuralScreen",
+        ["gh", "release", "view", tag, "-R", "perseval-BLR/NeuralScreen-AMD",
          "--json", "body", "--jq", ".body"],
         capture_output=True, text=True, timeout=60,
         encoding="utf-8", errors="replace")

@@ -200,33 +200,47 @@ def _log_environment(cfg: dict) -> None:
         win = _sys.getwindowsversion()
         ENVIRONMENT["version"] = APP_VERSION
         ENVIRONMENT["windows"] = f"{win.major}.{win.minor} ({win.build})"
-        print(f"[env] NeuralScreen {APP_VERSION} | Windows {win.major}.{win.minor} "
+        print(f"[env] NeuralScreen AMD {APP_VERSION} | Windows {win.major}.{win.minor} "
               f"(build {win.build}) | {platform.platform()}")
     except Exception:
-        print(f"[env] NeuralScreen {APP_VERSION} | Windows unknown")
+        print(f"[env] NeuralScreen AMD {APP_VERSION} | Windows unknown")
     try:
         import gpuinfo
         g = gpuinfo.probe(_working_card_name(cfg))
-        print(f"[env] GPU: {g.get('name') or 'unknown'} "
-              f"({g.get('family') or '?'}, arch 0x{g.get('arch_group', 0):X})")
+        # NVAPI answers on an NVIDIA machine and says nothing on a Radeon -
+        # and a Radeon is what this build is for. The DXGI name, from the
+        # same card list the picker uses, fills the gap so the header still
+        # names the card the report is about.
+        name = g.get("name") or _working_card_name(cfg)
+        arch = (f"({g.get('family') or '?'}, arch 0x{g.get('arch_group', 0):X})"
+                if g.get("name") else "(not an NVIDIA card - no NVAPI report)")
+        print(f"[env] GPU: {name or 'unknown'} {arch}")
     except Exception:
         pass
     try:
-        # The NVIDIA driver version from the display-class registry key.
+        # The display driver version, from the display-class registry key.
+        # NVIDIA first (the NVIDIA path), then AMD: this build runs on a
+        # Radeon, and "which driver" is the first question in every report.
         import winreg
         base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-        for idx in range(10):
+        chosen = None
+        amd_hit = None
+        for idx in range(16):
             try:
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
                                     f"{base}\\{idx:04d}") as key:
                     desc, _ = winreg.QueryValueEx(key, "DriverDesc")
                     if "NVIDIA" in str(desc):
-                        ver, _ = winreg.QueryValueEx(key, "DriverVersion")
-                        ENVIRONMENT["driver"] = str(ver)
-                        print(f"[env] driver: {ver}")
+                        chosen, _ = winreg.QueryValueEx(key, "DriverVersion")
                         break
+                    if amd_hit is None and ("AMD" in str(desc) or "Radeon" in str(desc)):
+                        amd_hit, _ = winreg.QueryValueEx(key, "DriverVersion")
             except OSError:
                 continue
+        picked = chosen or amd_hit
+        if picked is not None:
+            ENVIRONMENT["driver"] = str(picked)
+            print(f"[env] driver: {picked}")
     except Exception:
         pass
     try:
@@ -346,7 +360,7 @@ def configure(st) -> None:
     # is; the resolution alone does not place anything.
     st.mon_origin = _apply_monitor_env(st.capture)
 
-    print(f"[main] NeuralScreen - profile {st.cfg['profile']!r}, "
+    print(f"[main] NeuralScreen AMD - profile {st.cfg['profile']!r}, "
           f"resolution {st.width}x{st.height}, monitor {st.monitor}")
     print(f"[main] NGX parameters: {st.params}")
     print(f"[main] work_scale {st.work_scale:.2f} (NGX resolution "
@@ -386,7 +400,9 @@ def bring_up(st) -> None:
     # comes from the worker rather than the architecture, because only it
     # knows whether feature 18 was created.
     gpu_info = gpu_probe(_working_card_name(st.cfg))
-    st.gpu_text = gpu_describe(gpu_info)
+    # On a Radeon there is no NVAPI to describe the card; the DXGI name is
+    # what the menu and the report need, so the card is still named.
+    st.gpu_text = gpu_describe(gpu_info) or _working_card_name(st.cfg)
     st.gpu_ok: bool | None = None
     st.gpu_unsupported = False    # the verdict's reason, when it is the card
     st.gpu_alerted = False          # the "cannot run the pass" alert, once per verdict

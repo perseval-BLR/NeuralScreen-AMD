@@ -1,4 +1,4 @@
-"""Build the NeuralScreen v1.5.1 release archive: git files + artifacts + runtime.
+"""Build the NeuralScreen AMD release archive: git files + artifacts + runtime.
 
 The archive carries a VERSION.txt manifest (git commit, runtime SHA-256,
 target architectures) so a user can tell exactly which build they have.
@@ -17,11 +17,13 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "1.11.1"
-# The bundle is architecture-agnostic by design: the dcc0dc24 runtime and
-# the 0x1B0 spoof work on RTX 30/40/50 (v1.3.0 behaviour). The manifest
-# still records what is inside so a mismatch is catchable.
-TARGET_ARCHS = "RTX 30/40/50 (sm_86/89/120 kernels, spoof 0x1B0; RTX 20 cannot run - below minimum)"
+VERSION = "0.1.0-alpha"
+# This build is the AMD one: the pass runs on a Radeon through a third-party
+# runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
+# binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
+# one the kernel check below describes - the same file is what the AMD
+# runtime's installer reads the network weights from, which is why it ships.
+TARGET_ARCHS = "AMD: Radeon RX 7000/9000 (RDNA3/RDNA4); NVIDIA path kept for hybrids (sm_86/89/120, spoof 0x1B0)"
 
 files = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
 extra = [
@@ -228,7 +230,7 @@ for f in files + extra:
         continue
     uniq.append(norm)
 
-out = f"neuralscreen-v{VERSION}-full.zip"
+out = f"neuralscreen-amd-v{VERSION}-full.zip"
 
 # The runtime kernel check: the v1.5.0 zip shipped a Blackwell-only DLL as
 # if it were universal. The kernel names live inside CUDA fatbin records

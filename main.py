@@ -374,7 +374,7 @@ def main() -> int:
     # block the next launch.
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "NeuralScreen_SingleInstance")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        print("[main] another NeuralScreen is already running - this copy exits", file=sys.stderr)
+        print("[main] another NeuralScreen AMD is already running - this copy exits", file=sys.stderr)
         return 1
 
     # The config file's path, kept in the state: the settings module writes
@@ -1164,8 +1164,8 @@ if __name__ == "__main__":
             import ctypes as _ct
             _ct.windll.user32.MessageBoxW(
                 None,
-                f"NeuralScreen failed to start: {exc}\n\nDetails in NeuralScreen.log next to the program.",
-                "NeuralScreen", 0x10)  # MB_ICONERROR
+                f"NeuralScreen AMD failed to start: {exc}\n\nDetails in NeuralScreen.log next to the program.",
+                "NeuralScreen AMD", 0x10)  # MB_ICONERROR
         except Exception:
             pass
         sys.exit(1)

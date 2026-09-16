@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-RAW = "https://raw.githubusercontent.com/perseval-BLR/DLSS5-NeuralScreen/main"
+RAW = "https://raw.githubusercontent.com/perseval-BLR/NeuralScreen-AMD/main"
 
 
 def _sha256(path: Path) -> str:
@@ -61,7 +61,7 @@ def _fetch_asset(asset_id: int, dest: Path) -> bool:
     try:
         with open(dest, "wb") as fh:
             subprocess.run(
-                ["gh", "api", f"repos/perseval-BLR/DLSS5-NeuralScreen/"
+                ["gh", "api", f"repos/perseval-BLR/NeuralScreen-AMD/"
                               f"releases/assets/{asset_id}",
                  "-H", "Accept: application/octet-stream"],
                 stdout=fh, check=True, timeout=900)
@@ -112,14 +112,14 @@ def main() -> int:
     # 3. The release: assets, zip digest, Latest.
     try:
         rel = json.loads(_gh(["api",
-                               f"repos/perseval-BLR/DLSS5-NeuralScreen/"
+                               f"repos/perseval-BLR/NeuralScreen-AMD/"
                                f"releases/tags/{tag}"]))
     except subprocess.CalledProcessError:
         failures.append(f"release {tag} does not exist")
         rel = {}
     if rel:
         names = [a["name"] for a in rel.get("assets", [])]
-        zip_name = f"neuralscreen-v{version}-full.zip"
+        zip_name = f"neuralscreen-amd-v{version}-full.zip"
         want = [zip_name,
                 "README.md", "README.ru.md", "TECHNICAL.md", "TECHNICAL.ru.md"]
         for w in want:
@@ -147,16 +147,16 @@ def main() -> int:
         # the check really tested a naming habit. 1.7.0 led with what the
         # release does and the verifier called a perfectly correct Latest
         # release wrong.
-        latest = _gh(["api", "repos/perseval-BLR/DLSS5-NeuralScreen/releases/latest",
+        latest = _gh(["api", "repos/perseval-BLR/NeuralScreen-AMD/releases/latest",
                       "--jq", ".tag_name"])
         if latest != tag:
             failures.append(f"{tag} is not the Latest release (GitHub says "
                             f"{latest!r})")
 
     # 4. The repository description carries the current feature markers.
-    desc = _gh(["repo", "view", "perseval-BLR/DLSS5-NeuralScreen",
+    desc = _gh(["repo", "view", "perseval-BLR/NeuralScreen-AMD",
                 "--json", "description", "-q", ".description"])
-    for marker in ("user presets", "12 languages"):
+    for marker in ("Radeon", "logs"):
         if marker not in desc:
             failures.append(f"repo description lost the marker {marker!r}")
     print(f"    [OK] repo description: {desc}")

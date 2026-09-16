@@ -63,7 +63,7 @@ from i18n import STRINGS as UI_STRINGS
 
 
 # The project page: README, hotkeys, requirements. Opened from the menu.
-REPO_URL = "https://github.com/perseval-BLR/DLSS5-NeuralScreen"
+REPO_URL = "https://github.com/perseval-BLR/NeuralScreen-AMD"
 
 
 CHANNEL_URL = "https://www.youtube.com/@perseval_BLR/videos"
@@ -101,11 +101,11 @@ def _set_autostart(enabled: bool) -> bool:
                              0, winreg.KEY_SET_VALUE)
         if enabled:
             vbs = str(BASE_DIR / "NeuralScreen.vbs")
-            winreg.SetValueEx(key, "NeuralScreen", 0, winreg.REG_SZ,
+            winreg.SetValueEx(key, "NeuralScreen AMD", 0, winreg.REG_SZ,
                               f'wscript.exe "{vbs}"')
         else:
             try:
-                winreg.DeleteValue(key, "NeuralScreen")
+                winreg.DeleteValue(key, "NeuralScreen AMD")
             except FileNotFoundError:
                 pass
         winreg.CloseKey(key)
@@ -117,7 +117,7 @@ def _set_autostart(enabled: bool) -> bool:
 
 # The version shown in the menu header. Kept in sync with native/launcher.rc
 # (FileVersion/ProductVersion) and build_release_zip.py at release time.
-APP_VERSION = "1.11.1"
+APP_VERSION = "0.1.0-alpha"
 
 
 # The channel label: the header shows the version, the channel lives in the
@@ -428,7 +428,7 @@ def _autostart_enabled() -> bool:
                              r"Software\Microsoft\Windows\CurrentVersion\Run",
                              0, winreg.KEY_READ)
         try:
-            winreg.QueryValueEx(key, "NeuralScreen")
+            winreg.QueryValueEx(key, "NeuralScreen AMD")
             return True
         except FileNotFoundError:
             return False

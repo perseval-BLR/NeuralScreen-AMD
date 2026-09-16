@@ -11,7 +11,7 @@ if not defined NS_PY set "NS_PY=python"
 
 rem --- NGX runtime: 165 MB redistributable, ships in the release archive -----
 if not exist "%~dp0native\nvngx_dlssnr.dll" (
-    echo [NeuralScreen] native\nvngx_dlssnr.dll not found.
+    echo [NeuralScreen AMD] native\nvngx_dlssnr.dll not found.
     echo Re-download the release archive, or see README.md, section "What you need".
     pause
     exit /b 1
@@ -19,10 +19,10 @@ if not exist "%~dp0native\nvngx_dlssnr.dll" (
 
 rem --- Worker: build artefact, not stored in git ----------------------------
 if not exist "%~dp0native\nvngx.dll" (
-    echo [NeuralScreen] native\nvngx.dll not found - building it.
+    echo [NeuralScreen AMD] native\nvngx.dll not found - building it.
     call "%~dp0native\build-host.bat"
     if errorlevel 1 (
-        echo [NeuralScreen] Worker build failed. See native\build-host.bat.
+        echo [NeuralScreen AMD] Worker build failed. See native\build-host.bat.
         pause
         exit /b 1
     )
@@ -32,7 +32,7 @@ if not exist "%~dp0native\nvngx.dll" (
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
     echo.
-    echo [NeuralScreen] exit code %RC%
+    echo [NeuralScreen AMD] exit code %RC%
     pause
 )
 exit /b %RC%

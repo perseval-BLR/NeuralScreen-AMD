@@ -38,26 +38,26 @@ If py = "pythonw" Then
         End If
     Next
     If Not found Then
-        MsgBox "NeuralScreen: pythonw.exe not found." & vbCrLf & _
+        MsgBox "NeuralScreen AMD: pythonw.exe not found." & vbCrLf & _
                "Install Python or unpack the release archive (it bundles a portable runtime).", _
-               16, "NeuralScreen"
+               16, "NeuralScreen AMD"
         WScript.Quit 1
     End If
 End If
 
 ' --- NGX runtime check (165 MB, not kept in git) ---
 If Not fso.FileExists(dir & "\native\nvngx_dlssnr.dll") Then
-    MsgBox "NeuralScreen: native\nvngx_dlssnr.dll not found." & vbCrLf & _
+    MsgBox "NeuralScreen AMD: native\nvngx_dlssnr.dll not found." & vbCrLf & _
            "Re-download the release archive, or see README.md, section " & _
-           "What you need.", 16, "NeuralScreen"
+           "What you need.", 16, "NeuralScreen AMD"
     WScript.Quit 1
 End If
 
 ' --- Worker check (a build artefact) ---
 If Not fso.FileExists(dir & "\native\nvngx.dll") Then
-    MsgBox "NeuralScreen: native\nvngx.dll not found." & vbCrLf & _
+    MsgBox "NeuralScreen AMD: native\nvngx.dll not found." & vbCrLf & _
            "Build it with native\build-host.bat or re-download the release archive.", _
-           16, "NeuralScreen"
+           16, "NeuralScreen AMD"
     WScript.Quit 1
 End If
 
