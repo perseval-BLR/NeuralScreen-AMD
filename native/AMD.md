@@ -85,11 +85,15 @@ reason is in the log.
 
 ## 4. If it does not work
 
-Collect these three things and open an issue:
+Press **Settings -> Program -> Create diagnostic package** and attach what it
+writes. One button, one file: the package carries `NeuralScreen.log`, your card
+model and driver version, the runtime's hash, and the stage where it stopped -
+with your user name and absolute paths replaced by placeholders before anything
+is written. If you ran the probe (`native\probe_amd.exe`), its log is copied
+next to the archive, so the report is still a single thing to attach.
 
-1. `native\probe_amd.log` (from step 1.4)
-2. `NeuralScreen.log` (next to the program - the whole log, not a snippet)
-3. your GPU model and driver version
+What it does not do: it never uploads anything by itself. The ZIP lands in a
+`diagnostics` folder next to the program and stays there until you send it.
 
 The log names the exact failure - a missing file, an unknown build, no HIP
 device, or the engine's own refusal reason. That is the point of this first

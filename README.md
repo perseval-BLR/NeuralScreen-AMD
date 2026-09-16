@@ -7,9 +7,11 @@
 > implementations and verified by compilation and tests, but there was no AMD
 > card on this bench.
 >
-> Run it on your Radeon and attach to an issue: `NeuralScreen.log` next to
-> the program, `native\probe_amd.log` (the probe, `native\probe_amd.exe`) and
-> your card model with the driver version.
+> Run it on your Radeon and attach **one file** to an issue: menu ->
+> **Settings -> Program -> Create diagnostic package**. The package carries
+> the log, your card, the driver version and the stage it stopped at, with
+> your paths and user name already scrubbed out. It also leaves
+> `probe_amd.log` beside the archive if you ran the probe.
 >
 > The logs are written always, with nothing to turn on: every refusal names
 > itself (`native/AMD.md` explains each line), and even "nothing worked" is a
