@@ -60,3 +60,7 @@ native/nvngx_dlssg.dll
 # BYO library folder: user-placed runtime dlls never enter git
 native/libraries/*.dll
 native/libraries/*.part
+
+# Diagnostic packages built with the menu button: a report is a thing the user
+# creates and sends, never something that belongs in the tree.
+diagnostics/

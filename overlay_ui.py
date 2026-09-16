@@ -861,6 +861,22 @@ class OverlayMenu:
                     cy += self._u(LABEL_H) + self._u(4)
                 if show and about:
                     cy += self._u(6)
+            # The diagnostic package. This build exists to collect logs from
+            # machines nobody here can reach, so the report has to be one
+            # button: it gathers the log, the GPU and driver, the failure
+            # stage and the hashes, scrubs the user's paths and secrets out,
+            # and leaves a ZIP next to the program. Asking a stranger to find
+            # NeuralScreen.log, the probe log and their driver version by hand
+            # is how a bug report turns into three round-trips.
+            if show:
+                diag_h = self._u(ACTION_H)
+                items.append(Item("button", "diagnostics",
+                                  pygame.Rect(pad, cy, inner_w, diag_h),
+                                  extra={"label": s.get(
+                                      "diagnostics_create",
+                                      "Create diagnostic package"),
+                                         "filled": False}))
+                cy += diag_h + self._u(6)
             if channel:
                 act_h = self._u(ACTION_H)
                 if show:

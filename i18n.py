@@ -1775,6 +1775,83 @@ STRINGS["ru"].update({
 
 STRINGS['en'].update({'frame_generation': 'DLSS Frame Generation', 'frame_multiplier': 'Output frame multiplier'})
 
+# The diagnostic package: one button that gathers the log, the GPU/driver and
+# the failure stage into a scrubbed ZIP. This build exists to collect logs, so
+# every language has to offer it.
+for _strings in STRINGS.values():
+    _strings.update({
+        "diagnostics_create": "Create diagnostic package",
+        "diagnostics_working": "Creating diagnostic package...",
+        "diagnostics_saved": "Diagnostic package: {path}",
+        "diagnostics_failed": "Could not create diagnostic package",
+    })
+STRINGS["ru"].update({
+    "diagnostics_create": "Создать пакет для диагностики",
+    "diagnostics_working": "Создаю пакет для диагностики...",
+    "diagnostics_saved": "Пакет для диагностики: {path}",
+    "diagnostics_failed": "Не удалось создать пакет для диагностики",
+})
+STRINGS["fr"].update({
+    "diagnostics_create": "Créer le paquet de diagnostic",
+    "diagnostics_working": "Création du paquet de diagnostic...",
+    "diagnostics_saved": "Paquet de diagnostic : {path}",
+    "diagnostics_failed": "Impossible de créer le paquet de diagnostic",
+})
+STRINGS["de"].update({
+    "diagnostics_create": "Diagnosepaket erstellen",
+    "diagnostics_working": "Diagnosepaket wird erstellt...",
+    "diagnostics_saved": "Diagnosepaket: {path}",
+    "diagnostics_failed": "Diagnosepaket konnte nicht erstellt werden",
+})
+STRINGS["es"].update({
+    "diagnostics_create": "Crear paquete de diagnóstico",
+    "diagnostics_working": "Creando paquete de diagnóstico...",
+    "diagnostics_saved": "Paquete de diagnóstico: {path}",
+    "diagnostics_failed": "No se pudo crear el paquete de diagnóstico",
+})
+STRINGS["it"].update({
+    "diagnostics_create": "Crea pacchetto di diagnostica",
+    "diagnostics_working": "Creazione del pacchetto di diagnostica...",
+    "diagnostics_saved": "Pacchetto di diagnostica: {path}",
+    "diagnostics_failed": "Impossibile creare il pacchetto di diagnostica",
+})
+STRINGS["pt"].update({
+    "diagnostics_create": "Criar pacote de diagnóstico",
+    "diagnostics_working": "Criando pacote de diagnóstico...",
+    "diagnostics_saved": "Pacote de diagnóstico: {path}",
+    "diagnostics_failed": "Não foi possível criar o pacote de diagnóstico",
+})
+STRINGS["pl"].update({
+    "diagnostics_create": "Utwórz pakiet diagnostyczny",
+    "diagnostics_working": "Tworzenie pakietu diagnostycznego...",
+    "diagnostics_saved": "Pakiet diagnostyczny: {path}",
+    "diagnostics_failed": "Nie udało się utworzyć pakietu diagnostycznego",
+})
+STRINGS["uk"].update({
+    "diagnostics_create": "Створити пакет діагностики",
+    "diagnostics_working": "Створюю пакет діагностики...",
+    "diagnostics_saved": "Пакет діагностики: {path}",
+    "diagnostics_failed": "Не вдалося створити пакет діагностики",
+})
+STRINGS["zh"].update({
+    "diagnostics_create": "创建诊断包",
+    "diagnostics_working": "正在创建诊断包...",
+    "diagnostics_saved": "诊断包：{path}",
+    "diagnostics_failed": "无法创建诊断包",
+})
+STRINGS["ja"].update({
+    "diagnostics_create": "診断パッケージを作成",
+    "diagnostics_working": "診断パッケージを作成しています...",
+    "diagnostics_saved": "診断パッケージ: {path}",
+    "diagnostics_failed": "診断パッケージを作成できませんでした",
+})
+STRINGS["ko"].update({
+    "diagnostics_create": "진단 패키지 만들기",
+    "diagnostics_working": "진단 패키지를 만드는 중...",
+    "diagnostics_saved": "진단 패키지: {path}",
+    "diagnostics_failed": "진단 패키지를 만들 수 없습니다",
+})
+
 for _strings in STRINGS.values():
     _strings.update({
         "fg_on": "DLSS FG ON",

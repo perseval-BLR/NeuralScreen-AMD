@@ -100,12 +100,71 @@ def open_save_dialog(st) -> None:
     threading.Thread(target=_run, name="save-dialog", daemon=True).start()
 
 
+def create_diagnostics(st) -> None:
+    """Build a scrubbed support ZIP off the UI thread and report its path.
+
+    This build's whole purpose is to bring back logs from machines nobody
+    here can reach, so the report is one button: the log tail, the GPU and
+    driver, the failure stage and the runtime hash, with the user's paths and
+    secrets replaced by placeholders. The probe's own log is appended when it
+    exists - on the AMD path it is the first thing worth reading.
+    """
+    from diagnostics import DiagnosticBundleRequest, create_diagnostic_bundle
+
+    def _run() -> None:
+        try:
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            out_dir = BASE_DIR / "diagnostics"
+            out_dir.mkdir(exist_ok=True)
+            target = out_dir / f"neuralscreen-amd-{stamp}.zip"
+            stage = getattr(st, "worker_fail_stage", None) or "manual"
+            request = DiagnosticBundleRequest(
+                failure_stage=str(stage),
+                log_path=BASE_DIR / "NeuralScreen.log",
+            )
+            result = create_diagnostic_bundle(target, request)
+            # The probe log is the AMD path's own evidence and the bundle
+            # builder knows nothing about it: it ships as its own file next
+            # to the ZIP, so the report is still one thing to attach.
+            probe = BASE_DIR / "native" / "probe_amd.log"
+            if probe.is_file():
+                try:
+                    (out_dir / f"probe_amd-{stamp}.log").write_bytes(
+                        probe.read_bytes()[-256 * 1024:])
+                except OSError:
+                    pass
+            st.shot_paths.put(("diagnostics", (True, str(result))))
+        except Exception as exc:
+            print(f"[main] diagnostic package failed: {exc}", file=sys.stderr)
+            st.shot_paths.put(("diagnostics", (False, f"{type(exc).__name__}: {exc}")))
+
+    if getattr(st, "shot_dialog_open", False):
+        return
+    st.shot_dialog_open = True
+    st.display.alert(UI_STRINGS[st.lang].get(
+        "diagnostics_working", "Creating diagnostic package..."))
+    threading.Thread(target=_run, name="diagnostic-bundle", daemon=True).start()
+
+
 def drain_save_dialog(st) -> None:
     """Take the path from the dialog if the user has already answered."""
     try:
         while True:
             shot_path = st.shot_paths.get_nowait()
             st.shot_dialog_open = False
+            if isinstance(shot_path, tuple) and shot_path[0] == "diagnostics":
+                ok, detail = shot_path[1]
+                if ok:
+                    print(f"[main] diagnostic package: {detail}")
+                    st.display.alert(UI_STRINGS[st.lang].get(
+                        "diagnostics_saved", "Diagnostic package: {path}"
+                    ).replace("{path}", Path(detail).name), duration=6.0)
+                else:
+                    print(f"[main] diagnostic package failed: {detail}", file=sys.stderr)
+                    st.display.alert(UI_STRINGS[st.lang].get(
+                        "diagnostics_failed",
+                        "Could not create diagnostic package"), duration=6.0)
+                continue
             if shot_path is None:
                 print("[main] screenshot cancelled by the user")
                 continue
@@ -391,6 +450,8 @@ def apply_menu_action(st, action: tuple) -> None:
 
             threading.Thread(target=_pick_dir, name="folder-picker",
                              daemon=True).start()
+        elif name == "diagnostics":
+            create_diagnostics(st)
         elif name == "github":
             # The hotkeys, profiles and requirements are described
             # only in the README - there was no way to learn about
