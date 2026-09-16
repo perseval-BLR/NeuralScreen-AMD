@@ -39,20 +39,18 @@ screen down the middle to show what the effect does.*
 ## What you need
 
 - **Windows 11**, or Windows 10 — reported working.
-- **An AMD Radeon RX 7000 / 9000 card** (RDNA3 / RDNA4) — this is the card
-  the neural pass runs on. Anything else, RX 6000 included, is not
-  supported: the program starts and says so in its menu (**card not
-  supported**), and the picture stays unprocessed.
+- **An AMD Radeon RX 7000 / 9000 card** (RDNA3 / RDNA4) — the generations
+  this test targets.
 
-  | Cards | Status |
-  |---|---|
-  | **RX 9000 / 7000** (RDNA4 / RDNA3) | ✅ supported; ~30 ms per megapixel on a 9070 XT, slower on RDNA3 (no FP8 — the network runs in FP16) |
-  | **RX 6000** (RDNA2) and older | ❌ card not supported — the program works, processing does not |
-  | **NVIDIA RTX** | ❌ not this build's target — the NVIDIA build lives at [perseval-BLR/NeuralScreen](https://github.com/perseval-BLR/NeuralScreen) |
+  The pass targets **RX 7000 / 9000** (RDNA3 / RDNA4) - the generations the
+  third-party runtime was built for. Anything else, RX 6000 included, is not
+  used: the program starts and says so in its menu (**card not supported**),
+  and the picture stays unprocessed. Nothing about the neural pass itself has
+  been measured on real hardware yet - that is what this test build is for.
 
-- **AMD Adrenalin 26.1.1 or newer, and Windows up to date.** Not a formality:
-  the pass needs the HIP 7 runtime that ships with the driver, and an old
-  driver is the commonest reason it refuses to start.
+- **AMD Adrenalin 26.1.1 or newer, and Windows up to date.** The pass needs
+  the HIP 7 runtime that ships with the driver; whether an older driver can
+  work at all is one of the open questions.
 - **The neural runtime** — third-party, installed once by hand: step by step
   in **[native/AMD.md](native/AMD.md)**. Without it the program still starts
   and logs what is missing.
@@ -126,8 +124,8 @@ on it, red when it is not.
 - **Boost** — on by default. The network runs at a reduced resolution and a
   slider under the switch chooses which. The picture stays sharp — the
   network's result is composed onto your original frame, so text and edges
-  keep full resolution. On AMD this is the main speed lever: the network
-  costs about 30 ms per megapixel. Turn it off to compare.
+  keep full resolution. How fast it runs on a Radeon is not known yet; the
+  resolution slider is the control to try first.
 - **DLSS 4.5 FG** — Frame Generation: **not functional on this build.** It
   rides on NVIDIA's optical-flow runtime, which a Radeon does not have; the
   switch stays off.
@@ -182,7 +180,7 @@ settings — it is experimental; see [HDR setup](https://github.com/perseval-BLR
 - **HDR displays:** experimental, and off until you turn on **HDR compatibility** (settings, CAPTURE). Recording and Spout exports stay SDR. See [HDR setup and limitations](https://github.com/perseval-BLR/NeuralScreen-AMD/blob/main/docs/HDR.md).
 - **Windows 10 is untested on a Radeon here** — built from user logs of the NVIDIA build. Reports welcome.
 - **A rotated display:** 180° is turned back over on capture; 90° and 270° are not handled yet and come out with the sides swapped.
-- **Pipeline latency** is 40–60 ms (17-20ms with Boost Mode) — fine interactively, not competitively; **processing resolution is capped at 2560×1440**, output is always your full native resolution.
+- **Pipeline latency** was measured on the NVIDIA build (40-60 ms there); on a Radeon it is unknown until the pass runs. **Processing resolution is capped at 2560×1440**, output is always your full native resolution.
 - **Window mode:** the panel's hard blink and the drag stutter are fixed in
   this build; focus/taskbar polish (the overlay dropping behind on the first
   focus change) is still in progress.

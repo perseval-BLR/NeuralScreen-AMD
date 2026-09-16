@@ -5,9 +5,11 @@ NeuralScreen AMD runs its neural pass on an **AMD Radeon RX 7000 / 9000**
 does not support it opens, captures and shows its menu as usual, and the
 status line says **card not supported** instead of processing the picture.
 
-The pass is experimental: it is the same kind of neural rendering, but through
-a different runtime, and it has been tested far less. It either works or it tells you exactly why it did not -
-and the "why" is what makes the next fix possible.
+This is an experiment that has not run on a Radeon yet: the pass was written
+against the runtime's own offsets and verified by compilation and a walk of
+every startup gate, but no AMD card has produced a processed frame with it.
+It either works or it tells you exactly why it did not - and the "why" is
+what makes the next fix possible.
 
 **Requirements**
 
@@ -56,11 +58,10 @@ default, **CPU DIS** and **NVOFA motion (NVIDIA)** turn the pass off. Changing
 it restarts the worker, and the log says what happened.
 
 The pass runs the network at a **reduced resolution** (the same "Network
-resolution" control the NVIDIA path uses) and composes the result back at full
-size. This matters more here than on NVIDIA: the AMD network costs roughly
-30 ms per megapixel, so at "full screen" on a 4K desktop a frame would take a
-quarter of a second. A reduced network resolution is the one control that
-moves the frame rate much - start there.
+resolution" control the NVIDIA path uses) and composes the result back at
+full size. How much one frame costs on a Radeon is exactly one of the things
+this test is meant to find out - until then, the network resolution is the
+control worth trying first if a frame takes too long.
 
 ## 3. What the log says
 
