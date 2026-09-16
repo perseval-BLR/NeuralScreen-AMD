@@ -89,14 +89,27 @@ Press **Settings -> Program -> Create diagnostic package** and attach what it
 writes. One button, one file: the package carries `NeuralScreen.log`, your card
 model and driver version, the runtime's hash, and the stage where it stopped -
 with your user name and absolute paths replaced by placeholders before anything
-is written. If you ran the probe (`native\probe_amd.exe`), its log is copied
-next to the archive, so the report is still a single thing to attach.
+is written. Three logs are copied next to the archive as well: the probe's own
+`probe_amd.log`, and **`dlssnr_on_amd.log`** - the runtime's own log, which
+records the staging formats, per-job timings, timeouts and faults from inside
+the engine. That last one is the most useful file on a machine where the picture
+never appears.
 
 What it does not do: it never uploads anything by itself. The ZIP lands in a
 `diagnostics` folder next to the program and stays there until you send it.
 
-The log names the exact failure - a missing file, an unknown build, no HIP
-device, or the engine's own refusal reason. That is the point of this first
+**If the program disappears or the settings will not open:** that is a crash,
+not a silent exit, and the report says so. `NeuralScreen.log` gets a line like
+
+    [crash] === CRASH: ACCESS_VIOLATION (0xC0000005) at dlssnr_amd_pass1.dll + 0x...
+
+naming the code, the module that faulted and the offset inside it, plus how far
+the pass had got (`frames=0` means it died building the first frame). The menu
+itself now works even when the pass never started: open it with **Num 2**, or
+from the tray icon - that is where the settings and the diagnostic button live.
+
+Otherwise the log names the exact failure - a missing file, an unknown build, no
+HIP device, or the engine's own refusal reason. That is the point of this first
 release: it is built to explain itself.
 
 ## Known limits of this first version

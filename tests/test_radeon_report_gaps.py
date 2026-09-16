@@ -1,0 +1,167 @@
+"""The first Radeon report must be readable, and this pins every gap it found.
+
+Issue #1, the first live report from an RX 9070 XT, read like this:
+
+    [main] worker window unavailable (the worker stopped after 0 of 4 reply
+    bytes) - output through pygame
+    [main] worker lost while sending - restarting (1/3)
+    ...
+    [main] the worker died 3 times in a row - NR OFF
+    [main] worker exited cleanly (code 3221225477)
+    [main] overlay menu opened
+    [main] overlay menu closed
+    [main] overlay menu opened
+    [main] exit: tray or the quit hotkey (frames processed 0)
+
+Four separate reporting failures are visible in those lines, and each one
+cost a round trip. This pins the fix for each:
+
+1. ``3221225477`` is ``0xC0000005`` - an ACCESS_VIOLATION - and the log called
+   it "exited cleanly". The single line a reader needed was the line that
+   lied.
+2. The crash happened on the engine's own thread, where the host's ``__try``
+   blocks cannot see it, so the worker died without writing anything about
+   why. The Windows-level filter now names the code, the faulting module and
+   its offset, and its "[crash]" tag is in the log filter so the lines reach
+   ``NeuralScreen.log`` instead of being dropped.
+3. "overlay menu opened" while the user reported "can't open settings": the
+   menu is drawn into the overlay window, and the failure path had hidden it.
+   The menu now brings the layer up.
+4. Nothing collected the engine's own ``dlssnr_on_amd.log`` - the one file
+   that records what the runtime was doing when it faulted.
+
+Checked against the sources, plus the exit-code table driven directly. Run:
+
+    runtime\\python.exe tests\\test_radeon_report_gaps.py
+"""
+import sys
+from pathlib import Path
+
+BASE = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE))
+
+NATIVE = BASE / "native"
+
+
+def main() -> int:
+    failures = []
+    pipeline_src = (BASE / "pipeline.py").read_text(encoding="utf-8")
+    host_src = (NATIVE / "dlss5-feed-host64.cpp").read_text(encoding="utf-8",
+                                                           errors="replace")
+    bridge_src = (NATIVE / "amd" / "amd_bridge.inl").read_text(
+        encoding="utf-8", errors="replace")
+    runtime_src = (NATIVE / "amd" / "amd_runtime.cpp").read_text(
+        encoding="utf-8", errors="replace")
+    runtime_h = (NATIVE / "amd" / "amd_runtime.h").read_text(
+        encoding="utf-8", errors="replace")
+    commands_src = (BASE / "commands.py").read_text(encoding="utf-8")
+    display_src = (BASE / "display.py").read_text(encoding="utf-8")
+    main_src = (BASE / "main.py").read_text(encoding="utf-8")
+
+    # --- 1. a crashed worker no longer reads as a clean exit --------------
+    from pipeline import _EXIT_CODE_NAMES
+    for code, name in ((0xC0000005, "ACCESS_VIOLATION"),
+                       (0xC00000FD, "STACK_OVERFLOW"),
+                       (0xC0000374, "HEAP_CORRUPTION"),
+                       (0xC0000409, "STACK_BUFFER_OVERRUN"),
+                       (0xC0000135, "DLL_NOT_FOUND")):
+        if _EXIT_CODE_NAMES.get(code) != name:
+            failures.append(f"exit code 0x{code:08X} does not resolve to {name}")
+    if "_EXIT_CODE_NAMES.get(code & 0xFFFFFFFF)" not in pipeline_src:
+        failures.append("shutdown_worker does not consult the exit-code table - "
+                        "a crash would read as 'exited cleanly' again")
+    if "the worker CRASHED" not in pipeline_src:
+        failures.append("shutdown_worker has no crash line - the reader is "
+                        "left with a bare number")
+
+    # --- 2. the filter that names a fault on the engine's own thread ------
+    if "SetUnhandledExceptionFilter(CrashFilter)" not in host_src:
+        failures.append("the crash filter is never installed - a fault on the "
+                        "engine's own thread kills the worker silently")
+    for token in ("ACCESS_VIOLATION", "ExceptionAddress", "GetModuleHandleExA"):
+        if token not in host_src:
+            failures.append(f"the crash filter does not report {token}")
+    # The offsets and the counts are what name the stage; without them the
+    # report says "it crashed" and nothing about where.
+    if "AmdCrashCounters" not in host_src or "AmdCrashCounters" not in bridge_src:
+        failures.append("the crash report carries no AMD counters - the log "
+                        "cannot say whether the engine had started")
+    # And the tag has to be one the Python side forwards, or the whole filter
+    # writes into a log nobody sees.
+    if '"[crash]"' not in pipeline_src:
+        failures.append("[crash] is not in _LOG_ALWAYS - the crash lines are "
+                        "dropped before they reach NeuralScreen.log")
+    if "[crash]" not in host_src:
+        failures.append("the crash filter writes untagged lines - they would "
+                        "be filtered out of the shared log")
+
+    # --- 3. the menu must be reachable with a dead pipeline ---------------
+    if "def show_for_menu" not in display_src:
+        failures.append("display has no show_for_menu - the menu can still be "
+                        "invisible after the worker dies")
+    if "st.display.show_for_menu()" not in commands_src:
+        failures.append("opening the menu does not raise the layer - this is "
+                        "the 'can't open settings' report from issue #1")
+    # With worker_failed the loop skips the frame path entirely, so nothing
+    # else paints the menu.
+    if "if st.display.menu.visible:" not in main_src:
+        failures.append("the worker_failed branch does not paint the menu - it "
+                        "would open into a loop that never draws it")
+    # _reveal_pending is exactly why set_visible(True) is not enough: it is
+    # only cleared by reveal(), which waits for a real frame exchange, and on
+    # a broken install that never happens. Search the whole method body.
+    body = display_src.split("def show_for_menu")[1]
+    body = body.split("\n    def ")[0]          # up to the next method
+    if "_reveal_pending = False" not in body:
+        failures.append("show_for_menu does not clear _reveal_pending - "
+                        "set_visible would refuse to show the window")
+
+    # --- 4. the engine's own log reaches the report ----------------------
+    if "dlssnr_on_amd.log" not in commands_src:
+        failures.append("the diagnostic package does not collect the engine's "
+                        "own log - the only witness to a fault inside it")
+    if "sanitize_text" not in commands_src.split("def _copy_log")[0][-400:] and \
+       "sanitize_text" not in commands_src.split("_copy_log(BASE_DIR")[0][-600:]:
+        failures.append("the captured logs are not scrubbed before shipping")
+
+    # --- 5. the three engine-surface flags -------------------------------
+    # ALLOW_RENDER_TARGET was documented as load-bearing in our own comment
+    # and never set: the engine transitions from a state the resource was
+    # never created for.
+    if "D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET" not in bridge_src:
+        failures.append("engine surfaces are created without "
+                        "ALLOW_RENDER_TARGET - the packet declares "
+                        "render-target, and the reference carries both flags")
+
+    # --- 6. the engine's knobs are actually written -----------------------
+    if "SetOptions(opt)" not in bridge_src:
+        failures.append("SetOptions is never called - the engine runs on "
+                        "whatever its DllMain left in those fields")
+    for field in ("kCharMask", "kToneChannels"):
+        if field not in runtime_src:
+            failures.append(f"{field} is never written - the reference writes "
+                            f"it every frame")
+    if "auto_mask" not in runtime_h or "tone_channels" not in runtime_h:
+        failures.append("Options has no mask/channels field to carry them")
+
+    # --- 7. the inline wait budget ---------------------------------------
+    # An empty ini leaves the engine on its 600 ms default, which no job on a
+    # real Radeon fits inside.
+    if "InlineWaitMs" not in runtime_src:
+        failures.append("the ini is created empty - the engine keeps its "
+                        "600 ms inline budget and skips every frame")
+
+    print("    exit codes name the crash: "
+          f"{'ok' if not failures else 'FAILED'}")
+    if failures:
+        print()
+        for f in failures:
+            print(f"  FAIL: {f}")
+        print(f"\n{len(failures)} gap(s) from issue #1 are open again")
+        return 1
+    print("    OK: the first Radeon report would now be readable")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

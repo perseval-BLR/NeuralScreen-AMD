@@ -44,6 +44,39 @@ from settings_io import _work_size, hotkey_labels, nr_verdict
 from winapi import window_frame_rect
 
 
+#: NTSTATUS exit codes a crashed worker leaves behind. Windows reports a
+#: process that died from an exception by putting the status in the exit code,
+#: so these are the names a user's log should carry - "the worker CRASHED:
+#: ACCESS_VIOLATION" is a diagnosis, "exited cleanly (code 3221225477)" is
+#: not. The AMD engine runs on its own threads, so this is the only place
+#: that can name a fault it took down the process with.
+_EXIT_CODE_NAMES = {
+    0xC0000005: "ACCESS_VIOLATION",
+    0xC000001D: "ILLEGAL_INSTRUCTION",
+    0xC0000025: "NONCONTINUABLE_EXCEPTION",
+    0xC000008C: "ARRAY_BOUNDS_EXCEEDED",
+    0xC000008D: "FLOAT_DENORMAL_OPERAND",
+    0xC000008E: "FLOAT_DIVIDE_BY_ZERO",
+    0xC000008F: "FLOAT_INEXACT_RESULT",
+    0xC0000090: "FLOAT_INVALID_OPERATION",
+    0xC0000091: "FLOAT_OVERFLOW",
+    0xC0000092: "FLOAT_STACK_CHECK",
+    0xC0000093: "FLOAT_UNDERFLOW",
+    0xC0000094: "INTEGER_DIVIDE_BY_ZERO",
+    0xC0000095: "INTEGER_OVERFLOW",
+    0xC0000096: "PRIVILEGED_INSTRUCTION",
+    0xC00000FD: "STACK_OVERFLOW",
+    0xC0000135: "DLL_NOT_FOUND",
+    0xC0000139: "ENTRYPOINT_NOT_FOUND",
+    0xC0000142: "DLL_INIT_FAILED",
+    0xC0000374: "HEAP_CORRUPTION",
+    0xC0000409: "STACK_BUFFER_OVERRUN",
+    0xC0000417: "INVALID_CRUNTIME_PARAMETER",
+    0xC0000602: "FAIL_FAST_EXCEPTION",
+    0xC0000408: "FATAL_USER_CALLBACK_EXCEPTION",
+}
+
+
 # Worker lines that always reach the shared log. These are the ones a user
 # needs to answer "which card is running the network, and did it come up":
 # the adapter list and the NS_GPU pick ([host]), the NGX create/init result
@@ -56,7 +89,7 @@ from winapi import window_frame_rect
 #: per-frame profiler lines ([phase]/[pw]) on top of these.
 _LOG_ALWAYS = ("[host]", "[pure]", "[arch]", "[cap]", "[dda]", "[present]",
                "[spout]", "[wgc]", "[video]", "[skip]", "[hdr]", "[nvofa]", "[sr]", "[fg]",
-               "[amd]")
+               "[amd]", "[crash]")
 #: [video] lines that are a heartbeat rather than a diagnostic: the "delivered
 #: frame N" line is printed every 30 frames and would bury the log.
 _LOG_SKIP = ("delivered frame",)
@@ -212,7 +245,23 @@ def shutdown_worker(worker: subprocess.Popen, stop: threading.Event | None = Non
         pass
     try:
         code = worker.wait(timeout=10)
-        print(f"[main] worker exited cleanly (code {code})")
+        # A Windows process that dies from an exception exits with the NTSTATUS
+        # as its exit code - 0xC0000005 and friends - and the old line called
+        # every one of those "exited cleanly". The first Radeon report read
+        # exactly that way: the log said the worker left peacefully while the
+        # code it printed was an access violation, so the one line a reader
+        # needed was the one line that lied. Name the class instead.
+        if code and code != 0:
+            name = _EXIT_CODE_NAMES.get(code & 0xFFFFFFFF)
+            if name:
+                print(f"[main] the worker CRASHED: {name} (exit code {code})")
+            elif code < 0:
+                print(f"[main] the worker was killed (exit code {code}, "
+                      f"0x{code & 0xFFFFFFFF:08X})")
+            else:
+                print(f"[main] the worker left with a non-zero code ({code})")
+        else:
+            print(f"[main] worker exited cleanly (code {code})")
     except subprocess.TimeoutExpired:
         print("[main] worker did not exit within 10 s - forcing termination")
         worker.terminate()

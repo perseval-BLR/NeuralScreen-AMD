@@ -187,6 +187,12 @@ struct Options {
     float local_structure = 1.0f;
     float skin_structure = -1.0f;
     bool enabled = true;
+    //: The engine's character/auto mask. The reference writes it per frame
+    //: from its own switch; leaving it out is not the same as writing 0.
+    bool auto_mask = true;
+    //: Bitfield of the tone channels the style enables (0, 1 or 2). Read by
+    //: the engine per frame like the three intensities above.
+    uint32_t tone_channels = 0;
 };
 
 // --- the driver ------------------------------------------------------------

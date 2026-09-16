@@ -523,6 +523,17 @@ def main() -> int:
                         print(f"[main] auto-revive failed ({exc}) - staying NR OFF",
                               file=sys.stderr)
                         st.worker_failed = True
+                # No frame will arrive while the worker is down, so nothing
+                # else paints the overlay - and the menu lives in it. The
+                # settings and the diagnostic package have to stay reachable
+                # on a machine where the pass never came up, so the layer is
+                # painted here. Cheap: it is one blit per iteration of a loop
+                # that is otherwise sleeping.
+                try:
+                    if st.display.menu.visible:
+                        st.display.draw_overlay()
+                except Exception:
+                    pass
                 time.sleep(0.05)
                 continue
 

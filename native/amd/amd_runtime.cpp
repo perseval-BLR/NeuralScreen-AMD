@@ -214,11 +214,24 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     }
 
     // The engine reads its ini from its own DllMain, so the file must exist
-    // before the module is loaded. The working installation ships it empty.
+    // before the module is loaded, and the keys that matter have to be in it
+    // by then. The working installation creates it empty and lets the engine
+    // fall back to its built-in defaults; those defaults are wrong for a
+    // desktop host in one specific way: InlineWaitMs is 600 ms, while a job
+    // on a real Radeon takes tens of milliseconds. A frame that overruns the
+    // budget is a skipped frame, so every host in the ecosystem lowers it
+    // (the add-on writes 100, the desktop distributions write 25). The
+    // runtime clamps whatever is read into [50, 5000].
+    //
+    // Written only when absent: a user who tuned their own copy keeps it.
     if (GetFileAttributesW(ini_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         HANDLE ini = CreateFileW(ini_path.c_str(), GENERIC_WRITE, 0, nullptr,
                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (ini != INVALID_HANDLE_VALUE) CloseHandle(ini);
+        if (ini != INVALID_HANDLE_VALUE) {
+            CloseHandle(ini);
+            WritePrivateProfileStringW(L"DlssNrOnAmd", L"InlineWaitMs", L"100",
+                                       ini_path.c_str());
+        }
     }
 
     // --- 2. HIP ---------------------------------------------------------
@@ -382,9 +395,18 @@ void Runtime::Shutdown() {
 
 void Runtime::SetOptions(const Options &opt) {
     if (!ready_ || module_ == nullptr) return;
-    At<float>(module_, rva::kLocalTone) = opt.local_tone;
-    At<float>(module_, rva::kLocalStructure) = opt.local_structure;
-    At<float>(module_, rva::kSkinStructure) = opt.skin_structure;
+    // The engine reads every one of these per frame, and the reference
+    // clamps the three intensities into [0, 2] - which is also what turns
+    // this host's "-1 means off" into a legal 0. The mask and the channel
+    // bitfield sit in the same block and are written every frame too: not
+    // writing them is not the same as writing zero, the engine simply keeps
+    // whatever the last writer left there.
+    auto cl01 = [](float v) { return v < 0.0f ? 0.0f : (v > 2.0f ? 2.0f : v); };
+    At<float>(module_, rva::kLocalTone) = cl01(opt.local_tone);
+    At<float>(module_, rva::kLocalStructure) = cl01(opt.local_structure);
+    At<float>(module_, rva::kSkinStructure) = cl01(opt.skin_structure);
+    At<uint32_t>(module_, rva::kCharMask) = opt.auto_mask ? 1u : 0u;
+    At<uint32_t>(module_, rva::kToneChannels) = opt.tone_channels;
     At<uint8_t>(module_, rva::kEnabled) = opt.enabled ? 1 : 0;
 }
 

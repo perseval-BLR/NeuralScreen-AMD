@@ -307,7 +307,14 @@ static ID3D12Resource *AmdMakeTex(UINT w, UINT h_, DXGI_FORMAT fmt,
     rd.Width = w; rd.Height = h_; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
     rd.Format = fmt; rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    rd.Flags = uav ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+    // Both flags always: ALLOW_UNORDERED_ACCESS because the engine writes in
+    // place, ALLOW_RENDER_TARGET because the packet declares render-target and
+    // the engine transitions from it. The reference carries the pair on every
+    // engine surface; dropping either one does not fail, the engine records,
+    // reports healthy and produces nothing (or faults on the transition).
+    rd.Flags = uav ? (D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
+                      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+                   : D3D12_RESOURCE_FLAG_NONE;
     ID3D12Resource *t = nullptr;
     if (FAILED(h.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd, initial,
         nullptr, __uuidof(ID3D12Resource), reinterpret_cast<void **>(&t)))) return nullptr;
@@ -399,20 +406,20 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h)
 
     // Initial state NON_PIXEL_SHADER_RESOURCE, never COMMON: the engine reads
     // its input as a shader resource and the host's own passes transition from
-    // there. ALLOW_UNORDERED_ACCESS because the engine writes in place.
+    // there.
+    //
+    // Three creation flags are load-bearing, and getting any of them wrong
+    // fails silently - the engine records, reports healthy and produces
+    // nothing (or faults). ALLOW_UNORDERED_ACCESS because the engine writes in
+    // place; ALLOW_RENDER_TARGET because the packet declares render-target and
+    // the engine transitions from it. The reference carries both on every
+    // engine surface, so this host does too.
     g_amd.net = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
     g_amd.motion = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16_FLOAT,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
-    // ALLOW_RENDER_TARGET as well: the packet declares render-target and the
-    // engine transitions from it. Getting that flag wrong fails silently -
-    // the engine records, reports healthy and produces nothing.
     if (g_amd.net == nullptr || g_amd.motion == nullptr)
     { Log("[amd] engine surface creation failed at %ux%u", net_w, net_h); AmdReleaseResources(); return false; }
-    {
-        D3D12_RESOURCE_DESC rd = g_amd.net->GetDesc();
-        (void)rd;
-    }
     if (g_amd.depth == nullptr)
         g_amd.depth = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R32_FLOAT,
                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
@@ -436,6 +443,24 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h)
 // which is what makes the AMD pass a drop-in.
 static bool AmdActive() { return g_amd.active && !g_amd.failed; }
 static bool NrReady() { return h.feature != nullptr || AmdActive(); }
+
+// The one line the crash filter can print about the AMD pass: how far it got
+// before the process died. Defined here because g_amd lives here; declared
+// beside the filter, which is compiled long before this file reaches the
+// bridge.
+static void AmdCrashCounters(char *out, size_t cap)
+{
+    _snprintf_s(out, cap, _TRUNCATE,
+                "amd active=%d failed=%d frames=%llu timeouts=%llu refused=%llu "
+                "engine jobs=%u sync=%u engine timeouts=%u",
+                g_amd.active ? 1 : 0, g_amd.failed ? 1 : 0,
+                static_cast<unsigned long long>(g_amd.frames),
+                static_cast<unsigned long long>(g_amd.timeouts),
+                static_cast<unsigned long long>(g_amd.refused),
+                g_amd.active ? g_amd.runtime.JobCount() : 0u,
+                g_amd.active ? g_amd.runtime.SyncCount() : 0u,
+                g_amd.active ? g_amd.runtime.TimeoutCount() : 0u);
+}
 
 // Defined below with the frame; declared here because the router above it
 // needs the name.
@@ -474,6 +499,33 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         return false;
     }
     if (reset) g_amd.runtime.InvalidateHistory();
+
+    // The engine's own knobs, written every frame. Until now SetOptions was
+    // defined and never called, so the engine ran on whatever its DllMain
+    // left in those fields: the sliders moved the host's own composite and
+    // nothing else, and the character mask was whatever the previous writer
+    // put there. The reference writes the same block per frame.
+    {
+        amd_nr::Options opt;
+        opt.local_tone = g_video_options.local_tone;
+        opt.local_structure = g_video_options.local_structure;
+        opt.skin_structure = g_video_options.skin_structure;
+        opt.auto_mask = g_video_options.auto_mask != 0;
+        // The style index selects the tone channels, not a scale: the
+        // engine's Structure channel adds AO, contact shadows and SSS, and
+        // its skin channel routes structure through a character mask - both
+        // wrong for a desktop's flat colour and hard edges. The reference's
+        // own mapping: Default(0) and anything unknown keep the caller's
+        // count, Natural(1) turns the channels off, Cinematic(2) needs at
+        // least one.
+        switch (g_video_options.style)
+        {
+        case 1:  opt.tone_channels = 0; break;
+        case 2:  opt.tone_channels = 1; break;
+        default: opt.tone_channels = 0; break;
+        }
+        g_amd.runtime.SetOptions(opt);
+    }
 
     const bool ts = ProfileGpuBegin(PS_EVAL);
     const uint64_t t0 = GetTickCount64();

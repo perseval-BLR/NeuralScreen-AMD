@@ -149,6 +149,91 @@ static void Log(const char *fmt, ...)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Crash reporting
+// ---------------------------------------------------------------------------
+//
+// An access violation inside the third-party engine arrives on the engine's
+// own worker threads, where no __try of ours can see it: the process simply
+// dies, and the user's log ends on the last line we wrote. That is what made
+// the first Radeon report unreadable - the worker vanished on frame one, the
+// log said nothing, and the only visible symptom was "it does not work".
+//
+// A top-level filter fixes that: it names the code, the faulting module and
+// the offset, and flushes the log before dying. The module matters most -
+// "dlssnr_amd_pass1.dll + 0x3f2a10" says the engine faulted, while
+// "nvngx.dll + 0x..." says it was us.
+
+// Defined next to the AMD bridge (the counters it reports live there).
+static void AmdCrashCounters(char *out, size_t cap);
+
+static LONG WINAPI CrashFilter(EXCEPTION_POINTERS *info)
+{
+    const EXCEPTION_RECORD *rec = info != nullptr ? info->ExceptionRecord : nullptr;
+    const DWORD code = rec != nullptr ? rec->ExceptionCode : 0;
+
+    char where[96] = "(unknown)";
+    if (rec != nullptr && rec->ExceptionAddress != nullptr)
+    {
+        HMODULE mod = nullptr;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCSTR>(rec->ExceptionAddress), &mod) && mod)
+        {
+            char path[MAX_PATH] = {};
+            GetModuleFileNameA(mod, path, MAX_PATH);
+            const char *base = path;
+            if (const char *slash = strrchr(path, '\\')) base = slash + 1;
+            _snprintf_s(where, sizeof(where), _TRUNCATE, "%s + 0x%llX", base,
+                        static_cast<unsigned long long>(
+                            reinterpret_cast<uintptr_t>(rec->ExceptionAddress) -
+                            reinterpret_cast<uintptr_t>(mod)));
+        }
+    }
+
+    const char *name = "UNKNOWN";
+    switch (code)
+    {
+    case EXCEPTION_ACCESS_VIOLATION:         name = "ACCESS_VIOLATION"; break;
+    case EXCEPTION_ILLEGAL_INSTRUCTION:      name = "ILLEGAL_INSTRUCTION"; break;
+    case EXCEPTION_IN_PAGE_ERROR:            name = "IN_PAGE_ERROR"; break;
+    case EXCEPTION_STACK_OVERFLOW:           name = "STACK_OVERFLOW"; break;
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:       name = "INT_DIVIDE_BY_ZERO"; break;
+    case EXCEPTION_PRIV_INSTRUCTION:         name = "PRIV_INSTRUCTION"; break;
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:    name = "ARRAY_BOUNDS_EXCEEDED"; break;
+    case STATUS_HEAP_CORRUPTION:             name = "HEAP_CORRUPTION"; break;
+    case 0xC0000409:                         name = "STACK_BUFFER_OVERRUN"; break;
+    default: break;
+    }
+
+    // Say what the engine was doing when it died - the counters the pass
+    // keeps, and the AMD state, because those name the stage.
+    //
+    // The "[crash]" tag is load-bearing: the Python side prints only the
+    // worker lines carrying a known tag into NeuralScreen.log, so an untagged
+    // line here would be dropped and the report would still be silent about
+    // the crash. The tag is in the host's own filter list.
+    Log("[crash] === CRASH: %s (0x%08X) at %s ===", name, code, where);
+    if (code == EXCEPTION_ACCESS_VIOLATION && rec != nullptr &&
+        rec->NumberParameters >= 2)
+    {
+        Log("[crash] === CRASH: tried to %s address 0x%llX ===",
+            rec->ExceptionInformation[0] == 0 ? "read" : "write",
+            static_cast<unsigned long long>(rec->ExceptionInformation[1]));
+    }
+    // The AMD pass's own counters name the stage: zero frames means it died
+    // building the first one, which is the difference between "the engine
+    // never started" and "the engine ran and fell over later". They live in
+    // the AMD bridge, which is included far below this filter - hence the
+    // forward declaration and its definition next to the bridge.
+    char counters[160] = {};
+    AmdCrashCounters(counters, sizeof(counters));
+    Log("[crash] === CRASH: %s ===", counters);
+    Log("[crash] === CRASH: the worker is gone; the lines above are the last "
+        "ones it wrote ===");
+    return EXCEPTION_EXECUTE_HANDLER;   // let it die, but now it says why
+}
+
 static const char *NgxResultName(NVSDK_NGX_Result r)
 {
     switch (static_cast<unsigned>(r))
@@ -6816,6 +6901,11 @@ int main(int argc, char **argv)
         strcpy_s(s + 1, MAX_PATH - (s + 1 - g_log_path), "dlss5-feed-host.log");
     if (!g_video_mode) { FILE *f = nullptr; if (fopen_s(&f, g_log_path, "w") == 0 && f) fclose(f); }
 
+    // Install the crash filter before anything can fault - the AMD engine
+    // faults on its own threads, and without this the process dies silently
+    // and the log ends mid-sentence (see CrashFilter).
+    SetUnhandledExceptionFilter(CrashFilter);
+
     Log("dlss5-feed-host64 (built %s %s)", __DATE__, __TIME__);
 
     bool  test = false, hide = false, video = false;
@@ -6826,6 +6916,19 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--video") == 0) video = true;
         else if (strcmp(argv[i], "--live") == 0) { video = true; g_live_force = true; }
         else if (strcmp(argv[i], "--hide") == 0) hide = true;
+        // The crash filter is the one piece of this build whose whole job is
+        // to work when everything else has failed, so it must be testable
+        // without waiting for a real fault: this dereferences null on the
+        // main thread and the filter has to name ACCESS_VIOLATION before the
+        // process dies. Undocumented on purpose - it is a self-check, not a
+        // feature.
+        else if (strcmp(argv[i], "--crash-self-test") == 0)
+        {
+            Log("[crash] self-test: about to fault on purpose");
+            volatile int *null_ptr = nullptr;
+            *null_ptr = 1;
+            return 0;   // not reached
+        }
         else pid = static_cast<DWORD>(strtoul(argv[i], nullptr, 10));
     }
     if (!test && !video && pid == 0)

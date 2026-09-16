@@ -479,6 +479,32 @@ class Display:
             finally:
                 self._reveal_pending = False
 
+    def show_for_menu(self) -> None:
+        """Make the overlay visible for the menu even with no frame ever seen.
+
+        The menu is drawn into this window, so a hidden window means a menu
+        that opens, reports itself as open, and is invisible. That is exactly
+        what the first Radeon report hit: the worker died on frame one, the
+        failure path called set_visible(False) to keep the desktop clear,
+        _reveal_pending was still set (reveal() only runs after a real frame
+        exchange), and Num2 then toggled a menu nobody could see - "not
+        working / can't open settings".
+
+        The menu is the only way to reach the settings and the diagnostic
+        package, and those are the two things a broken install needs most, so
+        it must be reachable whatever the pipeline is doing. Showing the
+        layer is safe here: the menu paints an opaque panel and keys out the
+        rest, which is what draw_overlay does for it anyway.
+        """
+        try:
+            hwnd = pygame.display.get_wm_info()["window"]
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW
+            self._visible = True
+            self._reveal_pending = False
+            self._set_topmost()
+        except Exception:
+            pass
+
     def is_visible(self) -> bool:
         return getattr(self, "_visible", True)
 

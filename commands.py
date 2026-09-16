@@ -123,16 +123,35 @@ def create_diagnostics(st) -> None:
                 log_path=BASE_DIR / "NeuralScreen.log",
             )
             result = create_diagnostic_bundle(target, request)
-            # The probe log is the AMD path's own evidence and the bundle
-            # builder knows nothing about it: it ships as its own file next
-            # to the ZIP, so the report is still one thing to attach.
-            probe = BASE_DIR / "native" / "probe_amd.log"
-            if probe.is_file():
+            # The two logs the bundle builder knows nothing about. Both ship
+            # as their own files next to the ZIP, so a report is still one
+            # thing to attach, and both are scrubbed with the bundle's own
+            # sanitizer - they are written by other people's code and carry
+            # whatever paths that code decided to print.
+            from diagnostics import sanitize_text
+
+            def _copy_log(src, name: str, limit: int) -> None:
+                if not src.is_file():
+                    return
                 try:
-                    (out_dir / f"probe_amd-{stamp}.log").write_bytes(
-                        probe.read_bytes()[-256 * 1024:])
+                    raw = src.read_bytes()[-limit:]
+                    text = raw.decode("utf-8", "replace")
+                    (out_dir / f"{name}-{stamp}.log").write_text(
+                        sanitize_text(text, sensitive_values=()),
+                        encoding="utf-8")
                 except OSError:
                     pass
+
+            # The probe's verdict: files present, known build, HIP sees the
+            # card - the three questions asked before the pass is wired in.
+            _copy_log(BASE_DIR / "native" / "probe_amd.log", "probe_amd", 256 * 1024)
+            # The engine's OWN log. It records the staging formats, per-job
+            # timings, timeouts and faults from inside the runtime, and it is
+            # the only witness to a fault the engine took on one of its own
+            # threads. The first Radeon report had no such file to attach
+            # because nothing collected it.
+            _copy_log(BASE_DIR / "native" / "dlssnr_on_amd.log",
+                      "dlssnr_on_amd", 512 * 1024)
             st.shot_paths.put(("diagnostics", (True, str(result))))
         except Exception as exc:
             print(f"[main] diagnostic package failed: {exc}", file=sys.stderr)
@@ -531,6 +550,15 @@ def drain_commands(st) -> bool:
                 st.display.set_menu_opaque(opened)
                 st.display.set_menu_input(opened)
                 if opened:
+                    # The menu lives in the overlay window, so a hidden window
+                    # means an invisible menu that still reports itself open -
+                    # the first Radeon report read exactly that way ("can't
+                    # open settings"): the worker had died, the failure path
+                    # hid the layer, and Num2 toggled a panel nobody could
+                    # see. The settings and the diagnostic package are what a
+                    # broken install needs most, so opening the menu brings
+                    # the layer up regardless of the pipeline's state.
+                    st.display.show_for_menu()
                     # In one-window mode the HUD layer is the size of
                     # the captured window - a menu near the edge would
                     # be clipped by it. Expand the layer to the whole
