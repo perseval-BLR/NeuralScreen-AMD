@@ -576,6 +576,27 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
 
     // The engine, recorded into the same list. It is handed shader-readable
     // surfaces and deals with the hazards itself - no barriers here.
+    //
+    // The command list's LAST binding before the record matters: the
+    // reference re-binds the heap, re-sets the root signature and points
+    // table 0 at SLOT 0 (the engine's own set: the work surface as an SRV and
+    // the same resource as a UAV) immediately before filling the packet, and
+    // says why - "the engine opens the resource for HIP access itself; this
+    // binding is here so the command list matches the one the engine was
+    // written against". Our motion pass above leaves table 0 on slot 1, so
+    // without this the engine is handed a list whose bindings are somebody
+    // else's.
+    {
+        AmdBindTriplet(0, g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                       g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                       g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
+        ID3D12DescriptorHeap *heaps[] = { g_amd.heap };
+        h.list->SetDescriptorHeaps(1, heaps);
+        h.list->SetComputeRootSignature(g_amd.rs);
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_amd.heap->GetGPUDescriptorHandleForHeapStart();
+        h.list->SetComputeRootDescriptorTable(0, gpu);
+    }
+
     const float mv_scale_x = v.w != 0 ? static_cast<float>(nw) / static_cast<float>(v.w) : 1.0f;
     const float mv_scale_y = v.hgt != 0 ? static_cast<float>(nh) / static_cast<float>(v.hgt) : 1.0f;
     const bool recorded = g_amd.runtime.Record(
@@ -737,6 +758,15 @@ static bool AmdInit()
 
     Log("[amd] runtime: %s", AmdImageKindName(g_amd.runtime.Kind()));
     Log("[amd] sha256: %s", g_amd.runtime.FoundHash().c_str());
+
+    // Re-assert the crash filter: the engine installs its own from DllMain and
+    // replaces the process's, which is why the second Radeon report carried no
+    // [crash] line while the engine's own log carried four. Its filter writes
+    // only to dlssnr_on_amd.log - the file the user is NOT asked to attach
+    // first - while ours writes the log they are. Both should end up in a
+    // report, so ours is re-installed once the engine has had its turn.
+    SetUnhandledExceptionFilter(CrashFilter);
+
     if (g_amd.runtime.Kind() == amd_nr::ImageKind::Stock)
         Log("[amd] WARNING: the runtime is unpatched, so it will install its own "
             "hooks and fight this host for the frame - expect glitches; the tested "

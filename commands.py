@@ -630,6 +630,10 @@ def drain_commands(st) -> bool:
                 st.tray._set_state(nr=not st.paused)
             elif cmd == "screenshot_menu":
                 open_save_dialog(st)
+            elif cmd == "diagnostics":
+                # From the tray icon: the one report path that does not need
+                # the overlay window to accept a click (see TrayController).
+                create_diagnostics(st)
             elif cmd == "framegen":
                 # A plain on/off for Frame Generation (user request 15.09).
                 # The same path the menu switch takes, so the config write,

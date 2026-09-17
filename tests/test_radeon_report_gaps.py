@@ -151,6 +151,49 @@ def main() -> int:
         failures.append("the ini is created empty - the engine keeps its "
                         "600 ms inline budget and skips every frame")
 
+    # --- 8. regression set: the second Radeon report ----------------------
+    # v0.1.4 fixed the reporting and shipped three new bugs of its own, all
+    # visible in the same user's second report. Pinned one by one.
+    #
+    # (a) The engine's log recorded `mode async` although this host writes
+    #     Inline=1: the write ORDER is part of the contract, and Inline has to
+    #     be written twice (before Enabled, and again after it, right before
+    #     Interop and Init). One write is not enough.
+    if runtime_src.count("rva::kInlineMode) = 1") < 2:
+        failures.append("Inline is written once - the reference writes it twice "
+                        "around Enabled, and the engine comes up async without it")
+    if "mode async" not in runtime_src:
+        failures.append("the reason the double write exists is not recorded - "
+                        "the next reader will delete it again")
+    # (b) The menu opened on a magenta screen and swallowed every click:
+    #     draw_overlay fills with CHROMA_KEY, which only cuts out if the layer
+    #     is keyed, and the failure branch's `continue` skipped the only code
+    #     that read mouse events.
+    if "st.display.set_hud_only(True)" not in main_src:
+        failures.append("the failure branch paints the menu without keying the "
+                        "layer - the chroma fill shows as a magenta screen")
+    events_before = main_src.find("for ev in pygame.event.get()")
+    worker_failed_at = main_src.find("if st.worker_failed:")
+    if events_before < 0 or worker_failed_at < 0:
+        failures.append("the event pump or the worker_failed branch is gone")
+    elif events_before > worker_failed_at:
+        failures.append("the event pump sits AFTER the worker_failed branch - "
+                        "its `continue` skips it, so the menu ignores clicks")
+    # (c) The engine is handed a list whose last binding must be its own
+    #     slot 0 (work surface as SRV and UAV), not whatever the host's
+    #     motion pass left behind.
+    if "AmdBindTriplet(0, g_amd.net" not in bridge_src:
+        failures.append("no slot-0 rebind before the record - the engine gets "
+                        "a list whose bindings belong to the host's last pass")
+    # (d) The report has to be reachable when the overlay is not: the tray
+    #     icon is a Windows-owned menu and works whenever the process lives.
+    if "_diagnostics" not in (BASE / "tray.py").read_text(encoding="utf-8"):
+        failures.append("the tray has no diagnostics item - a user whose "
+                        "overlay misbehaves cannot produce a report at all")
+    commands_src2 = (BASE / "commands.py").read_text(encoding="utf-8")
+    if 'cmd == "diagnostics"' not in commands_src2:
+        failures.append("the tray's diagnostics command is not routed")
+
     print("    exit codes name the crash: "
           f"{'ok' if not failures else 'FAILED'}")
     if failures:

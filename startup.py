@@ -470,6 +470,8 @@ def bring_up(st) -> None:
     st.tray = TrayController(st.tray_commands, labels={
         "settings": UI_STRINGS[st.lang].get("settings_title", "Settings"),
         "quit": UI_STRINGS[st.lang].get("exit", "Exit"),
+        "diagnostics": UI_STRINGS[st.lang].get(
+            "diagnostics_create", "Create diagnostic package"),
     })
     st.tray._set_state(nr=True, scale=st.work_scale)
     st.tray.start()

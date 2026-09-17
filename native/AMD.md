@@ -105,8 +105,13 @@ not a silent exit, and the report says so. `NeuralScreen.log` gets a line like
 
 naming the code, the module that faulted and the offset inside it, plus how far
 the pass had got (`frames=0` means it died building the first frame). The menu
-itself now works even when the pass never started: open it with **Num 2**, or
-from the tray icon - that is where the settings and the diagnostic button live.
+itself works even when the pass never started - open it with **Num 2**.
+
+**If the menu itself is unusable** (a magenta slab over the screen, or buttons
+that do not react), do not fight it: the tray icon has its own item,
+**Create diagnostic package**, and the tray menu is drawn by Windows outside
+this program's window. It produces the same ZIP. That path exists because a
+user hit exactly this and could not send a report at all.
 
 Otherwise the log names the exact failure - a missing file, an unknown build, no
 HIP device, or the engine's own refusal reason. That is the point of this first

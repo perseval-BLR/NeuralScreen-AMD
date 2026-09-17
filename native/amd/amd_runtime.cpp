@@ -340,22 +340,30 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     At<int>(module_, rva::kHipDevice) = chosen;
 
     // --- 6. mode flags, in the reference order --------------------------
-    // Inline=1: the engine completes the job on the frame it was given, which
-    // is what the rest of the chain assumes; async hands back an earlier frame
-    // and the chain has no path for that. Interop=1: zero-copy shared
-    // textures. These writes land AFTER the runtime's DllMain (which reads the
-    // ini), so they win over the file - deliberately.
+    // The ORDER is load-bearing, and so is writing Inline TWICE. The
+    // reference does exactly this (its step 4, then again at step 6 right
+    // before Interop and Init) and says why: "the ini is read in the
+    // runtime's DllMain and these writes land after that, so anything set
+    // here wins. That was tried the other way round - leaving them to the
+    // ini so Inline=0 could be tested - and the result was a black frame,
+    // so they are pinned again. Do not unpin them without testing one
+    // variable at a time."
     //
-    // UseFsrInputs=0: this host is not the FSR path; the frame and the guides
-    // are handed over through the packet. Depth is off until the worker has a
-    // depth source worth handing over.
+    // Our own first Radeon report showed what losing that costs: the
+    // runtime's log recorded `mode async` while this host believed it had
+    // asked for inline, and inline is what the whole chain assumes - async
+    // hands back an earlier frame and nothing downstream has a path for it.
+    // InlineWaitMs alone does not buy the mode back.
     //
-    // NOT written: Tonemap (0x76e20) - the ini keeps the last word there, its
-    // own default is already "auto by input format"; and the wait allowance
-    // (0x76c44) - the engine maintains it and writing it fights the engine.
+    // Inline=1: the engine completes the job on the frame it was given.
+    // Interop=1: zero-copy shared textures (the runtime's own key).
+    // UseFsrInputs=0: this host is not the FSR path; the frame and the
+    // guides are handed over through the packet. UseDepth=0: depth is off
+    // until the worker has a depth source worth handing over.
     At<uint8_t>(module_, rva::kInlineMode) = 1;
-    At<uint8_t>(module_, rva::kInterop) = 1;
     At<uint8_t>(module_, rva::kEnabled) = 1;
+    At<uint8_t>(module_, rva::kInlineMode) = 1;   // again, after Enabled
+    At<uint8_t>(module_, rva::kInterop) = 1;
     At<uint8_t>(module_, rva::kUseFsrInputs) = 0;
     At<uint8_t>(module_, rva::kUseDepth) = 0;
 

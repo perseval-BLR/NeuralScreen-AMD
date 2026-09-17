@@ -26,7 +26,8 @@ import pystray
 from PIL import Image, ImageDraw
 
 #: Fallback labels, used when the caller passes none.
-DEFAULT_LABELS = {"settings": "Settings", "quit": "Exit"}
+DEFAULT_LABELS = {"settings": "Settings", "quit": "Exit",
+                  "diagnostics": "Create diagnostic package"}
 
 
 def _make_icon(size: int = 64) -> Image.Image:
@@ -88,6 +89,19 @@ class TrayController:
     def _open_settings(self, icon, item) -> None:
         self._cmd("settings")
 
+    def _diagnostics(self, icon, item) -> None:
+        """Build the support ZIP without the overlay being involved.
+
+        The menu is the natural home for this button, but the menu lives in
+        the overlay window - and the first Radeon report is the case where
+        that window is exactly what is not working: the panel appeared, the
+        clicks did not land, and the ZIP was never produced. The tray icon is
+        a Windows-owned menu outside our window, so it works whenever the
+        process is alive. This is the fallback path that keeps the whole point
+        of the build - a report - reachable when the UI is not.
+        """
+        self._cmd("diagnostics")
+
     # Scale is NOT changed optimistically: only main knows the bounds and the
     # step (WORK_SCALE_MIN/MAX), and it may also defer applying because of the
     # cooldown. The actual value comes back through _set_state(scale=...).
@@ -114,6 +128,11 @@ class TrayController:
             # default=True: left click on the icon triggers this item
             pystray.MenuItem(self._labels["settings"], self._open_settings,
                              default=True),
+            # The report path that does not depend on our own window. See
+            # _diagnostics: on a machine where the overlay misbehaves, the
+            # menu is exactly what cannot be clicked, and the ZIP is the whole
+            # reason this build exists.
+            pystray.MenuItem(self._labels["diagnostics"], self._diagnostics),
             pystray.MenuItem(self._labels["quit"], self._quit),
         )
 

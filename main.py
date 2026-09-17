@@ -487,6 +487,25 @@ def main() -> int:
             if not commands.drain_commands(st):
                 break
 
+            # --- Input for the overlay menu --------------------------
+            # Events are read only while the menu is open: the rest of the
+            # time the window is click-through, there are no events, and an
+            # extra get() would eat the queue from pump() inside drawing.
+            #
+            # This sits BEFORE the worker_failed branch below, and that is
+            # the fix for the second half of issue #1's first report: that
+            # branch ends in `continue`, so anything below it never ran while
+            # the worker was down. The menu opened, painted... and ignored
+            # every click, because nothing was reading events. "The buttons
+            # could not be clicked at all" was literally true - the loop was
+            # asleep for 50 ms at a time and never looked at the mouse.
+            if st.display.menu.visible:
+                for ev in pygame.event.get():
+                    for action in st.display.menu.handle_event(ev):
+                        commands.apply_menu_action(st, action)
+                if not st.display.menu.dragging:
+                    st.display.menu.set_state(settings_io.menu_payload(st))
+
             # The worker is gone (restart budget exhausted): the pipeline is
             # stopped. Commands still run (Num1 revives it), but no frame is
             # grabbed or sent - the worker is dead and would only be
@@ -527,10 +546,17 @@ def main() -> int:
                 # else paints the overlay - and the menu lives in it. The
                 # settings and the diagnostic package have to stay reachable
                 # on a machine where the pass never came up, so the layer is
-                # painted here. Cheap: it is one blit per iteration of a loop
-                # that is otherwise sleeping.
+                # painted here.
+                #
+                # The layer must be KEYED first. draw_overlay fills the
+                # surface with CHROMA_KEY and relies on the window's colour
+                # key to cut that fill out; with the layer left OPAQUE (the
+                # default, and what it is after the failure path), the same
+                # fill paints the whole screen magenta - the frozen pink slab
+                # with a menu on top that the first Radeon report described.
                 try:
                     if st.display.menu.visible:
+                        st.display.set_hud_only(True)
                         st.display.draw_overlay()
                 except Exception:
                     pass
@@ -641,13 +667,7 @@ def main() -> int:
                 settings_io.warn_hdr(st)
 
             # --- Input for the overlay menu --------------------------
-            # Events are read only while the menu is open: the rest of the
-            # time the window is click-through, there are no events, and an
-            # extra get() would eat the queue from pump() inside drawing.
             if st.display.menu.visible:
-                for ev in pygame.event.get():
-                    for action in st.display.menu.handle_event(ev):
-                        commands.apply_menu_action(st, action)
                 if not st.display.menu.dragging:
                     st.display.menu.set_state(settings_io.menu_payload(st))
 
