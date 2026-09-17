@@ -534,6 +534,19 @@ NR_VERDICT_FAIL = ("feature 18 create failed",   # [pure], the direct refusal
                    "[amd] the runtime did not come up:",  # [amd], the engine's own reason
                    "the neural pass is not running")      # [video], SAFE PASSTHROUGH
 
+#: The pass did not start for a reason that is about the INSTALL, not the card:
+#: a missing runtime file, the wrong build, no HIP. Kept apart from the failure
+#: list above because the two mean different things to a caller that is deciding
+#: what to do about it - the menu shows both as "no neural pass", but a GPU
+#: switch must NOT be reverted, and the card must NOT be marked, on a fault the
+#: user fixes by copying a file (issue #2: clicking through the picker looped,
+#: because every card was judged and condemned for a file that was not there).
+NR_VERDICT_INSTALL = ("dlssnr_amd_pass1.dll not found",
+                      "is not a build these offsets belong to",
+                      "amdhip64_7.dll not found",
+                      "HIP reports no devices",
+                      "dlssnr_on_amd_weights.bin not found")
+
 #: The card is not the kind the pass runs on. A verdict of its own: nothing
 #: is broken and nothing the user can install will change it, so the menu
 #: says "card not supported" rather than "no neural pass".
@@ -545,6 +558,15 @@ def nr_verdict_unsupported(lines) -> bool:
     """Whether the refusal was the HARDWARE rather than a fixable fault."""
     return any(token in line for line in lines
                for token in NR_VERDICT_UNSUPPORTED)
+
+
+def nr_verdict_is_install(lines) -> bool:
+    """Whether the pass stopped for an INSTALL fault rather than a card one.
+
+    Read by pipeline.gpu_came_up: a missing file says nothing about the card,
+    so a GPU switch must not be reverted on it.
+    """
+    return any(token in line for line in lines for token in NR_VERDICT_INSTALL)
 
 
 def nr_verdict(lines):

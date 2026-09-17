@@ -40,7 +40,8 @@ from i18n import STRINGS as UI_STRINGS
 from paths import NATIVE_DIR, WORKER_EXE
 from protocol import (HEADER_FMT, VIDEO_MAGIC, SharedFrameBuffer,
                       WorkerReader, _negotiate_shm, send_dda, send_resize)
-from settings_io import _work_size, hotkey_labels, nr_verdict
+from settings_io import (_work_size, hotkey_labels, nr_verdict,
+                         nr_verdict_is_install)
 from winapi import window_frame_rect
 
 
@@ -863,13 +864,30 @@ def gpu_came_up(st, timeout: float = GPU_VERDICT_TIMEOUT) -> bool:
     Silence is NOT failure. A card that takes its time still works, and
     turning a slow start into an automatic revert would be worse than the
     bug this guards against.
+
+    Neither is a MISSING FILE a verdict about the card, and this is the bug
+    issue #2 hit: the runtime was not installed, so every card in the picker
+    answered "the runtime did not come up", every switch was reverted, and
+    the card was marked as unable to run the pass - clicking through the list
+    looped forever over cards that had nothing wrong with them. An install
+    fault is kept apart and reported as True (the switch stands; the pass is
+    simply off until the file is there), which is what the menu already shows
+    as "no neural pass".
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         worker = getattr(st, "worker", None)
         if worker is not None and worker.poll() is not None:
+            # A worker that DIED is a statement about itself, not about the
+            # install - unless its reason was one of the install faults.
+            tail = st.worker_logs[-120:]
+            if nr_verdict_is_install(tail):
+                return True
             return False
-        verdict = nr_verdict(reversed(st.worker_logs[-120:]))
+        tail = st.worker_logs[-120:]
+        if nr_verdict_is_install(tail):
+            return True
+        verdict = nr_verdict(reversed(tail))
         if verdict is not None:
             return verdict
         time.sleep(0.1)

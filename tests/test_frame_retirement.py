@@ -106,17 +106,32 @@ int main() {
         build.write_text(f'''@echo off
 call "{vcvars}" >nul
 if errorlevel 1 exit /b 1
-cl /nologo /O2 /EHsc /W3 /MD /std:c++17 /I"{native / 'include'}" /I"{native / 'src'}" "{source}" "{native / 'spout_bridge.cpp'}" /Fe:"{work / 'close_check.exe'}" /link "{native / 'lib/Windows_x86_64/x64/nvsdk_ngx_d.lib'}" "{native / 'SpoutDX.lib'}" version.lib kernel32.lib user32.lib gdi32.lib advapi32.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib WindowsApp.lib dwmapi.lib
+cl /nologo /O2 /EHsc /W3 /MD /std:c++17 /I"{native / 'include'}" /I"{native / 'src'}" /c "{native / 'amd/amd_runtime.cpp'}" /Fo:"{work / 'amd_runtime.obj'}"
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /EHsc /W3 /MD /std:c++17 /I"{native / 'include'}" /c "{native / 'amd/amd_fsr.cpp'}" /Fo:"{work / 'amd_fsr.obj'}"
+if errorlevel 1 exit /b 1
+cl /nologo /O2 /EHsc /W3 /MD /std:c++17 /I"{native / 'include'}" /I"{native / 'src'}" "{source}" "{native / 'spout_bridge.cpp'}" "{work / 'amd_runtime.obj'}" "{work / 'amd_fsr.obj'}" /Fe:"{work / 'close_check.exe'}" /link "{native / 'lib/Windows_x86_64/x64/nvsdk_ngx_d.lib'}" "{native / 'SpoutDX.lib'}" version.lib kernel32.lib user32.lib gdi32.lib advapi32.lib ole32.lib d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib WindowsApp.lib dwmapi.lib bcrypt.lib
 ''', encoding='ascii')
+        # errors="replace" matters more than it looks: MSVC prints its banner
+        # and every diagnostic in the CONSOLE codepage (cp866 here), and
+        # text=True alone decodes as UTF-8. The reader thread then dies on the
+        # first non-UTF-8 byte, `.stdout` stays None, and the failure surfaces
+        # as `TypeError: unsupported operand type(s) for +: 'NoneType' and
+        # 'str'` on the assert line - which names the reporter, never the
+        # compile error that actually happened. Same reason as the suite's own
+        # CHILD_ENV: a broken reporter hides the thing it was built to show.
         built = subprocess.run([os.environ['COMSPEC'], '/d', '/c', str(build)], cwd=work,
-                               capture_output=True, text=True, timeout=120)
-        assert built.returncode == 0, built.stdout + built.stderr
+                               capture_output=True, text=True, timeout=120,
+                               encoding='utf-8', errors='replace')
+        assert built.returncode == 0, (built.stdout or '') + (built.stderr or '')
         env = dict(os.environ, PATH=str(native) + os.pathsep + os.environ['PATH'])
         checked = subprocess.run([str(work / 'close_check.exe')], cwd=work, env=env,
-                                 capture_output=True, text=True, timeout=15)
-        assert checked.returncode == 0, checked.stdout + checked.stderr
-        assert 'Close failed' in checked.stdout + checked.stderr
-        assert 'result=failure' in checked.stdout + checked.stderr
+                                 capture_output=True, text=True, timeout=15,
+                                 encoding='utf-8', errors='replace')
+        out = (checked.stdout or '') + (checked.stderr or '')
+        assert checked.returncode == 0, out
+        assert 'Close failed' in out
+        assert 'result=failure' in out
     print('OK: failed Close never submits, advances, or replies; replacement retires safely')
 
 

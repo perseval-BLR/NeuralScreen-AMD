@@ -1569,6 +1569,17 @@ class Display:
             if self._switch_active:
                 pygame.display.flip()
                 return
+        # The fill below is a colour KEY, not a colour: the window cuts it out
+        # and whatever is underneath shows through. That only works while the
+        # layer is actually keyed. On an OPAQUE layer - which is what a worker
+        # restart leaves behind, because forget_present calls
+        # set_hud_only(False) - the same fill paints the whole screen magenta:
+        # the purple slab a user hit after clicking the switch, with the menu
+        # drawn on top of it. Every other call site keys the layer first; doing
+        # it here as well makes the slab impossible instead of a trap each new
+        # caller has to know about.
+        if self._layer_state == LAYER_OPAQUE:
+            self.set_hud_only(True)
         self.screen.fill(CHROMA_KEY)
         self._draw_alerts()
         self._draw_rec_indicator()

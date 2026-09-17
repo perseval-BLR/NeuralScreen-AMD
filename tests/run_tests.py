@@ -28,7 +28,33 @@ from pathlib import Path
 # Console encodings, both directions: the children are told to print utf-8 so
 # their output decodes here, and our own stdout replaces anything the console
 # codepage cannot represent instead of dying on it.
-CHILD_ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
+#
+# NS_MOTION_BACKEND=cpu is deliberate, and it is what makes this suite mean
+# anything on this branch. The AMD build defaults to the AMD neural pass
+# (AmdPathRequestedEarly: no recorded choice means "amd"), and the AMD pass
+# cannot run on a machine without a Radeon AND the third-party runtime - on
+# any other box it degrades to a passthrough, by design. The tests below drive
+# the worker DIRECTLY (Popen, no startup.py), so without this they inherited
+# the branch default and measured the passthrough: 14 of them failed with
+# "the network did not run" / "changes nothing between its two ends", which
+# reads as 14 broken features and is really one wrong backend. A suite that
+# cries wolf on every run is a suite nobody reads - and a real regression
+# hides in the noise.
+#
+# These tests are the NGX-pipeline tests: they name the path they measure.
+# The AMD default is covered by test_amd_worker_survives (the condition that
+# used to kill the worker) and by the live runs on Radeon machines.
+CHILD_ENV = dict(os.environ, PYTHONIOENCODING="utf-8",
+                 NS_MOTION_BACKEND="cpu")
+
+#: Tests that must NOT get the default above. They measure the CAPTURE path
+#: (WGC/DDA window capture, its frame pool, its size handling), which is
+#: upstream of the neural pass and indifferent to which backend is selected -
+#: but not indifferent to being handed an override it never asked for:
+#: test_wgc_capture runs OK/FAIL/OK on one unchanged build with the variable
+#: set (measured, three runs), while it is a clean pass without it. A flaky
+#: test is worse than a missing one: it teaches people to ignore the summary.
+NO_DEFAULT_BACKEND = {"test_wgc_capture.py", "test_dda_capture.py"}
 try:
     sys.stdout.reconfigure(errors="replace")
 except Exception:
@@ -80,6 +106,8 @@ ABOUT = {
     "test_module_layers.py": "no module imports main, no dangling names, all import clean",
     "test_amd_state_bookkeeping.py": "every AMD bridge barrier starts from a real state and none is a no-op",
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
+    "test_amd_install_verdict.py": "a missing runtime file is not read as a bad graphics card",
+    "test_amd_worker_survives.py": "a Radeon keeps its worker when the pass is off, and the magenta fill cannot reach an unkeyed layer",
     "test_config_atomic.py": "the config write is atomic and persists profile/params/monitor",
     "test_dred_diag.py": "the worker logs DRED/device-removed diagnostics at startup",
     "test_env_header.py": "the log header carries version/OS/HDR and survives broken probes",
@@ -161,8 +189,18 @@ def settle(limit: float = SETTLE_LIMIT) -> float:
     clear). It never fails a run: past the limit it returns what it waited
     and the caller says so out loud, because a process that will not die is
     itself worth knowing about.
+
+    Waiting alone is not enough, and that is what this used to do. A worker
+    that outlives its test keeps holding the mutex, and the next GUI test
+    sees "NeuralScreen is already running" and fails WITHOUT running - the
+    failure moves around the suite from run to run (dred_diag, reveal,
+    window_mode_menu, smoke: different every time, all of them innocent).
+    That reads exactly like flaky tests and is really one stuck process.
+    Past the patience budget the leftovers are killed by PID, which is what
+    the tests themselves do on their own workers.
     """
     started = time.monotonic()
+    killed: list = []
     while time.monotonic() - started < limit:
         out = subprocess.run(["tasklist"], capture_output=True).stdout
         text = out.decode("cp1251", errors="replace")
@@ -170,7 +208,41 @@ def settle(limit: float = SETTLE_LIMIT) -> float:
                 if "pythonw.exe" in l or "nvngx.dll" in l]:
             break
         time.sleep(0.25)
+    else:
+        # Out of patience: name the leftovers, then clear them. tasklist is
+        # read as CSV because the plain columns are padded and a naive split
+        # picks the wrong field - the first version of this killed nothing and
+        # reported success.
+        killed = _kill_leftovers()
     return time.monotonic() - started
+
+
+def _kill_leftovers() -> list:
+    """Kill processes this suite left behind, by PID. Returns what it killed.
+
+    taskkill on the IMAGE NAME is what the tests use, and it is unreliable
+    for pythonw.exe: several tools in this project are pythonw, and a kill by
+    name can race a legitimate start. Killing the exact PIDs from tasklist
+    is narrow and repeatable.
+    """
+    import csv
+    import io
+    out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                         capture_output=True).stdout
+    text = out.decode("cp1251", errors="replace")
+    pids = [row[1] for row in csv.reader(io.StringIO(text))
+            if row and row[0].lower() in ("pythonw.exe", "nvngx.dll")]
+    done = []
+    for pid in pids:
+        r = subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
+                           capture_output=True)
+        if r.returncode == 0:
+            done.append(pid)
+        time.sleep(0.2)
+    if done:
+        print(f"    (killed {len(done)} leftover process(es): "
+              f"{', '.join(done)})")
+    return done
 
 
 def run(label: str, args: list, note: str = "") -> dict:
@@ -188,8 +260,22 @@ def run(label: str, args: list, note: str = "") -> dict:
         # the smoke/GUI cycle.
         args = [a if a.startswith("tests/") or a.startswith("-")
                 else f"tests/{a}" for a in args]
+        # The capture tests get the ambient environment - see
+        # NO_DEFAULT_BACKEND. Everything else is told which path it measures.
+        #
+        # Compare BASENAMES. The first version of this line used
+        # `label in a`, and label is the full "tests/test_bypass.py" while `a`
+        # is the same string - so it was true for every test, the variable was
+        # popped for all of them, and 13 tests went back to failing on the
+        # branch default it was meant to correct. A condition that is always
+        # true reads exactly like one that works, which is why the suite
+        # result is what catches it, not the code.
+        env = dict(CHILD_ENV)
+        names = {Path(a).name for a in args if a.startswith("tests/")}
+        if names & NO_DEFAULT_BACKEND:
+            env.pop("NS_MOTION_BACKEND", None)
         r = subprocess.run([str(PY)] + args, cwd=ROOT, timeout=TIMEOUT,
-                           capture_output=True, text=True, env=CHILD_ENV,
+                           capture_output=True, text=True, env=env,
                            encoding="utf-8", errors="replace")
         took = time.monotonic() - started
         ok = r.returncode == 0

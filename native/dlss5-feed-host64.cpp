@@ -6947,12 +6947,25 @@ int main(int argc, char **argv)
     // needs NGX, so the failure stays fatal for those.
     if (!InitNgx())
     {
-        // On the AMD path this is expected and not a failure - but the line
-        // must not read as one: the menu latches its verdict on the token
-        // "NGX unavailable", and on a Radeon that would mark the pass dead
-        // before it ever starts.
-        if (video && AmdPathRequestedEarly())
-            Log("[host] the NGX library is not present - expected on the AMD path, carrying on");
+        // The AMD path needs no NGX at all - but this is not the only way a
+        // video run can find itself without it: the menu's own backend switch
+        // ("CPU DIS", "NVOFA") turns the AMD path off, and then this build has
+        // neither NGX nor a runtime. That combination used to be fatal here,
+        // and it is the one a Radeon user reaches by clicking the switch:
+        // every worker died on startup, the app counted three deaths and
+        // turned the pass off, and the reason in the log named a library the
+        // machine was never expected to have.
+        //
+        // The video loop is ready for a missing NGX - it has a branch of its
+        // own for a null feature handle and passes the raw frame through - so
+        // it is reached instead of being pre-empted. Only the modes that
+        // genuinely need an NGX feature (--test, a game PID) stay fatal.
+        //
+        // The line must not read as a failure either: the menu latches its
+        // verdict on the token "NGX unavailable", and on a Radeon that would
+        // mark the pass dead before it ever starts.
+        if (video)
+            Log("[host] the NGX library is not present - no NGX feature, carrying on");
         else
         { Log("[host] NGX unavailable"); return 1; }
     }
