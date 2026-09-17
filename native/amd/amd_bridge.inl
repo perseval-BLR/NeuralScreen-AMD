@@ -362,6 +362,78 @@ static void AmdReleaseResources()
     g_amd.b_out_src = g_amd.b_out_nat = g_amd.b_out_dst = nullptr;
 }
 
+// The engine's own verdict, echoed into OUR log.
+//
+// The third report from a real Radeon (issue #1) had everything healthy on our
+// side - the pass active, the network running at 16 ms a job, the self-check
+// fine - while the picture was black. The one line that said so lived in the
+// ENGINE's log: `auto-exposure: encoded mean 0.000`, which means the frame it
+// was handed was black. Nothing in NeuralScreen.log carried it, so the report
+// read as "everything works and nothing is on screen".
+//
+// That asymmetry is the expensive part of a black-screen round: the host is
+// confident and the engine knows. This reads the engine's log after the fact
+// and repeats the numbers that decide it, so the next report says it in one
+// file.
+static void AmdEngineHealth()
+{
+    if (g_amd.dir.empty()) return;
+    const std::wstring path = g_amd.dir + L"\\dlssnr_on_amd.log";
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    // The tail only: the log is opened in append mode across runs, and only
+    // the last few KB can belong to this one.
+    LARGE_INTEGER size{};
+    constexpr LONGLONG kWant = 32 * 1024;
+    std::string text;
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0)
+    {
+        const LONGLONG start = size.QuadPart > kWant ? size.QuadPart - kWant : 0;
+        LARGE_INTEGER pos{};
+        pos.QuadPart = start;
+        if (SetFilePointerEx(file, pos, nullptr, FILE_BEGIN))
+        {
+            text.resize(static_cast<size_t>(size.QuadPart - start));
+            DWORD got = 0;
+            if (!ReadFile(file, &text[0], static_cast<DWORD>(text.size()), &got, nullptr))
+                text.clear();
+            else
+                text.resize(got);
+        }
+    }
+    CloseHandle(file);
+    if (text.empty()) return;
+
+    // The last match of each line that decides whether a frame arrived.
+    auto last_with = [&text](const char *needle) -> std::string {
+        const size_t at = text.rfind(needle);
+        if (at == std::string::npos) return std::string();
+        size_t end = text.find('\n', at);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(at, end - at);
+        while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+            line.pop_back();
+        return line;
+    };
+
+    const std::string mean = last_with("encoded mean");
+    if (!mean.empty())
+    {
+        // Said plainly, because this is the line a report is missing: the
+        // engine measured the frame it was handed, and 0.000 means black.
+        const bool black = mean.find("encoded mean 0.000") != std::string::npos;
+        Log("[amd] the engine's own measure: %s%s", mean.c_str(),
+            black ? "  <- it was handed a BLACK frame (our side produced it)" : "");
+    }
+    const std::string jobs = last_with("network job");
+    if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
+    const std::string frames = last_with("frames ");
+    if (!frames.empty()) Log("[amd] the engine's route: %s", frames.c_str());
+}
+
 // The 1x1 exposure the engine is handed instead of letting it adapt its own.
 // The reference's own measurements are the reason: its choice swung between
 // 0.645 and 0.925 on input whose mean never left 0.48..0.51, which reads as a
@@ -436,7 +508,17 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
 
     // Initial state NON_PIXEL_SHADER_RESOURCE, never COMMON: the engine reads
     // its input as a shader resource and the host's own passes transition from
-    // there.
+    // there. `net` is the one exception and the reason is below.
+    //
+    // A hypothesis was tested here and dropped: probe_fsr creates the dispatch
+    // output readable and writable, dispatches in both cases, and counts what
+    // comes back - BOTH write every pixel (230400/230400 on the bench). So a
+    // creation state alone does not black a frame, and the black picture in
+    // issue #1 has some other cause, still open. What IS fixed here is the
+    // state machinery, because a barrier that lies is undefined behaviour:
+    // `up_out` used to be created writable while the barrier opening the frame
+    // claimed it was leaving readable (tests/test_amd_state_bookkeeping.py
+    // fails on that code and passes on this one).
     //
     // Three creation flags are load-bearing, and getting any of them wrong
     // fails silently - the engine records, reports healthy and produces
@@ -445,7 +527,7 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
     // the engine transitions from it. The reference carries both on every
     // engine surface, so this host does too.
     g_amd.net = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
+                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
     g_amd.motion = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16_FLOAT,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
     // The converted frame the FSR dispatch reads, and the display-resolution
@@ -455,6 +537,9 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
     g_amd.fsr_in = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
     if (out_w != net_w || out_h != net_h)
+        // Writable, matching the working reference: dispatch B declares this as
+        // its OUTPUT, so it is born in the state its own dispatch names and the
+        // frame's round trip returns it there.
         g_amd.up_out = AmdMakeTex(out_w, out_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
     if (g_amd.net == nullptr || g_amd.motion == nullptr || g_amd.fsr_in == nullptr ||
@@ -755,15 +840,39 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // `net` through its own worker between the two submissions, so this is the
     // first moment the network's result exists. No motion vectors - that is
     // how the runtime knows not to run the network on this one too.
+    //
+    // The round trip below is taken from the host that WORKS, barrier for
+    // barrier, because a state mismatch is invisible: no error, no warning,
+    // and only a wrong picture. What the reference does, and this host now
+    // does the same:
+    //
+    //   net      created UNORDERED_ACCESS (dispatch A declares it as its
+    //            output), readable while dispatch B reads it as its colour,
+    //            and returned to writable at the end of every frame
+    //   up_out   created UNORDERED_ACCESS (dispatch B declares it as its
+    //            output), readable while the final pass reads it, and returned
+    //            to writable at the end of every frame
+    //
+    // The old code had `up_out` created writable while the barrier that opened
+    // the frame claimed it was leaving readable - a barrier that lies about the
+    // state its resource is in, which D3D12 defines as undefined behaviour.
+    // tests/test_amd_state_bookkeeping.py fails on that code and passes on this
+    // one.
+    //
+    // This is alignment with a working implementation, NOT a proven fix for the
+    // black picture in issue #1: probe_fsr dispatches with the surface created
+    // either way and both write every pixel, so the creation state alone does
+    // not black a frame. That cause is still open.
     if (g_amd.fsr.Upscaling()) {
         const float frame_ms = g_amd.last_frame_ms > 0.0f ? g_amd.last_frame_ms : 16.6f;
-        // up_out is left in NON_PIXEL_SHADER_RESOURCE by the previous frame's
-        // read; net is already readable (the engine leaves its output that
-        // way). Only up_out moves.
-        D3D12_RESOURCE_BARRIER u = Transition(
-            g_amd.up_out, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        h.list->ResourceBarrier(1, &u);
+        // net: writable where the engine left it -> readable for dispatch B,
+        // which declares it as its colour input.
+        D3D12_RESOURCE_BARRIER n0 = Transition(
+            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.list->ResourceBarrier(1, &n0);
+        // up_out needs nothing before the dispatch: it is already writable, and
+        // that is what the dispatch declares for its output.
         std::string why;
         if (!g_amd.fsr.DispatchUpscale(h.list, g_amd.net, g_amd.depth,
                                        g_amd.up_out, frame_ms, reset != 0, why)) {
@@ -777,12 +886,19 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
             g_amd.up_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.list->ResourceBarrier(1, &r);
+    } else {
+        // 1:1: nothing upscales, so the final pass reads the network's own
+        // surface - writable where the engine left it, readable for the read.
+        D3D12_RESOURCE_BARRIER n0 = Transition(
+            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.list->ResourceBarrier(1, &n0);
     }
     {
-        // net is in NON_PIXEL_SHADER_RESOURCE (the engine left it there);
-        // v.color.tex is the native anchor, also a shader resource; v.output
-        // is UNORDERED_ACCESS at rest and stays that way - the compute pass
-        // writes it directly.
+        // final_src is readable now (either the upscale's output or the
+        // network's surface); v.color.tex is the native anchor, also a shader
+        // resource; v.output is UNORDERED_ACCESS at rest and stays that way -
+        // the compute pass writes it directly.
         const UINT dims[4] = { cw, ch, 0, 0 };
         UINT32 block[4] = { cw, ch, 0, 0 };
         float shoulder = g_amd.shoulder;
@@ -809,6 +925,31 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         h.list->SetComputeRootDescriptorTable(0, gpu);
         h.list->Dispatch((cw + 7) / 8, (ch + 7) / 8, 1);
         (void)dims;
+
+        // Both engine surfaces go back to the state their own dispatch declares
+        // for them, which is where the next frame starts:
+        //
+        //   net     -> UNORDERED_ACCESS (dispatch A declares it as its output)
+        //   up_out  -> UNORDERED_ACCESS (dispatch B declares it as its output)
+        //
+        // net was left readable by dispatch B reading it as its colour, or by
+        // the 1:1 branch reading it here; up_out was left readable by the pass
+        // just recorded. Skipping either one means the next frame's dispatch is
+        // told a state the resource is not in - the same class of lie the
+        // creation states used to carry.
+        {
+            D3D12_RESOURCE_BARRIER n1 = Transition(
+                g_amd.net, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            h.list->ResourceBarrier(1, &n1);
+            if (g_amd.fsr.Upscaling() && g_amd.up_out != nullptr)
+            {
+                D3D12_RESOURCE_BARRIER o1 = Transition(
+                    g_amd.up_out, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                h.list->ResourceBarrier(1, &o1);
+            }
+        }
     }
     if (ts) ProfileGpuEnd(PS_EVAL, 4);
     const UINT64 fence = EndCommands();
@@ -840,6 +981,10 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
             static_cast<unsigned long long>(g_amd.refused),
             g_amd.runtime.JobCount(), g_amd.runtime.SyncCount(),
             g_amd.runtime.TimeoutCount());
+        // And what the ENGINE saw, in our file: a healthy host with a black
+        // picture is the failure this whole path failed to describe, and the
+        // only witness to it is the engine's own measure.
+        AmdEngineHealth();
     }
 
     g_last_eval_result = 1;   // the client reads this as "the frame went through"

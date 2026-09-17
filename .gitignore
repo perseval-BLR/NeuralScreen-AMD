@@ -16,6 +16,8 @@ native/launcher.res
 NeuralScreen.exe
 # The FSR bridge's standalone check (tools/build-probe-fsr.bat)
 native/probe_fsr.exe
+# The state-bookkeeping probe (tools/build-probe-states.bat)
+native/probe_states.exe
 
 # NVIDIA redistributable: 165 MB, over the GitHub file limit (100 MB).
 # How to get it - see README.md, the Requirements section.
