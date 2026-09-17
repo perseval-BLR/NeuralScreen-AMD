@@ -22,15 +22,26 @@ what makes the next fix possible.
 
 The pass drives a third-party runtime (the DLSS-NR-on-AMD project). It cannot
 be shipped inside NeuralScreen AMD - its licence forbids redistribution, and its
-weights are derived from NVIDIA's own - so you bring your own copy. Two
-commands turn it into the shape NeuralScreen expects.
+weights are derived from NVIDIA's own - so you bring your own copy. Two steps
+turn it into the shape NeuralScreen expects; the first one fetches the
+installer for you.
 
-1. Download `dlssnr_on_amd_setup.exe` **v0.2.14** from
-   https://github.com/danielblnc/DLSS-NR-on-AMD/releases (other versions will
-   be refused - the driver's offset table belongs to this one build).
-2. Copy it into the `native` folder of NeuralScreen AMD and run it there
-   (answer `y` to "Use this folder?"). It writes `version.dll`,
-   `dlssnr_on_amd.ini` and `dlssnr_on_amd_weights.bin`.
+1. Get the installer. Either let the script fetch it:
+
+   ```
+   runtime\python.exe tools\prepare_amd_runtime.py --download
+   ```
+
+   It downloads `dlssnr_on_amd_setup.exe` **v0.2.14** from the author's own
+   release page and checks the size against the one published for that release.
+   Nothing of it passes through this project - the file goes from his releases
+   to your machine, which is what his licence asks for. Or download it by hand
+   from https://github.com/danielblnc/DLSS-NR-on-AMD/releases (other versions
+   will be refused: the driver's offset table belongs to this one build) and
+   put it in the `native` folder.
+2. Run the installer in the `native` folder (answer `y` to "Use this folder?").
+   It writes `version.dll`, `dlssnr_on_amd.ini` and
+   `dlssnr_on_amd_weights.bin`.
 3. Run the preparation script from the NeuralScreen AMD folder:
 
    ```
@@ -40,21 +51,7 @@ commands turn it into the shape NeuralScreen expects.
    It verifies the runtime is the build the driver knows, applies the five
    documented patches (without them the runtime installs its own hooks and
    fights NeuralScreen for the frame), and writes `dlssnr_amd_pass1.dll`.
-4. **Copy the FidelityFX upscaler next to the runtime.** The neural pass needs
-   `amd_fidelityfx_upscaler_dx12.dll`, and without it the pass runs and
-   processes nothing:
-
-   The runtime is written as a `version.dll` proxy for a *game*: it hooks the
-   FidelityFX upscale dispatch and takes the frame from there. A host that
-   never dispatches FSR gives it nothing to attach to, and it falls back to
-   routing a backbuffer that was never ours - the network runs, the picture
-   stays black, and the runtime's own log says
-   `frames N dispatches 0 ... route backbuffer`.
-
-   The file ships inside OptiScaler's FSR package (it is AMD's own upscaler,
-   MIT-licensed); put it in `native\` beside the runtime. The preparation
-   script warns if it is missing.
-5. Check the result:
+4. Check the result:
 
    ```
    native\probe_amd.exe
@@ -63,6 +60,17 @@ commands turn it into the shape NeuralScreen expects.
    It reports what it found, whether the build is the known one, and whether
    HIP sees your card. **Keep `native\probe_amd.log`** - it is the first thing
    a bug report should carry.
+
+The FidelityFX upscaler (`amd_fidelityfx_upscaler_dx12.dll`) needs nothing from
+you: it **ships in the archive**, because AMD's licence permits redistributing
+that binary (see `THIRD-PARTY-NOTICES.md`). It is not optional - without it the
+pass runs, reports healthy and paints a black picture:
+
+> The runtime is written as a `version.dll` proxy for a *game*: it hooks the
+> FidelityFX upscale dispatch and takes the frame from there. A host that never
+> dispatches FSR gives it nothing to attach to, and it falls back to routing a
+> backbuffer that was never ours - the network runs, the picture stays black,
+> and the runtime's own log says `frames N dispatches 0 ... route backbuffer`.
 
 ## 2. It is on by default
 

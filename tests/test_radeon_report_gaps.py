@@ -247,6 +247,50 @@ def main() -> int:
         failures.append("the upscale is not recorded after the engine's work - "
                         "it would scale the frame the network has not touched")
 
+    # --- 10. the upscaler ships, and the build refuses without it ---------
+    # Its absence is the quietest failure in the whole path: the pass comes up,
+    # the network runs, the self-check says healthy, and the picture is black -
+    # the runtime takes its frame from an FSR dispatch. AMD's licence permits
+    # redistributing this binary, so it belongs in the archive; and a build that
+    # silently omitted it would be indistinguishable from a broken one.
+    zip_src = (BASE / "build_release_zip.py").read_text(encoding="utf-8")
+    if "amd_fidelityfx_upscaler_dx12.dll" not in zip_src:
+        failures.append("the archive does not carry the FidelityFX upscaler - "
+                        "the pass would run and paint nothing")
+    # The guard, located by position: the raise must come after the upscaler
+    # is named (a plain substring search over the whole file would pass on any
+    # "Refusing to build" anywhere in it).
+    up_at = zip_src.find('_UPSCALER = "native/amd_fidelityfx_upscaler_dx12.dll"')
+    refuse_at = zip_src.find("Refusing to build", up_at if up_at >= 0 else 0)
+    if up_at < 0:
+        failures.append("the upscaler check is gone from the build")
+    elif refuse_at < 0 or refuse_at - up_at > 1200:
+        failures.append("the build does not refuse when the upscaler is "
+                        "missing - it would ship a black-screen build")
+    notices = (BASE / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    for token in ("Advanced Micro Devices", "signedbin",
+                  "d0dcccc74a43c44ba435b7a369b456e0970d8a4464e4bd683119b374f2c9fb46"):
+        if token not in notices:
+            failures.append(f"THIRD-PARTY-NOTICES.md does not carry {token!r} - "
+                            "the redistributed binary needs its notice")
+
+    # --- 11. issue #2: the panel must not name a card NVAPI cannot see ----
+    # A Radeon hint on a hybrid machine matched no NVAPI card, and the
+    # fallback named the first one (an RTX 3080) while the worker ran the
+    # Radeon. probe() must answer NOTHING in that case; startup fills the gap
+    # from the DXGI name.
+    gpu_src = (BASE / "gpuinfo.py").read_text(encoding="utf-8")
+    if "return None" not in gpu_src:
+        failures.append("gpuinfo no longer answers None for an unmatched hint - "
+                        "issue #2 can come back")
+    startup_src = (BASE / "startup.py").read_text(encoding="utf-8")
+    if "_pick_driver" not in startup_src:
+        failures.append("the driver line does not follow the working card - "
+                        "a hybrid machine reports the other card's driver")
+    if "gpu_describe(gpu_info) or _working_card_name(st.cfg)" not in startup_src:
+        failures.append("the displayed card no longer falls back to the DXGI "
+                        "name - a Radeon would show as unknown")
+
     print("    exit codes name the crash: "
           f"{'ok' if not failures else 'FAILED'}")
     if failures:

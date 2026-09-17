@@ -54,15 +54,18 @@ screen down the middle to show what the effect does.*
   the HIP 7 runtime that ships with the driver; whether an older driver can
   work at all is one of the open questions.
 - **The neural runtime** — third-party, installed once by hand: step by step
-  in **[native/AMD.md](native/AMD.md)**. Without it the program still starts
-  and logs what is missing.
-- **Nothing else installed.** The release archive brings its own Python.
+  in **[native/AMD.md](native/AMD.md)**. One command fetches the installer from
+  the author's release page; without the runtime the program still starts and
+  logs what is missing.
+- **Nothing else installed.** The release archive brings its own Python, and
+  the FidelityFX upscaler the pass dispatches (AMD's own DLL, redistributed
+  under AMD's licence — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
 
 ## Install
 
 1. Download the archive from [Releases](https://github.com/perseval-BLR/NeuralScreen-AMD/releases)
    and unpack it anywhere.
-2. Set up the neural runtime — **[native/AMD.md](native/AMD.md)**, two commands.
+2. Set up the neural runtime — **[native/AMD.md](native/AMD.md)**, two steps.
 3. Run **`NeuralScreen.exe`**.
 
 Windows will probably warn you about an unknown publisher — the program is not

@@ -21,9 +21,12 @@ native/probe_fsr.exe
 # How to get it - see README.md, the Requirements section.
 native/nvngx_dlssnr.dll
 
-# The FidelityFX upscaler the AMD runtime follows: AMD's own DLL, and while
-# the API headers are MIT the binary is not ours to redistribute. The user
-# copies it in (native/AMD.md, step 4).
+# The FidelityFX upscaler the AMD runtime follows. AMD's own DLL, and it
+# SHIPS in the release archive - see build_release_zip.py. AMD's licence
+# grants binary redistribution and names this exact file among the ones
+# under its MIT terms (docs/license.md, Kits\FidelityFX\signedbin), so the
+# archive may carry it; THIRD-PARTY-NOTICES.md reproduces the notice. Kept
+# out of git the same way the NVIDIA runtime is: a build input, not source.
 amd_fidelityfx_upscaler_dx12.dll
 amd_fidelityfx_loader_dx12.dll
 # The AMD runtime and its weights - third-party, never redistributed.

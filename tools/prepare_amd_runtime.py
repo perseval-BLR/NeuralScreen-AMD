@@ -37,6 +37,11 @@ WHAT IT DOES
   unpatched build too, with a warning - it is useful for a report but is
   expected to glitch.
 
+  Pass --download to fetch the installer from the author's own release page
+  instead of copying it in by hand. The file is not redistributed here: it
+  travels from his releases to your machine, verified against the size and
+  hash published for that release.
+
 Run from the NeuralScreen folder:   python tools\\prepare_amd_runtime.py
 """
 
@@ -52,6 +57,16 @@ from pathlib import Path
 STOCK_SIZE = 7_156_224
 STOCK_SHA256 = "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84"
 PATCHED_SHA256 = "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8"
+
+#: Where --download gets the installer. The author's own release page, so the
+#: file goes from him to the user and never through this project - his licence
+#: forbids redistribution and asks for a link instead. The size is pinned:
+#: a release is immutable, so a download of a different size is not the file
+#: this driver's patches were written against.
+INSTALLER_URL = ("https://github.com/danielblnc/DLSS-NR-on-AMD/releases/download/"
+                 "v0.2.14/dlssnr_on_amd_setup.exe")
+INSTALLER_NAME = "dlssnr_on_amd_setup.exe"
+INSTALLER_SIZE = 7_396_082
 
 # The five patches, exactly as the ecosystem's runtime-patches.json carries
 # them - file offsets, with the expected bytes asserted before anything is
@@ -123,6 +138,51 @@ def apply_patches(data: bytearray) -> None:
         data[off:off + len(before)] = bytes.fromhex(after_hex)
 
 
+def download_installer(folder: Path) -> int:
+    """Fetch the author's installer into `folder`. 0 on success.
+
+    The runtime cannot be shipped here (its licence forbids redistribution and
+    asks for a link to the release page instead), so this walks to that page
+    and back with the file. Nothing of it passes through this project, and the
+    size is checked against the pinned one: a release is immutable, so any
+    other size is not the build the offsets and patches belong to.
+    """
+    import urllib.error
+    import urllib.request
+
+    dst = folder / INSTALLER_NAME
+    if dst.is_file() and dst.stat().st_size == INSTALLER_SIZE:
+        print(f"{dst.name} is already here ({INSTALLER_SIZE} bytes)")
+        return 0
+    print(f"downloading {INSTALLER_NAME} from the author's release page...")
+    print(f"  {INSTALLER_URL}")
+    tmp = dst.with_suffix(".part")
+    try:
+        with urllib.request.urlopen(INSTALLER_URL, timeout=120) as resp, \
+                open(tmp, "wb") as fh:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                fh.write(chunk)
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        tmp.unlink(missing_ok=True)
+        print(f"download failed: {exc}\n"
+              "Download it by hand from https://github.com/danielblnc/"
+              "DLSS-NR-on-AMD/releases (v0.2.14) and put it in this folder.",
+              file=sys.stderr)
+        return 6
+    got = tmp.stat().st_size
+    if got != INSTALLER_SIZE:
+        tmp.unlink(missing_ok=True)
+        print(f"the downloaded file is {got} bytes, expected {INSTALLER_SIZE} - "
+              "this is not v0.2.14. Nothing was written.", file=sys.stderr)
+        return 6
+    tmp.replace(dst)
+    print(f"downloaded: {dst} ({got} bytes)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -132,6 +192,9 @@ def main() -> int:
     ap.add_argument("--keep-stock", action="store_true",
                     help="do not patch; keep the runtime's own hooks "
                          "(useful for a report, expected to glitch)")
+    ap.add_argument("--download", action="store_true",
+                    help="fetch the installer from the author's release page "
+                         "instead of copying it in by hand")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -139,6 +202,14 @@ def main() -> int:
     if not folder.is_dir():
         print(f"no such folder: {folder}", file=sys.stderr)
         return 2
+
+    if args.download:
+        rc = download_installer(folder)
+        if rc != 0:
+            return rc
+        print("next: run the installer in that folder and answer y to "
+              '"Use this folder?", then run this script again without '
+              "--download.")
 
     src = folder / "version.dll"
     dst = folder / "dlssnr_amd_pass1.dll"
@@ -218,8 +289,9 @@ def main() -> int:
 
     # The FidelityFX upscaler is the other half of the picture, and its absence
     # is not a crash - it is a pass that runs and processes nothing (the runtime
-    # only takes frames from an FSR dispatch it can hook). Checked here so the
-    # user hears it now rather than from a black screen.
+    # only takes frames from an FSR dispatch it can hook). It SHIPS with the
+    # release, so this is normally satisfied; the check stays for the case of a
+    # user who deleted it.
     upscaler = folder / "amd_fidelityfx_upscaler_dx12.dll"
     if upscaler.is_file():
         print(f"the FidelityFX upscaler is present ({upscaler.name}, "
@@ -228,8 +300,8 @@ def main() -> int:
         print(f"\nWARNING: {upscaler.name} is missing from this folder.")
         print("  The neural pass needs it: the runtime takes the frame from a "
               "FidelityFX upscale dispatch and processes nothing without one.")
-        print("  It ships inside OptiScaler's FSR package (the file is AMD's, "
-              "MIT-licensed). Copy it next to the runtime.")
+        print("  It ships inside this build's archive (native/AMD.md) - restore "
+              "it, or take the copy from OptiScaler's FSR package.")
 
     weights = folder / "dlssnr_on_amd_weights.bin"
     if not weights.is_file():

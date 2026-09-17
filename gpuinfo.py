@@ -45,21 +45,26 @@ class _ArchInfo(ctypes.Structure):
                 ("revision", ctypes.c_uint32)]
 
 
-def _choose_index(names: list, hint) -> int:
-    """Which card the hint names, or 0 - the first one.
+def _choose_index(names: list, hint):
+    """Which card the hint names: an index, or None when nothing matches.
 
-    The hint is the DXGI name of the adapter the pipeline will really run
-    on. NVAPI enumerates in its own order and the two disagree on
-    multi-GPU machines - the first NVAPI card can be the one that does no
-    work at all (issue #81: the menu said RTX 3050 while the 4070 Super
-    did everything). No hint, no cards, or nothing matching keeps the
-    first card, which is what a single-card machine wants.
+    No hint (or no cards) keeps the first card, which is what a single-card
+    machine wants. A hint that matches nothing is NOT a reason to fall back
+    to the first card: the hint is a DXGI adapter name, and NVAPI enumerates
+    NVIDIA cards only - so on a hybrid machine (Radeon + GeForce) the hint
+    names the Radeon, nothing here matches it, and the first NVAPI card is a
+    different card entirely (issue #2: a 9070 XT ran the pass while the panel
+    and the header said RTX 3080). None means "NVAPI has nothing to say about
+    that adapter", and the caller already holds the DXGI name.
     """
+    if not names:
+        return None
     if hint:
         wanted = str(hint).strip().casefold()
         for i, nm in enumerate(names):
             if str(nm).strip().casefold() == wanted:
                 return i
+        return None
     return 0
 
 
@@ -70,6 +75,11 @@ def probe(name_hint: str | None = None) -> dict:
     passes the adapter the worker will really run on, so the line on
     screen and the log name the card that does the work (issue #81).
     Without a hint the first card is described.
+
+    A hint NVAPI knows nothing about answers NOTHING (every field empty),
+    never the first card: the hint is a DXGI name and NVAPI enumerates
+    NVIDIA cards only, so on a hybrid machine it names a Radeon and the
+    first NVAPI card is a different adapter (issue #2).
     """
     out = {"name": "", "arch": "", "arch_group": 0, "family": "",
            "official": False}
@@ -108,6 +118,11 @@ def probe(name_hint: str | None = None) -> dict:
                     nm = buf.value.decode("ascii", "replace").strip()
             names.append(nm)
         chosen = _choose_index(names, name_hint)
+        if chosen is None:
+            # The hint names an adapter NVAPI does not enumerate - a Radeon on
+            # a hybrid machine. Answering with a card anyway would name the
+            # wrong one (issue #2); the caller's DXGI name fills the gap.
+            return out
         gpu = handles[chosen]
 
         name = names[chosen]

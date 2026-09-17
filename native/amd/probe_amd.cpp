@@ -34,6 +34,9 @@ namespace {
 constexpr const wchar_t *kRuntimeName = L"dlssnr_amd_pass1.dll";
 constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
 constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
+//: The FidelityFX upscaler. Not part of the runtime, but the runtime cannot
+//: take a frame without it - it is a game proxy that rides on an FSR dispatch.
+constexpr const wchar_t *kUpscalerName = L"amd_fidelityfx_upscaler_dx12.dll";
 constexpr const wchar_t *kHipName = L"amdhip64_7.dll";
 
 // The build our offsets were read from (see amd_runtime.h).
@@ -178,12 +181,20 @@ int wmain(int argc, wchar_t **argv) {
     out("probe_amd - the AMD neural runtime check\n");
     out("directory: %ls\n\n", dir.c_str());
 
-    // --- 1. the three files ---------------------------------------------
+    // --- 1. the files ---------------------------------------------------
+    // The upscaler is listed with the rest and marked required, and that is
+    // not cosmetic: without it the pass initialises, runs its threads, reports
+    // healthy and produces a BLACK picture, because the runtime takes its
+    // frame from a FidelityFX dispatch it hooks. A user who is told "everything
+    // is here" by this probe and then gets a black screen has been misled by
+    // the one tool built to prevent exactly that.
     struct Item { const wchar_t *name; bool required; };
     const Item items[] = {
         {kRuntimeName, true}, {kWeightsName, true}, {kIniName, false},
+        {kUpscalerName, true},
     };
     bool runtime_present = false;
+    bool upscaler_present = false;
     unsigned long long runtime_size = 0;
     for (const auto &it : items) {
         unsigned long long size = 0;
@@ -197,12 +208,23 @@ int wmain(int argc, wchar_t **argv) {
                 runtime_present = true;
                 runtime_size = size;
             }
+            if (wcscmp(it.name, kUpscalerName) == 0) upscaler_present = true;
         } else if (it.required) {
             out("   <- required");
         }
         out("\n");
     }
     out("\n");
+    if (runtime_present && !upscaler_present) {
+        // Said in full, because the failure it prevents is silent: the pass
+        // comes up, the menu says it is running, and the screen stays black.
+        out("NOTE: the FidelityFX upscaler is missing, and the neural pass needs\n"
+            "      it. The runtime is a game proxy - it takes the frame from an\n"
+            "      FSR upscale dispatch, so with no upscaler to dispatch it has\n"
+            "      nothing to attach to: the network runs, the picture stays\n"
+            "      black. Copy amd_fidelityfx_upscaler_dx12.dll (AMD's own file,\n"
+            "      shipped in OptiScaler's FSR package) next to the runtime.\n\n");
+    }
 
     // --- 2. size and hash -------------------------------------------------
     bool hash_match = false;

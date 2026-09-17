@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.1.6-alpha"
+VERSION = "0.1.7-alpha"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
@@ -49,6 +49,14 @@ extra = [
     # before any of the pass is wired in - and its log is what a report
     # should carry when the pass does not start.
     "native/probe_amd.exe",
+    # The FidelityFX upscaler. Bundled, unlike the runtime itself: it is AMD's
+    # own signed DLL (AMD, California, Authenticode valid) and AMD's licence
+    # grants binary redistribution, naming this exact file under its MIT terms
+    # (docs/license.md, Kits\FidelityFX\signedbin\...). Without it the pass
+    # runs, reports healthy and paints nothing - the runtime takes its frame
+    # from an FSR dispatch, so with no upscaler to dispatch it has nothing to
+    # attach to. Shipping it turns a silent black screen into a working pass.
+    "native/amd_fidelityfx_upscaler_dx12.dll",
 ]
 # tcl/tk stays out of the archive: the tkinter settings window is gone and the
 # whole interface lives in the overlay menu. Nothing in the project imports
@@ -233,6 +241,25 @@ for f in files + extra:
 # The license must be in every archive: a build that lost it is not a release.
 if "LICENSE" not in uniq:
     raise SystemExit("LICENSE is missing from the archive payload. Refusing to build.")
+
+# The FidelityFX upscaler must be there too, and for a quieter reason: without
+# it the AMD pass initialises, runs its threads, prints a healthy self-check
+# and paints a BLACK picture - the runtime takes its frame from an FSR
+# dispatch, so with no upscaler to dispatch it has nothing to attach to. A
+# release missing this file is indistinguishable from a broken one, and the
+# user gets no error to report. Checked on disk rather than in `uniq` because
+# it is a build input kept out of git (see .gitignore).
+_UPSCALER = "native/amd_fidelityfx_upscaler_dx12.dll"
+if not os.path.isfile(_UPSCALER):
+    raise SystemExit(
+        f"{_UPSCALER} is missing - the AMD pass would run and paint nothing. "
+        "Get it from AMD's FSR SDK release (FidelityFX-Samples-*-prebuilt.zip, "
+        "Samples/Upscalers/FidelityFX_FSR/dx12/x64/Release/) or from OptiScaler's "
+        "FSR package, and put it in native/. Refusing to build.")
+_upscaler_data = Path(_UPSCALER).read_bytes()
+_upscaler_sha = hashlib.sha256(_upscaler_data).hexdigest()
+print(f"upscaler: {_UPSCALER} {len(_upscaler_data)} bytes, "
+      f"sha256 {_upscaler_sha[:16]}...")
 
 out = f"neuralscreen-amd-v{VERSION}-full.zip"
 

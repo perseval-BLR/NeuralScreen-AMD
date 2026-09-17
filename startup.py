@@ -185,6 +185,37 @@ def _working_card_name(cfg: dict) -> str:
 ENVIRONMENT: dict = {}
 
 
+def _pick_driver(entries: list, working: str) -> str:
+    """The driver version of the card the worker runs on.
+
+    entries is [(DriverDesc, DriverVersion), ...] from the display class key,
+    working is the DXGI name of the adapter the pipeline really uses.
+
+    The match is exact and case-insensitive first: on a hybrid machine the
+    report must carry the driver of the card doing the work, and it used to
+    prefer the NVIDIA entry outright - so a Radeon running the pass was
+    reported with the GeForce's driver (issue #2: 32.0.16.1692, the 3080's,
+    instead of the Radeon's 32.0.31041.1004).
+
+    The vendor fallbacks stay for the cases with nothing to match: no DXGI
+    name (no adapters listed), or a description that does not match the DXGI
+    one verbatim.
+    """
+    if working:
+        w = str(working).strip().casefold()
+        for desc, ver in entries:
+            if str(desc).strip().casefold() == w:
+                return str(ver)
+    for desc, ver in entries:
+        if "NVIDIA" in str(desc):
+            return str(ver)
+    for desc, ver in entries:
+        d = str(desc)
+        if "AMD" in d or "Radeon" in d:
+            return str(ver)
+    return ""
+
+
 def _log_environment(cfg: dict) -> None:
     """Print the environment header into the log: version, OS, HDR, driver.
 
@@ -213,33 +244,29 @@ def _log_environment(cfg: dict) -> None:
         # names the card the report is about.
         name = g.get("name") or _working_card_name(cfg)
         arch = (f"({g.get('family') or '?'}, arch 0x{g.get('arch_group', 0):X})"
-                if g.get("name") else "(not an NVIDIA card - no NVAPI report)")
-        print(f"[env] GPU: {name or 'unknown'} {arch}")
+                if g.get("name") else "")
+        print(f"[env] GPU: {name or 'unknown'} {arch}".rstrip())
     except Exception:
         pass
     try:
-        # The display driver version, from the display-class registry key.
-        # NVIDIA first (the NVIDIA path), then AMD: this build runs on a
-        # Radeon, and "which driver" is the first question in every report.
+        # The display driver version, from the display-class registry key -
+        # the driver of the card the worker will really run on (see
+        # _pick_driver; "which driver" is the first question in every report).
         import winreg
         base = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
-        chosen = None
-        amd_hit = None
+        entries = []
         for idx in range(16):
             try:
                 with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
                                     f"{base}\\{idx:04d}") as key:
-                    desc, _ = winreg.QueryValueEx(key, "DriverDesc")
-                    if "NVIDIA" in str(desc):
-                        chosen, _ = winreg.QueryValueEx(key, "DriverVersion")
-                        break
-                    if amd_hit is None and ("AMD" in str(desc) or "Radeon" in str(desc)):
-                        amd_hit, _ = winreg.QueryValueEx(key, "DriverVersion")
+                    desc = str(winreg.QueryValueEx(key, "DriverDesc")[0])
+                    ver = str(winreg.QueryValueEx(key, "DriverVersion")[0])
+                    entries.append((desc, ver))
             except OSError:
                 continue
-        picked = chosen or amd_hit
-        if picked is not None:
-            ENVIRONMENT["driver"] = str(picked)
+        picked = _pick_driver(entries, _working_card_name(cfg))
+        if picked:
+            ENVIRONMENT["driver"] = picked
             print(f"[env] driver: {picked}")
     except Exception:
         pass
@@ -401,16 +428,25 @@ def bring_up(st) -> None:
     # knows whether feature 18 was created.
     gpu_info = gpu_probe(_working_card_name(st.cfg))
     # On a Radeon there is no NVAPI to describe the card; the DXGI name is
-    # what the menu and the report need, so the card is still named.
+    # what the menu and the report need, so the card is still named. probe()
+    # answers NOTHING for an adapter NVAPI does not enumerate (a Radeon on a
+    # hybrid machine) - it used to answer the first NVIDIA card instead, and
+    # the panel named the wrong one while the worker ran the Radeon
+    # (issue #2: a 9070 XT ran the pass, the header said RTX 3080).
     st.gpu_text = gpu_describe(gpu_info) or _working_card_name(st.cfg)
     st.gpu_ok: bool | None = None
     st.gpu_unsupported = False    # the verdict's reason, when it is the card
     st.gpu_alerted = False          # the "cannot run the pass" alert, once per verdict
     st.fg_alerted = False           # the "FG could not start" alert, re-armed by the switch
     st.gpu_switch_pending = False   # set by apply_gpu: a split pipeline is worth an alert
-    print(f"[main] GPU: {st.gpu_text or 'unknown'} "
-          f"(group 0x{gpu_info['arch_group']:X}, officially supported: "
-          f"{'yes' if gpu_info['official'] else 'no'})")
+    if gpu_info["name"]:
+        arch_line = (f"(group 0x{gpu_info['arch_group']:X}, officially supported: "
+                     f"{'yes' if gpu_info['official'] else 'no'})")
+    else:
+        # Not an NVIDIA card, or a Radeon on a hybrid machine: NVAPI answers
+        # nothing about it, and the DXGI name above is the whole report.
+        arch_line = "(no NVAPI report - not an NVIDIA card)"
+    print(f"[main] GPU: {st.gpu_text or 'unknown'} {arch_line}")
     # The stock warm-up is 120 discarded evaluations. On a fast Blackwell
     # card that is a second or two; on Turing/Ampere/Ada it can take far
     # longer than the frame watchdog, which then kills the worker on
@@ -421,7 +457,7 @@ def bring_up(st) -> None:
     effective_warmup = st.warmup
     if not gpu_info["official"] and st.warmup > 4:
         effective_warmup = 4
-        print(f"[main] pre-Blackwell GPU: warmup {st.warmup} -> "
+        print(f"[main] pre-Blackwell or non-NVIDIA GPU: warmup {st.warmup} -> "
               f"{effective_warmup} to avoid a false frame-0 watchdog "
               f"timeout")
     # Every later (re)start has to use the same number. It used to read the

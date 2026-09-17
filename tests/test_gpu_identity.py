@@ -43,17 +43,29 @@ FAKE = [(0, "NVIDIA GeForce RTX 4070 SUPER"), (2, "NVIDIA GeForce RTX 3050")]
 def main() -> int:
     failures = []
 
-    # 1. _choose_index: the hint beats position; junk keeps the first card.
+    # 1. _choose_index: the hint beats position; a hint matching nothing
+    #    answers None (NVAPI has nothing to say about that adapter), never
+    #    the first card - which is the issue #2 bug.
     names = ["NVIDIA GeForce RTX 3050", "NVIDIA GeForce RTX 4070 SUPER"]
     if gpuinfo._choose_index(names, "nvidia geforce rtx 4070 super") != 1:
         failures.append("the hint did not match case-insensitively")
     if gpuinfo._choose_index(names, "NVIDIA GeForce RTX 4070 SUPER") != 1:
         failures.append("the exact hint did not match")
-    for hint in (None, "", "RTX 9000"):
+    # No hint at all keeps the first card: a single-card machine's answer.
+    for hint in (None, ""):
         if gpuinfo._choose_index(names, hint) != 0:
             failures.append(f"hint {hint!r} should keep the first card")
-    if gpuinfo._choose_index([], "anything") != 0:
-        failures.append("an empty list should answer 0")
+    # A hint NVAPI cannot match must NOT name a card. This is issue #2: the
+    # hint was a Radeon's DXGI name on a hybrid machine, no NVAPI card
+    # matched, and the first NVAPI card (an RTX 3080) was reported instead
+    # while the worker ran the Radeon.
+    for hint in ("RTX 9000", "AMD Radeon RX 9070 XT"):
+        if gpuinfo._choose_index(names, hint) is not None:
+            failures.append(
+                f"hint {hint!r} is not an NVAPI card - it must answer None, "
+                f"not card {gpuinfo._choose_index(names, hint)}")
+    if gpuinfo._choose_index([], "anything") is not None:
+        failures.append("an empty list must answer None (nothing to describe)")
 
     # 2. _working_card_name mirrors the worker's fallback rule.
     real_list = startup.list_adapters
@@ -92,16 +104,44 @@ def main() -> int:
         failures.append("bring_up does not pass the hint to gpu_probe")
 
     # 5. The real nvapi on this machine answers the same either way
-    #    (one NVIDIA card here, so the hint cannot change the pick - but
-    #    the refactor must not break the answer).
+    #    (one NVIDIA card here, so a hint naming THIS card cannot change
+    #    the pick - the refactor must not break the answer).
     plain = gpuinfo.probe()
     if plain.get("name"):
-        hinted = gpuinfo.probe(FAKE[0][1])
+        my_card = startup.list_adapters()[0][1] if startup.list_adapters() else ""
+        hinted = gpuinfo.probe(my_card)
         if hinted != plain:
             failures.append(
-                f"the hinted probe diverged on this machine: {hinted} vs {plain}")
+                f"the hinted probe of this machine's own card diverged: "
+                f"{hinted} vs {plain}")
+        # And the issue #2 half: a hint that is NOT an NVAPI card must answer
+        # nothing at all, never the first NVAPI card.
+        foreign = gpuinfo.probe("AMD Radeon RX 9070 XT")
+        if foreign != {"name": "", "arch": "", "arch_group": 0,
+                       "family": "", "official": False}:
+            failures.append(
+                f"a Radeon hint answered {foreign!r}; it must answer nothing "
+                f"(NVAPI cannot describe a card it does not enumerate)")
     else:
         print("    nvapi did not answer on this machine - check 5 skipped")
+
+    # 6. _pick_driver names the driver of the WORKING card, not the first
+    #    NVIDIA entry - issue #2's other half (the report carried the RTX
+    #    3080's driver while a Radeon ran the pass).
+    entries = [("NVIDIA GeForce RTX 3080", "32.0.16.1692"),
+               ("AMD Radeon RX 9070 XT", "32.0.31041.1004")]
+    if startup._pick_driver(entries, "AMD Radeon RX 9070 XT") != "32.0.31041.1004":
+        failures.append("the working Radeon's driver was not picked")
+    if startup._pick_driver(entries, "amd radeon rx 9070 xt") != "32.0.31041.1004":
+        failures.append("the driver match must be case-insensitive")
+    if startup._pick_driver(entries, "NVIDIA GeForce RTX 3080") != "32.0.16.1692":
+        failures.append("the working NVIDIA card's driver was not picked")
+    if startup._pick_driver(entries, "") != "32.0.16.1692":
+        failures.append("with no DXGI name the NVIDIA entry is the fallback")
+    if startup._pick_driver([("AMD Radeon RX 9070 XT", "9.9.9")], "") != "9.9.9":
+        failures.append("with no NVIDIA card the AMD entry is the fallback")
+    if startup._pick_driver([], "anything") != "":
+        failures.append("no registry entries must answer an empty string")
 
     for f in failures:
         print("FAIL:", f)
