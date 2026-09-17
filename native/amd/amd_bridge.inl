@@ -43,6 +43,9 @@ struct AmdState
     bool srgb = true;         // decode sRGB on the way in, encode on the way out
     float shoulder = 0.85f;   // highlight roll-off anchor (see amd_shaders.h)
     float intensity = 1.0f;   // native <-> processed mix, 1.0 = the engine's own frame
+    //: The last `Scale` the runtime accepted, so the change is logged once and
+    //: not once per frame. -1 = nothing written yet.
+    float scale_logged = -1.0f;
 
     amd_nr::Runtime runtime;
     std::wstring dir;
@@ -653,6 +656,11 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         opt.local_structure = g_video_options.local_structure;
         opt.skin_structure = g_video_options.skin_structure;
         opt.auto_mask = g_video_options.auto_mask != 0;
+        // The menu's Intensity. It is not an in-image parameter like the three
+        // above: the runtime takes its strength from `Scale` in its own ini, so
+        // this value is written to the FILE (see Runtime::WriteScale). Sending
+        // it any other way leaves the slider dead, which it was.
+        opt.intensity = g_video_options.intensity;
         // The style index selects the tone channels, not a scale: the
         // engine's Structure channel adds AO, contact shadows and SSS, and
         // its skin channel routes structure through a character mask - both
@@ -667,6 +675,19 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         default: opt.tone_channels = 0; break;
         }
         g_amd.runtime.SetOptions(opt);
+        // The slider reaching the network is worth one line, once per change:
+        // it is the difference between an Intensity control that does something
+        // and one that only moves the host's own composite (which is what it
+        // used to do).
+        {
+            const float written = g_amd.runtime.ScaleWritten();
+            if (written >= 0.0f && written != g_amd.scale_logged)
+            {
+                g_amd.scale_logged = written;
+                Log("[amd] intensity %.2f -> the runtime's Scale=%.5f",
+                    g_video_options.intensity, written);
+            }
+        }
     }
 
     const bool ts = ProfileGpuBegin(PS_EVAL);

@@ -101,27 +101,68 @@ int guarded_shutdown(void *module) {
     }
 }
 
-// Whether a line containing `needle` appears anywhere in a small text file.
-// The runtime's log is the only place its detours are announced, and the file
-// is opened in append mode across runs - so this searches what is there, which
-// is fine: the hook names are printed once per load and the caller only asks
-// after loading the module.
-bool LogContains(const std::wstring &path, const char *needle) {
+// Whether a line containing `needle` appears in the part of the file written
+// SINCE `from_byte`. Returns true and, on a hit, reports where the file ended.
+//
+// The runtime's log is opened in append mode ACROSS RUNS, so searching the
+// whole file is not a check at all: the second launch of the day finds the
+// first launch's "hooked ... Present1" line instantly and skips the wait it was
+// supposed to perform. Our own Radeon log shows exactly that, and it is the
+// reason the hook wait reported `0 ms`:
+//
+//     [amd] the runtime's D3D12/DXGI hooks are in place (0 ms)
+//
+// The runtime needs the time before it can see our swapchain, so a zero here
+// means the host created its swapchain into a detour that was not installed
+// yet - the documented route to a silent passthrough. Reading only what this
+// run appended is what makes the answer mean something.
+bool LogContains(const std::wstring &path, const char *needle,
+                 unsigned long long from_byte, unsigned long long *end_byte) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ |
                               FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0) {
+        CloseHandle(file);
+        return false;
+    }
+    if (end_byte != nullptr) *end_byte = static_cast<unsigned long long>(size.QuadPart);
+    if (size.QuadPart <= static_cast<LONGLONG>(from_byte)) {
+        CloseHandle(file);   // this run has appended nothing yet
+        return false;
+    }
+
+    LARGE_INTEGER pos{};
+    pos.QuadPart = static_cast<LONGLONG>(from_byte);
+    if (!SetFilePointerEx(file, pos, nullptr, FILE_BEGIN)) {
+        CloseHandle(file);
+        return false;
+    }
+
     std::string text;
     char buf[4096];
     DWORD got = 0;
-    // Bounded: the log grows across runs, and only the tail can carry this
-    // run's lines. 256 KB is far more than the startup banner needs.
+    // Bounded: one run's banner is tiny, and the cap only guards against a
+    // runaway writer.
     while (text.size() < 256 * 1024 &&
            ReadFile(file, buf, sizeof(buf), &got, nullptr) && got > 0) {
         text.append(buf, got);
     }
     CloseHandle(file);
     return text.find(needle) != std::string::npos;
+}
+
+//: Where the runtime's log ended before this run started. Everything the hook
+//: wait searches must fall after it, or the wait is satisfied by a previous
+//: run's lines and does nothing.
+unsigned long long LogEndOffset(const std::wstring &path) {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info))
+        return 0;
+    return (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) |
+           static_cast<unsigned long long>(info.nFileSizeLow);
 }
 
 std::string narrow(const std::wstring &wide) {
@@ -190,6 +231,9 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     const std::wstring runtime_path = runtime_dir + L"\\" + kRuntimeName;
     const std::wstring weights_path = runtime_dir + L"\\" + kWeightsName;
     const std::wstring ini_path = runtime_dir + L"\\" + kIniName;
+    // Kept for WriteScale: the menu's Intensity reaches the network as `Scale`
+    // in this file, which is the only route the runtime offers for it.
+    ini_path_ = ini_path;
 
     // --- 1. the runtime file, size and hash ------------------------------
     WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -351,6 +395,12 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     hip_set_(chosen);
 
     // --- 3. the runtime module ------------------------------------------
+    // Where the runtime's log ended BEFORE it loads: the hook wait below reads
+    // only what this run appends, and this is the mark it reads from. The
+    // runtime appends to the same file across runs, so a check against the
+    // whole file would find a previous launch's hook lines and skip the wait.
+    log_from_ = LogEndOffset(runtime_dir + L"\\dlssnr_on_amd.log");
+
     // The DLL-load-dir flag is what lets the runtime find its own dependencies
     // next to itself.
     module_ = LoadLibraryExW(runtime_path.c_str(), nullptr,
@@ -452,15 +502,26 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // alternative - creating our swapchain first - is the silent passthrough
     // this whole release is about.
     {
-        // The runtime's log lives in its own directory; read only what this
-        // run appended (it is opened in append mode across runs).
+        // The runtime's log lives in its own directory and is opened in APPEND
+        // mode across runs, so the wait below searches only what THIS run
+        // appended: `log_from` is where the file ended before the module was
+        // loaded. Without that the check passes on the first line a previous
+        // launch left behind, the wait returns instantly, and the swapchain is
+        // created into a detour that is not installed yet - which is the
+        // silent-passthrough path, and it is what our own log showed:
+        //
+        //     [amd] the runtime's D3D12/DXGI hooks are in place (0 ms)
         const std::wstring log_path = runtime_dir + L"\\dlssnr_on_amd.log";
         const char *kLastHook = "hooked IDXGISwapChain1::Present1";
         const DWORD budget_ms = 5000;
         DWORD waited = 0;
         bool hooked = false;
         while (waited < budget_ms) {
-            if (LogContains(log_path, kLastHook)) { hooked = true; break; }
+            unsigned long long now_end = 0;
+            if (LogContains(log_path, kLastHook, log_from_, &now_end)) {
+                hooked = true;
+                break;
+            }
             Sleep(25);
             waited += 25;
         }
@@ -521,6 +582,59 @@ void Runtime::SetOptions(const Options &opt) {
     At<uint32_t>(module_, rva::kCharMask) = opt.auto_mask ? 1u : 0u;
     At<uint32_t>(module_, rva::kToneChannels) = opt.tone_channels;
     At<uint8_t>(module_, rva::kEnabled) = opt.enabled ? 1 : 0;
+
+    // Intensity is the exception: it is NOT in that block. The runtime reads
+    // its strength from `Scale` in its own ini, so the slider has to be
+    // written to the file - and only when it changes, because rewriting the
+    // ini per frame would be a file write per frame for nothing.
+    //
+    // This was dead: the slider moved the host's own composite and nothing
+    // else, so the network's strength never changed on the AMD path while the
+    // NVIDIA path's did.
+    if (opt.intensity != last_intensity_) {
+        last_intensity_ = opt.intensity;
+        WriteScale(opt.intensity);
+    }
+}
+
+void Runtime::WriteScale(float intensity) {
+    if (ini_path_.empty()) return;
+
+    // Intensity 1.0 means this much network strength, and the number is
+    // calibrated on real content rather than guessed - it is the one value the
+    // reference measured and published:
+    //
+    //   0.005  invisible (1.0/255 of contribution)
+    //   0.03   detail appears - skin, hair, fabric (6.1/255)
+    //   0.125  the runtime's own ceiling: halos, crunch, fringing (55/255)
+    //
+    // So the slider spans [0, kScaleMax] and its top is deliberately NOT the
+    // runtime's ceiling: 1.0 has to mean "the setting that looks right", not
+    // "the most the runtime will accept". NS_AMD_NR_SCALE_MAX moves it for
+    // taste without a rebuild.
+    float scale_max = 0.03f;
+    char env[32] = {};
+    if (GetEnvironmentVariableA("NS_AMD_NR_SCALE_MAX", env, sizeof(env))) {
+        const float v = static_cast<float>(atof(env));
+        if (v > 0.0f && v <= 4.0f) scale_max = v;
+    }
+    const float clamped = intensity < 0.0f ? 0.0f
+                        : (intensity > 1.0f ? 1.0f : intensity);
+    const float scale = clamped * scale_max;
+
+    char value[32] = {};
+    _snprintf_s(value, sizeof(value), _TRUNCATE, "%.5f", scale);
+    if (!WritePrivateProfileStringW(L"DlssNrOnAmd", L"Scale",
+                                    std::wstring(value, value + strlen(value)).c_str(),
+                                    ini_path_.c_str())) {
+        last_error_ = "the intensity could not be written to the runtime's ini";
+        return;
+    }
+    // Kept for the caller to log: this translation unit has no Log() (the
+    // bridge owns it), which is the same reason HooksSeen()/HooksMs() exist.
+    // The write is the difference between a slider that reaches the network and
+    // one that does not, so it is worth a line.
+    scale_written_ = scale;
 }
 
 bool Runtime::Record(ID3D12CommandList *list, ID3D12Resource *colour,

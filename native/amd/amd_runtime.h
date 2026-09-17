@@ -193,6 +193,11 @@ struct Options {
     //: Bitfield of the tone channels the style enables (0, 1 or 2). Read by
     //: the engine per frame like the three intensities above.
     uint32_t tone_channels = 0;
+    //: The menu's Intensity slider, 0..1. This one does NOT travel through the
+    //: in-image parameter block: the runtime reads its strength from `Scale`
+    //: in its OWN ini, so it is written to the file instead (see WriteIni).
+    //: Sending it any other way leaves the slider dead - which it was.
+    float intensity = 1.0f;
 };
 
 // --- the driver ------------------------------------------------------------
@@ -238,6 +243,15 @@ public:
 
     // Applies the host's parameters. Cheap - three stores.
     void SetOptions(const Options &opt);
+
+    //: Writes the menu's Intensity into the runtime's ini as `Scale`, which is
+    //: where the runtime actually reads its strength from. Called from
+    //: SetOptions when the value changes; public only so a test can drive it.
+    void WriteScale(float intensity);
+
+    //: The last `Scale` written into the ini, or -1 when nothing has been
+    //: written. The bridge logs it - this unit has no Log().
+    float ScaleWritten() const { return scale_written_; }
 
     // One frame: hand the engine the colour resource it should process. The
     // result lands in the same resource (the engine works in place), so the
@@ -297,6 +311,19 @@ private:
     //: detours, and how long they took to appear.
     bool hooks_seen_ = false;
     unsigned long hooks_ms_ = 0;
+    //: Where the runtime's log ended before this run loaded the module. The
+    //: hook wait searches only bytes after this, because the log is appended
+    //: to across runs and a whole-file search is satisfied by a previous
+    //: launch's lines - which is how the wait came to report 0 ms.
+    unsigned long long log_from_ = 0;
+    //: The Intensity the ini currently carries, so the file is rewritten only
+    //: when the slider actually moves.
+    float last_intensity_ = -1.0f;
+    //: The last `Scale` written to the ini, for the caller to log. -1 means
+    //: nothing has been written yet.
+    float scale_written_ = -1.0f;
+    //: Where the runtime's ini lives, kept for WriteScale.
+    std::wstring ini_path_;
     ImageKind kind_ = ImageKind::Unknown;
     std::string last_error_;
     std::string found_hash_;
