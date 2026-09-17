@@ -101,6 +101,29 @@ int guarded_shutdown(void *module) {
     }
 }
 
+// Whether a line containing `needle` appears anywhere in a small text file.
+// The runtime's log is the only place its detours are announced, and the file
+// is opened in append mode across runs - so this searches what is there, which
+// is fine: the hook names are printed once per load and the caller only asks
+// after loading the module.
+bool LogContains(const std::wstring &path, const char *needle) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ |
+                              FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    std::string text;
+    char buf[4096];
+    DWORD got = 0;
+    // Bounded: the log grows across runs, and only the tail can carry this
+    // run's lines. 256 KB is far more than the startup banner needs.
+    while (text.size() < 256 * 1024 &&
+           ReadFile(file, buf, sizeof(buf), &got, nullptr) && got > 0) {
+        text.append(buf, got);
+    }
+    CloseHandle(file);
+    return text.find(needle) != std::string::npos;
+}
+
 std::string narrow(const std::wstring &wide) {
     std::string out;
     out.reserve(wide.size());
@@ -214,23 +237,58 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     }
 
     // The engine reads its ini from its own DllMain, so the file must exist
-    // before the module is loaded, and the keys that matter have to be in it
-    // by then. The working installation creates it empty and lets the engine
-    // fall back to its built-in defaults; those defaults are wrong for a
-    // desktop host in one specific way: InlineWaitMs is 600 ms, while a job
-    // on a real Radeon takes tens of milliseconds. A frame that overruns the
-    // budget is a skipped frame, so every host in the ecosystem lowers it
-    // (the add-on writes 100, the desktop distributions write 25). The
-    // runtime clamps whatever is read into [50, 5000].
+    // and carry the right keys before the module is loaded. Several of them
+    // cannot be reached any other way:
     //
-    // Written only when absent: a user who tuned their own copy keeps it.
+    //   UseFsrInputs   arms the ffxDispatch hook, but only when it is read
+    //                  from the FILE - the runtime reads it there and the
+    //                  host's later write cannot re-arm a hook that was never
+    //                  installed. This is the key that decides whether the
+    //                  pass runs at all.
+    //   Scale          the network's strength, and the menu's Intensity. The
+    //                  runtime's own default (0.03125) is what makes the pass
+    //                  look invisible: measured on real content, 0.03 is where
+    //                  detail appears without ringing and 0.125 (the ceiling)
+    //                  produces halos.
+    //   InlineWaitMs   the inline wait budget. The built-in default is 600 ms
+    //                  while a job takes tens of milliseconds, so every host
+    //                  in the ecosystem lowers it.
+    //
+    // Written per key and only when that key is ABSENT: a user who tuned
+    // InlineWaitMs or Scale by hand keeps their value, while a copy left over
+    // from an earlier version - which wrote a file with one key in it, or an
+    // empty one - is completed rather than ignored. That upgrade path matters:
+    // the file is created once and every later release would otherwise run
+    // against the first version's keys, which is precisely how UseFsrInputs
+    // would stay unset for the very people testing the fix.
     if (GetFileAttributesW(ini_path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         HANDLE ini = CreateFileW(ini_path.c_str(), GENERIC_WRITE, 0, nullptr,
                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (ini != INVALID_HANDLE_VALUE) {
-            CloseHandle(ini);
-            WritePrivateProfileStringW(L"DlssNrOnAmd", L"InlineWaitMs", L"100",
-                                       ini_path.c_str());
+        if (ini != INVALID_HANDLE_VALUE) CloseHandle(ini);
+    }
+    {
+        const wchar_t *keys[][2] = {
+            { L"Enabled",       L"1" },
+            { L"UseFsrInputs",  L"1" },   // arms the ffxDispatch hook
+            { L"UseDepth",      L"0" },
+            { L"Interop",       L"1" },
+            { L"Inline",        L"1" },
+            { L"InlineWaitMs",  L"200" },
+            { L"Temporal",      L"1" },
+            { L"Tonemap",       L"-1" },  // -1 = auto by input format
+            { L"HipDevice",     L"-1" },  // -1 = match the D3D12 adapter
+            { L"Scale",         L"0.03000" },
+            { L"UseAutoMask",   L"1" },
+            { L"ToneChannels",  L"0" },
+        };
+        for (const auto &kv : keys) {
+            wchar_t have[64] = {};
+            const DWORD got = GetPrivateProfileStringW(
+                L"DlssNrOnAmd", kv[0], L"\x1", have, _countof(have), ini_path.c_str());
+            // The default sentinel is one character, so anything longer means
+            // the key is present and the user's value stands.
+            if (got > 1) continue;
+            WritePrivateProfileStringW(L"DlssNrOnAmd", kv[0], kv[1], ini_path.c_str());
         }
     }
 
@@ -357,15 +415,62 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     //
     // Inline=1: the engine completes the job on the frame it was given.
     // Interop=1: zero-copy shared textures (the runtime's own key).
-    // UseFsrInputs=0: this host is not the FSR path; the frame and the
-    // guides are handed over through the packet. UseDepth=0: depth is off
-    // until the worker has a depth source worth handing over.
+    //
+    // UseFsrInputs=1 is the one that took a second live report to find, and
+    // it is the difference between a working pass and a silent one: the flag
+    // arms the runtime's ffxDispatch hook. With 0 the runtime initialises,
+    // runs its threads, reports healthy - and never processes a frame,
+    // saying nothing. Its own log is the witness:
+    //
+    //     frames 9000 dispatches 0 (0.00/frame) submitted 0 ready -1 route backbuffer
+    //
+    // Nine thousand frames, no dispatch, the picture black. This host was
+    // the source of that line: it fed the frame through its own packet and
+    // never dispatched FSR, so the engine had nothing to attach to and fell
+    // back to routing a backbuffer that was never ours.
+    //
+    // UseDepth=0: depth is off until the worker has a depth source worth
+    // handing over.
     At<uint8_t>(module_, rva::kInlineMode) = 1;
     At<uint8_t>(module_, rva::kEnabled) = 1;
     At<uint8_t>(module_, rva::kInlineMode) = 1;   // again, after Enabled
     At<uint8_t>(module_, rva::kInterop) = 1;
-    At<uint8_t>(module_, rva::kUseFsrInputs) = 0;
+    At<uint8_t>(module_, rva::kUseFsrInputs) = 1;
     At<uint8_t>(module_, rva::kUseDepth) = 0;
+
+    // --- 6b. wait for the runtime's own hooks ---------------------------
+    // The runtime installs its D3D12/DXGI detours from a thread it starts on
+    // load, and it builds a dummy device first. Anything the host creates
+    // before those land is invisible to it: a swapchain made too early never
+    // enters its swapchain -> queue map, and its only fallback
+    // (IDXGISwapChain::GetDevice for a D3D12 queue) cannot work - the frame is
+    // discarded as "a swapchain that is not on our device" and never retried.
+    //
+    // This is a wait for EVIDENCE, not a sleep: the runtime names every detour
+    // in its own log, and the last one it prints is Present1. The budget is
+    // generous because it costs nothing when the hooks land early, and the
+    // alternative - creating our swapchain first - is the silent passthrough
+    // this whole release is about.
+    {
+        // The runtime's log lives in its own directory; read only what this
+        // run appended (it is opened in append mode across runs).
+        const std::wstring log_path = runtime_dir + L"\\dlssnr_on_amd.log";
+        const char *kLastHook = "hooked IDXGISwapChain1::Present1";
+        const DWORD budget_ms = 5000;
+        DWORD waited = 0;
+        bool hooked = false;
+        while (waited < budget_ms) {
+            if (LogContains(log_path, kLastHook)) { hooked = true; break; }
+            Sleep(25);
+            waited += 25;
+        }
+        if (hooked) {
+            hooks_ms_ = waited;
+            hooks_seen_ = true;
+        } else {
+            hooks_seen_ = false;
+        }
+    }
 
     // --- 7. init ---------------------------------------------------------
     // Arg 1 is the engine's own in-image context struct, not a host object:

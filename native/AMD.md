@@ -40,7 +40,21 @@ commands turn it into the shape NeuralScreen expects.
    It verifies the runtime is the build the driver knows, applies the five
    documented patches (without them the runtime installs its own hooks and
    fights NeuralScreen for the frame), and writes `dlssnr_amd_pass1.dll`.
-4. Check the result:
+4. **Copy the FidelityFX upscaler next to the runtime.** The neural pass needs
+   `amd_fidelityfx_upscaler_dx12.dll`, and without it the pass runs and
+   processes nothing:
+
+   The runtime is written as a `version.dll` proxy for a *game*: it hooks the
+   FidelityFX upscale dispatch and takes the frame from there. A host that
+   never dispatches FSR gives it nothing to attach to, and it falls back to
+   routing a backbuffer that was never ours - the network runs, the picture
+   stays black, and the runtime's own log says
+   `frames N dispatches 0 ... route backbuffer`.
+
+   The file ships inside OptiScaler's FSR package (it is AMD's own upscaler,
+   MIT-licensed); put it in `native\` beside the runtime. The preparation
+   script warns if it is missing.
+5. Check the result:
 
    ```
    native\probe_amd.exe
@@ -74,6 +88,11 @@ lines. Nothing has to be turned on: every line below is written always.
 | `[amd] runtime: patched v0.2.14 (the tested build)` | the right build was found |
 | `[amd] sha256: 3c9ca13f...` | which build is actually on disk |
 | `[amd] the runtime did not come up: <reason>` | the exact reason, in words |
+| `[amd] the runtime's D3D12/DXGI hooks are in place (N ms)` | the runtime can see our frames |
+| `[amd] the runtime's hooks were NOT seen` | it cannot - the pass will process nothing |
+| `[amd] FidelityFX upscaler loaded` | the dispatch the engine follows is available |
+| `[amd] FSR contexts: network 1664x936 (1:1), upscale work -> display` | the two dispatches are set up |
+| `[amd] FSR dispatch N: network at 1664x936, then the upscale` | frames are reaching the engine |
 | `[amd] engine surfaces at 1280x720` | the resolution the network runs at |
 | `[amd] N frames, avg X ms, worst Y ms, timeouts Z` | every 30 s: how it is doing |
 | `[amd] WARNING: the runtime is unpatched...` | you skipped the patching step |

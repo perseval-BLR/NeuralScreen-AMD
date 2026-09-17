@@ -215,9 +215,32 @@ def main() -> int:
 
     dst.write_bytes(bytes(data))
     print(f"written: {dst}")
+
+    # The FidelityFX upscaler is the other half of the picture, and its absence
+    # is not a crash - it is a pass that runs and processes nothing (the runtime
+    # only takes frames from an FSR dispatch it can hook). Checked here so the
+    # user hears it now rather than from a black screen.
+    upscaler = folder / "amd_fidelityfx_upscaler_dx12.dll"
+    if upscaler.is_file():
+        print(f"the FidelityFX upscaler is present ({upscaler.name}, "
+              f"{upscaler.stat().st_size // (1024 * 1024)} MB)")
+    else:
+        print(f"\nWARNING: {upscaler.name} is missing from this folder.")
+        print("  The neural pass needs it: the runtime takes the frame from a "
+              "FidelityFX upscale dispatch and processes nothing without one.")
+        print("  It ships inside OptiScaler's FSR package (the file is AMD's, "
+              "MIT-licensed). Copy it next to the runtime.")
+
+    weights = folder / "dlssnr_on_amd_weights.bin"
+    if not weights.is_file():
+        print(f"\nWARNING: {weights.name} is missing - the installer produces it "
+              "from the NVIDIA nvngx_dlssnr.dll; without it the engine cannot "
+              "initialise.")
+
     print("\nNext: in NeuralScreen AMD open the settings page and set "
           "'Neural pass' to 'AMD Radeon (RDNA3+)', then restart the pipeline. "
-          "The worker's log ([amd] lines) says what happened.")
+          "The worker's log ([amd] lines) says what happened, and the engine's "
+          "own dlssnr_on_amd.log says what it did with the frames.")
     return 0
 
 

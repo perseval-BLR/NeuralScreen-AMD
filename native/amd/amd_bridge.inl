@@ -47,6 +47,22 @@ struct AmdState
     amd_nr::Runtime runtime;
     std::wstring dir;
 
+    // The FidelityFX bridge. Without it the runtime has no dispatch to follow
+    // and routes the frame through a backbuffer instead of processing ours -
+    // the black picture in the second live report. See amd_fsr.h.
+    amd_fsr::Upscaler fsr;
+    //: The display-resolution surface FSR upscales into, at work != output.
+    ID3D12Resource *up_out = nullptr;
+    //: Set once the contexts exist for the current extents.
+    bool fsr_ready = false;
+    //: Frames the engine actually took (the runtime's own counter, read back
+    //: so the log can show that the dispatch route worked).
+    uint64_t fsr_frames = 0, fsr_failures = 0;
+    //: Last frame's wall time, handed to the FSR dispatch (it uses it for its
+    //: temporal accumulation). 16.6 ms until a second frame has been timed.
+    float last_frame_ms = 16.6f;
+    uint64_t last_frame_tick = 0;
+
     // Conversion pipeline: one root signature, three PSOs, one heap of pairs.
     ID3D12RootSignature  *rs = nullptr;
     ID3D12PipelineState  *pso_in = nullptr;
@@ -61,10 +77,18 @@ struct AmdState
 
     // Resources at the network extent.
     ID3D12Resource *net = nullptr;       // RGBA16F, read and written by the engine
+    //: The converted frame the FSR dispatch A reads. Separate from `net`
+    //: because the engine takes its colour from the dispatch's OUTPUT and
+    //: works in place: `net` is where the dispatch writes and where the
+    //: engine then edits, so the source has to be somewhere else.
+    ID3D12Resource *fsr_in = nullptr;    // RGBA16F at the work extent
     ID3D12Resource *motion = nullptr;    // R16G16F
     ID3D12Resource *depth = nullptr;     // R32F, zeroed, never written (depth is off)
     ID3D12Resource *exposure = nullptr;  // 1x1 R32F = 1.0
     UINT net_w = 0, net_h = 0;
+    //: Output (display) extent, kept alongside so a resize of either one
+    //: rebuilds the pair.
+    UINT out_w = 0, out_h = 0;
     bool resources_ready = false;
 
     // Diagnostics - the whole point of a first release to strangers.
@@ -324,7 +348,12 @@ static ID3D12Resource *AmdMakeTex(UINT w, UINT h_, DXGI_FORMAT fmt,
 static void AmdReleaseResources()
 {
     auto drop = [](ID3D12Resource *&r) { if (r != nullptr) { r->Release(); r = nullptr; } };
-    drop(g_amd.net); drop(g_amd.motion); drop(g_amd.depth); drop(g_amd.exposure);
+    drop(g_amd.net); drop(g_amd.fsr_in); drop(g_amd.up_out);
+    drop(g_amd.motion); drop(g_amd.depth); drop(g_amd.exposure);
+    // The FSR contexts are sized to the extents that just went away, so they
+    // go with them; the next frame rebuilds both together.
+    g_amd.fsr.ReleaseContexts();
+    g_amd.fsr_ready = false;
     g_amd.net_w = g_amd.net_h = 0;
     g_amd.resources_ready = false;
     // The descriptors referenced these resources - they must be reissued.
@@ -398,9 +427,10 @@ static bool AmdCreateExposure(float value)
 // off. The zero fill is a barrier-free Clear on the copy queue's terms: it is
 // written by ClearUnorderedAccessViewUint through a CPU descriptor, which is
 // why the resource carries ALLOW_UNORDERED_ACCESS.
-static bool AmdEnsureResources(UINT net_w, UINT net_h)
+static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
 {
-    if (g_amd.resources_ready && g_amd.net_w == net_w && g_amd.net_h == net_h) return true;
+    if (g_amd.resources_ready && g_amd.net_w == net_w && g_amd.net_h == net_h &&
+        g_amd.out_w == out_w && g_amd.out_h == out_h) return true;
     AmdReleaseResources();
     if (net_w < 32 || net_h < 32) { Log("[amd] implausible network extent %ux%u", net_w, net_h); return false; }
 
@@ -418,7 +448,17 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h)
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
     g_amd.motion = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16_FLOAT,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
-    if (g_amd.net == nullptr || g_amd.motion == nullptr)
+    // The converted frame the FSR dispatch reads, and the display-resolution
+    // surface it upscales into. Both linear fp16: the network is built around
+    // linear light, and fp16 is required for the runtime's typed UAV store
+    // (B8G8R8A8 does not guarantee one).
+    g_amd.fsr_in = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
+    if (out_w != net_w || out_h != net_h)
+        g_amd.up_out = AmdMakeTex(out_w, out_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
+    if (g_amd.net == nullptr || g_amd.motion == nullptr || g_amd.fsr_in == nullptr ||
+        ((out_w != net_w || out_h != net_h) && g_amd.up_out == nullptr))
     { Log("[amd] engine surface creation failed at %ux%u", net_w, net_h); AmdReleaseResources(); return false; }
     if (g_amd.depth == nullptr)
         g_amd.depth = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R32_FLOAT,
@@ -427,6 +467,8 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h)
 
     g_amd.net_w = net_w;
     g_amd.net_h = net_h;
+    g_amd.out_w = out_w;
+    g_amd.out_h = out_h;
     g_amd.resources_ready = true;
     Log("[amd] engine surfaces at %ux%u (rgba16f net, r16g16f motion, 1x1 exposure)", net_w, net_h);
     return true;
@@ -492,13 +534,28 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     UINT nw = 0, nh = 0;
     AmdNetExtent(v, cw, ch, nw, nh);
 
-    if (!AmdEnsurePipeline() || !AmdEnsureResources(nw, nh))
+    if (!AmdEnsurePipeline() || !AmdEnsureResources(nw, nh, cw, ch))
     {
         g_amd.failed = true;
         Log("[amd] the pass could not be prepared - falling back to the raw frame");
         return false;
     }
     if (reset) g_amd.runtime.InvalidateHistory();
+
+    // The FSR contexts are sized to the extents, so they are (re)built here
+    // whenever the frame set is. A failure is not fatal to the program - the
+    // caller falls back to the packet path - but it IS fatal to the picture,
+    // and the log says which.
+    if (!g_amd.fsr.ContextsReady()) {
+        std::string why;
+        if (!g_amd.fsr.CreateContexts(h.dev, nw, nh, cw, ch, why)) {
+            Log("[amd] the FidelityFX contexts could not be created: %s", why.c_str());
+            g_amd.failed = true;
+            return false;
+        }
+        Log("[amd] FSR contexts: network %ux%u (1:1), upscale %s",
+            nw, nh, g_amd.fsr.Upscaling() ? "work -> display" : "none (work == display)");
+    }
 
     // The engine's own knobs, written every frame. Until now SetOptions was
     // defined and never called, so the engine ran on whatever its DllMain
@@ -533,24 +590,27 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // ---- 1. the first list: convert in, resample motion, hand to the engine
     if (!BeginCommands()) return false;
 
-    // colour: full frame (RGBA8) -> net (RGBA16F), area-down or bilinear-up.
+    // colour: full frame (RGBA8) -> fsr_in (RGBA16F, linear light), area-down
+    // or bilinear-up.
+    //
+    // It lands in fsr_in and NOT in net, because the engine takes its colour
+    // from the OUTPUT of the dispatch it follows and works in place: net is
+    // what the dispatch writes and what the engine then edits. Handing the
+    // engine our own converted frame and skipping the dispatch is exactly the
+    // path that produced `dispatches 0 ... route backbuffer` - a black picture
+    // with a healthy network behind it.
     {
-        D3D12_RESOURCE_BARRIER pre[] = {
-            Transition(v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
-            Transition(g_amd.net, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
-        };
-        // The colour texture is already a shader resource - asking for that
-        // transition again is invalid D3D12, so only the net surface moves.
-        h.list->ResourceBarrier(1, &pre[1]);
+        D3D12_RESOURCE_BARRIER pre = Transition(
+            g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        h.list->ResourceBarrier(1, &pre);
         const UINT dims[4] = { nw, nh, cw, ch };
         AmdDispatch(0, g_amd.pso_in, dims,
                     v.color.tex, DXGI_FORMAT_R8G8B8A8_UNORM,
                     v.color.tex, DXGI_FORMAT_R8G8B8A8_UNORM,
-                    g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT, 1, nw, nh);
+                    g_amd.fsr_in, DXGI_FORMAT_R16G16B16A16_FLOAT, 1, nw, nh);
         D3D12_RESOURCE_BARRIER post = Transition(
-            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            g_amd.fsr_in, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.list->ResourceBarrier(1, &post);
     }
@@ -572,6 +632,49 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
             g_amd.motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         h.list->ResourceBarrier(1, &post);
+    }
+
+    // ---- 2. the FSR dispatch the engine follows -------------------------
+    //
+    // This is the piece the runtime is built around, and the reason a host
+    // that skips it gets a black picture however well the network runs. Two
+    // dispatches per frame:
+    //
+    //   A  work -> work, MOTION VECTORS BOUND. The runtime follows the
+    //      dispatch that carries motion vectors (its own log: "ignoring
+    //      upscaler dispatches without motion vectors ... following the one
+    //      with motion vectors"), takes the frame from A's OUTPUT and runs the
+    //      network on it, in place.
+    //   B  work -> display, no motion vectors. The runtime ignores it; plain
+    //      FSR upscales the network's result to the output resolution. It does
+    //      not exist when work == display, because then there is nothing to
+    //      scale.
+    //
+    // The result is that the network runs at the work resolution on a frame
+    // that has NOT been resampled, and the step up to the display resolution
+    // is FSR's job rather than a bilinear stretch.
+    {
+        const float frame_ms = g_amd.last_frame_ms > 0.0f ? g_amd.last_frame_ms : 16.6f;
+        std::string why;
+        if (!g_amd.fsr.DispatchNet(h.list, g_amd.fsr_in, g_amd.depth,
+                                   g_amd.motion, g_amd.net, frame_ms,
+                                   reset != 0, why)) {
+            Log("[amd] %s", why.c_str());
+            ++g_amd.fsr_failures;
+            AbortCommands();
+            g_amd.failed = true;
+            return false;
+        }
+        // The upscale (B) is NOT here on purpose: it has to run after the
+        // engine has edited `net`, and the engine works through its own
+        // worker between this submission and the second list. Recorded here,
+        // B would scale the frame the network has not touched yet. It sits at
+        // the head of the second list instead.
+        ++g_amd.fsr_frames;
+        if (g_amd.fsr_frames == 1 || (g_amd.fsr_frames % 300) == 0)
+            Log("[amd] FSR dispatch %llu: network at %ux%u%s",
+                static_cast<unsigned long long>(g_amd.fsr_frames), nw, nh,
+                g_amd.fsr.Upscaling() ? ", then the upscale" : " (1:1, no upscale)");
     }
 
     // The engine, recorded into the same list. It is handed shader-readable
@@ -647,6 +750,34 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
 
     // ---- 2. the second list: the processed frame back into v.output
     if (!BeginCommands()) return false;
+
+    // The upscale dispatch (B) belongs HERE, not with A: the engine edits
+    // `net` through its own worker between the two submissions, so this is the
+    // first moment the network's result exists. No motion vectors - that is
+    // how the runtime knows not to run the network on this one too.
+    if (g_amd.fsr.Upscaling()) {
+        const float frame_ms = g_amd.last_frame_ms > 0.0f ? g_amd.last_frame_ms : 16.6f;
+        // up_out is left in NON_PIXEL_SHADER_RESOURCE by the previous frame's
+        // read; net is already readable (the engine leaves its output that
+        // way). Only up_out moves.
+        D3D12_RESOURCE_BARRIER u = Transition(
+            g_amd.up_out, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        h.list->ResourceBarrier(1, &u);
+        std::string why;
+        if (!g_amd.fsr.DispatchUpscale(h.list, g_amd.net, g_amd.depth,
+                                       g_amd.up_out, frame_ms, reset != 0, why)) {
+            Log("[amd] %s", why.c_str());
+            ++g_amd.fsr_failures;
+            AbortCommands();
+            g_amd.failed = true;
+            return false;
+        }
+        D3D12_RESOURCE_BARRIER r = Transition(
+            g_amd.up_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        h.list->ResourceBarrier(1, &r);
+    }
     {
         // net is in NON_PIXEL_SHADER_RESOURCE (the engine left it there);
         // v.color.tex is the native anchor, also a shader resource; v.output
@@ -659,7 +790,12 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         memcpy(&block[2], &shoulder, sizeof(float));
         memcpy(&block[3], &intensity, sizeof(float));
 
-        AmdBindTriplet(2, g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        // The source of the final pass is whatever the frame ended up in: the
+        // FSR upscale's output when there was one to do, otherwise the
+        // network's own surface (work == display, nothing was resampled).
+        ID3D12Resource *final_src = g_amd.fsr.Upscaling() && g_amd.up_out != nullptr
+                                        ? g_amd.up_out : g_amd.net;
+        AmdBindTriplet(2, final_src, DXGI_FORMAT_R16G16B16A16_FLOAT,
                        v.color.tex, DXGI_FORMAT_R8G8B8A8_UNORM,
                        v.output, DXGI_FORMAT_R8G8B8A8_UNORM, 2);
         ID3D12DescriptorHeap *heaps[] = { g_amd.heap };
@@ -683,6 +819,14 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     const uint64_t elapsed = GetTickCount64() - t0;
     g_amd.eval_ms_sum += elapsed;
     if (elapsed > g_amd.eval_ms_max) g_amd.eval_ms_max = elapsed;
+    {
+        // Frame time for the FSR dispatch: it drives its temporal accumulation,
+        // and a stale constant would make its history wrong.
+        const uint64_t now_ms = GetTickCount64();
+        if (g_amd.last_frame_tick != 0)
+            g_amd.last_frame_ms = static_cast<float>(now_ms - g_amd.last_frame_tick);
+        g_amd.last_frame_tick = now_ms;
+    }
     const uint64_t now = GetTickCount64();
     if (g_amd.last_report_tick == 0 || now - g_amd.last_report_tick >= 30000)
     {
@@ -758,6 +902,15 @@ static bool AmdInit()
 
     Log("[amd] runtime: %s", AmdImageKindName(g_amd.runtime.Kind()));
     Log("[amd] sha256: %s", g_amd.runtime.FoundHash().c_str());
+    // The hook wait's verdict. A runtime whose detours never appeared cannot
+    // see our frames at all - the pass would run and process nothing, which is
+    // the failure this release exists to end, so it is worth a line of its own.
+    if (g_amd.runtime.HooksSeen())
+        Log("[amd] the runtime's D3D12/DXGI hooks are in place (%lu ms)",
+            g_amd.runtime.HooksMs());
+    else
+        Log("[amd] the runtime's hooks were NOT seen - the frames may not reach "
+            "it; its own log sits next to the DLL");
 
     // Re-assert the crash filter: the engine installs its own from DllMain and
     // replaces the process's, which is why the second Radeon report carried no
@@ -774,6 +927,22 @@ static bool AmdInit()
 
     if (!AmdEnsurePipeline())
     { Log("[amd] ===== AMD path off (no conversion pipeline) ====="); g_amd.failed = true; return false; }
+
+    // The engine is only given a frame when it has an FSR dispatch to follow:
+    // its own log says `dispatches 0 ... route backbuffer` when it does not,
+    // and that is a black picture however well the network runs. Checked here
+    // once so the failure is a sentence in the log rather than a silent
+    // passthrough.
+    if (!g_amd.fsr.Ready()) {
+        std::string why;
+        if (!g_amd.fsr.Load(g_amd.dir, why)) {
+            Log("[amd] the FidelityFX upscaler did not load: %s", why.c_str());
+            Log("[amd] ===== AMD path off - the raw frame passes through =====");
+            g_amd.failed = true;
+            return false;
+        }
+        Log("[amd] FidelityFX upscaler loaded (the dispatch the engine follows)");
+    }
 
     g_amd.active = true;
     Log("[amd] ===== AMD path active =====");

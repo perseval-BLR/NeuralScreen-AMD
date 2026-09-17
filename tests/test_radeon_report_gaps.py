@@ -194,6 +194,59 @@ def main() -> int:
     if 'cmd == "diagnostics"' not in commands_src2:
         failures.append("the tray's diagnostics command is not routed")
 
+    # --- 9. the FSR bridge (the dispatch the engine follows) --------------
+    # v0.1.5 made the engine initialise, run jobs and produce a BLACK picture:
+    # its own log said `dispatches 0 ... route backbuffer` over 9000 frames.
+    # The runtime is a game proxy - it takes the frame from a FidelityFX
+    # upscale dispatch it hooks, and a host that never dispatches leaves it
+    # nothing to attach to. Pinned here because losing any of it puts us back
+    # to that black screen.
+    fsr_h = (NATIVE / "amd" / "amd_fsr.h").read_text(encoding="utf-8", errors="replace")
+    fsr_c = (NATIVE / "amd" / "amd_fsr.cpp").read_text(encoding="utf-8", errors="replace")
+    if "ffxDispatch" not in fsr_c:
+        failures.append("the bridge never calls ffxDispatch - the runtime has "
+                        "no dispatch to follow and the picture stays black")
+    if "FFX_API_DISPATCH_DESC_TYPE_UPSCALE" not in fsr_c:
+        failures.append("the dispatch descriptor is not the upscale one")
+    # The split itself: A carries motion vectors (the runtime follows it and
+    # runs the network), B must NOT (or the network is charged for the upscale
+    # too). Losing either half breaks the picture differently.
+    if "DispatchNet" not in fsr_h or "DispatchUpscale" not in fsr_h:
+        failures.append("the two dispatches are not separate - A must carry "
+                        "motion vectors and B must not")
+    if fsr_c.count("motionVectors = ffxApiGetResourceDX12(nullptr)") == 0:
+        failures.append("the upscale dispatch binds motion vectors - the "
+                        "runtime would run the network on it as well")
+    if "UseFsrInputs) = 1" not in runtime_src:
+        failures.append("UseFsrInputs is not 1 - the ffxDispatch hook is never "
+                        "armed and no frame is processed, silently")
+    # The ini has to carry it too: the runtime reads that key in its DllMain,
+    # and the host's later write cannot arm a hook that was never installed.
+    if 'L"UseFsrInputs",  L"1"' not in runtime_src:
+        failures.append("UseFsrInputs is not written to the ini - the runtime "
+                        "reads it there, before any of our flag writes land")
+    # Upgrading matters as much as writing: the file is created once, so a
+    # per-file check would leave everyone who already ran an older build with
+    # the old keys - exactly the people testing this fix.
+    if "GetPrivateProfileStringW" not in runtime_src:
+        failures.append("the ini is only written when absent - an existing file "
+                        "keeps the old keys and UseFsrInputs stays unset")
+    # The order the runtime needs: it hooks D3D12/DXGI from its own thread, and
+    # a swapchain created before those land is invisible to it.
+    if "hooked IDXGISwapChain1::Present1" not in runtime_src:
+        failures.append("the host does not wait for the runtime's hooks - a "
+                        "swapchain created first is invisible to it")
+    # The upscale has to run AFTER the engine has edited the surface, and it
+    # lives in the second command list for that reason.
+    second_list = bridge_src.find("the second list: the processed frame back")
+    upscale_at = bridge_src.find("DispatchUpscale")
+    net_dispatch_at = bridge_src.find("DispatchNet")
+    if second_list < 0 or upscale_at < 0 or net_dispatch_at < 0:
+        failures.append("the dispatch calls are gone from the frame path")
+    elif not (net_dispatch_at < second_list <= upscale_at):
+        failures.append("the upscale is not recorded after the engine's work - "
+                        "it would scale the frame the network has not touched")
+
     print("    exit codes name the crash: "
           f"{'ok' if not failures else 'FAILED'}")
     if failures:

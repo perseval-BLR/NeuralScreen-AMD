@@ -218,6 +218,11 @@ public:
 
     // True once Load() finished and the engine is usable.
     bool Ready() const { return ready_; }
+    //: Whether the runtime's own D3D12/DXGI detours were seen in its log, and
+    //: how long they took. The host logs it: a missing hook is the difference
+    //: between a neural pass and a silent passthrough.
+    bool HooksSeen() const { return hooks_seen_; }
+    unsigned long HooksMs() const { return hooks_ms_; }
 
     // Which of the two known images was found (Stock when the host and the
     // runtime would both try to drive the frame; Patched when the runtime's
@@ -288,6 +293,10 @@ public:
 
 private:
     bool ready_ = false;
+    //: Set by the hook wait in Load(): whether the runtime announced its
+    //: detours, and how long they took to appear.
+    bool hooks_seen_ = false;
+    unsigned long hooks_ms_ = 0;
     ImageKind kind_ = ImageKind::Unknown;
     std::string last_error_;
     std::string found_hash_;

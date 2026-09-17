@@ -14,10 +14,24 @@ native/nvngx.dll_ns-forwarder.exp
 native/nvngx.dll_ns-forwarder.lib
 native/launcher.res
 NeuralScreen.exe
+# The FSR bridge's standalone check (tools/build-probe-fsr.bat)
+native/probe_fsr.exe
 
 # NVIDIA redistributable: 165 MB, over the GitHub file limit (100 MB).
 # How to get it - see README.md, the Requirements section.
 native/nvngx_dlssnr.dll
+
+# The FidelityFX upscaler the AMD runtime follows: AMD's own DLL, and while
+# the API headers are MIT the binary is not ours to redistribute. The user
+# copies it in (native/AMD.md, step 4).
+amd_fidelityfx_upscaler_dx12.dll
+amd_fidelityfx_loader_dx12.dll
+# The AMD runtime and its weights - third-party, never redistributed.
+dlssnr_amd_pass1.dll
+dlssnr_on_amd_weights.bin
+dlssnr_on_amd.ini
+dlssnr_on_amd.log
+amdhip64_7.dll
 
 # Optional local Python runtime next to the program
 runtime/

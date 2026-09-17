@@ -62,6 +62,7 @@
 // headers; the bridge that wires them into this file is included near the
 // video helpers, after the types it needs.
 #include "amd/amd_runtime.h"
+#include "amd/amd_fsr.h"
 #include "amd/amd_shaders.h"
 
 // ---------------------------------------------------------------------------
