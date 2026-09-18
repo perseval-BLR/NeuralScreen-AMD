@@ -61,6 +61,22 @@ struct AmdState
     //: Frames the engine actually took (the runtime's own counter, read back
     //: so the log can show that the dispatch route worked).
     uint64_t fsr_frames = 0, fsr_failures = 0;
+    //: Whether the frame is ALSO handed to the engine through its packet call.
+    //:
+    //: Default OFF, and that is the change: the one external host that produces
+    //: a picture never uses the packet path at all. It feeds the engine from
+    //: the FSR dispatch alone, and its own notes are why - the runtime takes
+    //: its colour from the OUTPUT of the dispatch it follows. Handing it a
+    //: second, separately-recorded frame gives it two different ideas of which
+    //: frame is current, and the live logs show exactly that: every job is
+    //: `job 1 ... history off`, so the engine never sees a sequence and starts
+    //: over every frame.
+    //:
+    //: Kept as a switch rather than deleted outright: the packet path is the
+    //: only route that works when no upscaler is loaded (DispatchNet would
+    //: have nothing to call), and an A/B is how the next report gets a
+    //: yes/no answer instead of a rewrite. NS_AMD_PACKET=1 restores it.
+    bool use_packet = false;
     //: Last frame's wall time, handed to the FSR dispatch (it uses it for its
     //: temporal accumulation). 16.6 ms until a second frame has been timed.
     float last_frame_ms = 16.6f;
@@ -808,18 +824,38 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
 
     const float mv_scale_x = v.w != 0 ? static_cast<float>(nw) / static_cast<float>(v.w) : 1.0f;
     const float mv_scale_y = v.hgt != 0 ? static_cast<float>(nh) / static_cast<float>(v.hgt) : 1.0f;
-    const bool recorded = g_amd.runtime.Record(
-        h.list, g_amd.net, g_amd.motion, g_amd.depth, g_amd.exposure,
-        mv_scale_x, mv_scale_y);
-    if (!recorded)
+
+    // ---- the packet, only when asked for --------------------------------
+    // Default: NOT recorded. The engine takes its colour from the output of the
+    // dispatch it follows, and that dispatch is already in this list - so the
+    // packet is a SECOND, differently-shaped statement about which frame is
+    // current, and the live logs show what that costs: every job comes back
+    // `job 1 ... history off`, meaning the engine never sees a sequence and
+    // re-initialises on each frame. The one external host that produces a
+    // picture does not use this call at all.
+    //
+    // NS_AMD_PACKET=1 restores it, and that is deliberate: this is a live A/B,
+    // and the packet path is the only route left when no upscaler is loaded.
+    uint32_t wanted = 0;
+    if (g_amd.use_packet)
     {
-        Log("[amd] the engine did not take the frame: %s", g_amd.runtime.LastError().c_str());
-        ++g_amd.refused;
-        AbortCommands();
-        g_amd.failed = true;
-        return false;
+        const bool recorded = g_amd.runtime.Record(
+            h.list, g_amd.net, g_amd.motion, g_amd.depth, g_amd.exposure,
+            mv_scale_x, mv_scale_y);
+        if (!recorded)
+        {
+            Log("[amd] the engine did not take the frame: %s", g_amd.runtime.LastError().c_str());
+            ++g_amd.refused;
+            AbortCommands();
+            g_amd.failed = true;
+            return false;
+        }
+        wanted = g_amd.runtime.JobCount();
     }
-    const uint32_t wanted = g_amd.runtime.JobCount();
+    else if (g_amd.frames == 0)
+    {
+        Log("[amd] the engine is fed by the dispatch alone (no packet recorded)");
+    }
 
     const UINT64 fence_first = EndCommands();
     if (fence_first == 0) return false;
@@ -827,17 +863,38 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // Notify only after the frame has actually been submitted: a capture-wait
     // kernel launched before submission can occupy the GPU while the frame it
     // depends on is still queued on the CPU.
+    //
+    // This is our substitute for the runtime's own ExecuteCommandLists detour:
+    // the host disables that detour's installer on purpose (patch 0x1ffc), so
+    // the engine has to be told about the submission by hand or it never looks
+    // at the list at all.
     g_amd.runtime.Notify(h.queue, h.list);
 
-    // The engine runs on its own worker, so a queue fence says nothing about
-    // it - its own counter does. First frames legitimately take far longer
-    // (kernels and pipeline are built on the first job or two), so they get a
-    // long budget; after that a slow frame is a frame to skip, not a verdict.
+    // How completion is established depends on which path feeds the engine.
+    //
+    // Packet on: the engine's own counter is the authority - it publishes the
+    // list it accepted, and the sync counter moves when that job is done.
+    // Packet off: there is no accepted job to count, and the reference waits
+    // on the QUEUE FENCE instead, because its engine runs inline off the
+    // submission and the present that follows. Gating on a counter that
+    // nothing increments would skip every frame.
     const uint32_t budget = g_amd.frames < 3 ? 20000u : 2000u;
-    const bool engine_ok = g_amd.runtime.WaitJobs(wanted, budget);
+    bool engine_ok = true;
+    if (g_amd.use_packet)
+        engine_ok = g_amd.runtime.WaitJobs(wanted, budget);
     const bool engine_failed = g_amd.runtime.FailedOnEngineSide();
     if (!WaitFenceValue(h.fence, fence_first, 5000))
     { Log("[amd] the first submission did not retire"); return false; }
+
+    // Packet off: the engine's counters are the only proof it did anything at
+    // all. Worth one line, because "the fence retired" is true even when the
+    // engine ignored us completely.
+    if (!g_amd.use_packet && (g_amd.frames == 0 || (g_amd.frames % 300) == 0))
+    {
+        Log("[amd] engine counters after %llu frames: jobs %u, sync %u",
+            static_cast<unsigned long long>(g_amd.frames),
+            g_amd.runtime.JobCount(), g_amd.runtime.SyncCount());
+    }
 
     if (!engine_ok || engine_failed)
     {
@@ -1033,7 +1090,16 @@ static bool AmdInit()
     const DWORD shgot = GetEnvironmentVariableA("NS_AMD_SHOULDER", sh, sizeof(sh));
     if (shgot > 0 && shgot < sizeof(sh)) g_amd.shoulder = static_cast<float>(atof(sh));
     g_amd.shoulder = (std::max)(0.05f, (std::min)(0.99f, g_amd.shoulder));
-    Log("[amd] srgb %s, highlight shoulder %.2f", g_amd.srgb ? "on" : "off", g_amd.shoulder);
+    // The packet path is OFF unless asked for: see `use_packet` in AmdState.
+    // Read once, here, because it is a property of the run, not of a frame.
+    {
+        char pk[8] = {};
+        const DWORD pgot = GetEnvironmentVariableA("NS_AMD_PACKET", pk, sizeof(pk));
+        g_amd.use_packet = pgot > 0 && pgot < sizeof(pk) && pk[0] == '1';
+    }
+    Log("[amd] srgb %s, highlight shoulder %.2f, packet path %s",
+        g_amd.srgb ? "on" : "off", g_amd.shoulder,
+        g_amd.use_packet ? "on (NS_AMD_PACKET=1)" : "off (the dispatch feeds the engine)");
 
     // The card check comes first, because it is the one answer the user can
     // act on: everything else (a missing runtime, an old driver) has a fix,
