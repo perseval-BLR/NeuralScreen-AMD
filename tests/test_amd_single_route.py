@@ -105,7 +105,43 @@ def main() -> int:
         failures.append("use_packet does not default to false - a fresh build "
                         "would still feed the engine twice")
 
-    print(f"    frame-path block: {len(block)} chars")
+    # --- 7. the feed diagnostic reports, and never gates ------------------
+    # The engine's counters are bumped by `Record`, so on the dispatch route
+    # they stand still by design (every Radeon log we have shows `sync 0` in
+    # every report). They are useful as evidence about the FEED - did the engine
+    # queue anything at all - and useless as a gate, because gating on a counter
+    # that nothing increments skips every frame.
+    if "frames_without_job" not in src:
+        failures.append("the feed diagnostic is gone: a run where the engine "
+                        "records no job at all would look like a picture problem")
+    if "recorded NO job in the last" not in src:
+        failures.append("the diagnostic never says its verdict in words")
+    # It must not be a gate: no frame may be skipped on account of it.
+    #
+    # Anchored on the diagnostic's own log line, and the window stops at the
+    # line that closes its block. A wider window caught the ORDINARY timeout
+    # handler further down (`++g_amd.timeouts` on a real engine failure), which
+    # is a different thing entirely - so the check has to see only the
+    # diagnostic's own body.
+    anchor = src.find("recorded NO job in the last")
+    if anchor < 0:
+        block = ""
+    else:
+        end = src.find("if (!engine_ok || engine_failed)", anchor)
+        block = src[max(0, anchor - 1100):end if end > 0 else anchor + 1400]
+    for bad in ("return false", "++g_amd.timeouts", "g_amd.failed = true"):
+        if bad in block:
+            failures.append(f"the feed diagnostic GATES the frame ({bad}) - a "
+                            f"counter that stands still on this route would then "
+                            f"skip every frame, which is the deadlock it exists "
+                            f"to describe")
+    # And the counter it reads must be the job counter, not the sync counter:
+    # only the job counter says "something was queued".
+    if "JobCount()" not in block:
+        failures.append("the diagnostic does not read the job counter, so it "
+                        "cannot tell 'nothing was queued' from 'nothing finished'")
+
+    print(f"    feed-diagnostic block: {len(block)} chars")
     if failures:
         print()
         for f in failures:

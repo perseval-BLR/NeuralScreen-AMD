@@ -116,6 +116,13 @@ struct AmdState
     uint64_t last_report_tick = 0;
     uint32_t last_jobs = 0;
 
+    // The feed diagnostic (dispatch route only): how long the engine's job
+    // counter has stood still while we kept handing it frames. `last_job_seen`
+    // is the value it had the last time it moved.
+    uint32_t last_job_seen = 0;
+    uint64_t frames_without_job = 0;
+    uint64_t jobs_seen_total = 0;
+
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
     uint64_t frame_t0 = 0;
@@ -1072,8 +1079,14 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // submission and the present that follows. Gating on a counter that
     // nothing increments would skip every frame.
     //
-    // This is now the only wait in the frame: the wait that used to sit
-    // between the two submissions is gone with the second submission.
+    // That asymmetry is a property of the FEED, not of the engine: `Record` is
+    // what increments the job counter, and both hosts that poll those counters
+    // (Magpie, zmodelerlover/dlss5-neural-amd) feed the engine through the
+    // packet. Both hosts that use the ffxDispatch route - the reference and us
+    // - wait on the queue fence. Polling the counter instead would deadlock
+    // here: in every Radeon log we have, `sync` is 0 in every single report.
+    //
+    // So the counters are used on this route as a DIAGNOSTIC, never as a gate.
     const uint32_t budget = g_amd.frames < 3 ? 20000u : 2000u;
     bool engine_ok = true;
     if (g_amd.use_packet)
@@ -1090,6 +1103,44 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         Log("[amd] engine counters after %llu frames: jobs %u, sync %u",
             static_cast<unsigned long long>(g_amd.frames),
             g_amd.runtime.JobCount(), g_amd.runtime.SyncCount());
+    }
+
+    // Does the engine actually RECORD anything when we feed it by dispatch?
+    //
+    // This is the question every report so far could not answer. The log lines
+    // we had said `route fsr` (so the engine found our dispatch) while the job
+    // counter read 0 or 1 and never moved - and there was no line that turned
+    // that combination into a sentence. It matters because the two cases need
+    // opposite work: an engine that records and produces a black frame is a
+    // picture problem, an engine that records nothing is a feeding problem.
+    //
+    // Reported, never gated. Nothing here skips a frame: a counter that fails
+    // to move is information, and acting on it would be the deadlock the note
+    // above describes.
+    if (!g_amd.use_packet)
+    {
+        const uint32_t jobs_now = g_amd.runtime.JobCount();
+        if (jobs_now == g_amd.last_job_seen)
+        {
+            ++g_amd.frames_without_job;
+            if (g_amd.frames_without_job == 60)
+                Log("[amd] the engine has recorded NO job in the last %llu frames, "
+                    "although it is following our dispatch (route fsr) - the frames "
+                    "reach it but nothing is queued; this is the feeding side, not "
+                    "the picture",
+                    static_cast<unsigned long long>(g_amd.frames_without_job));
+        }
+        else
+        {
+            if (g_amd.frames_without_job >= 60)
+                Log("[amd] the engine recorded a job again after %llu frames without "
+                    "one (jobs %u -> %u)",
+                    static_cast<unsigned long long>(g_amd.frames_without_job),
+                    g_amd.last_job_seen, jobs_now);
+            g_amd.frames_without_job = 0;
+            g_amd.last_job_seen = jobs_now;
+            g_amd.jobs_seen_total = jobs_now;
+        }
     }
 
     if (!engine_ok || engine_failed)
@@ -1140,14 +1191,17 @@ static void AmdFrameAccounting()
     {
         g_amd.last_report_tick = now;
         Log("[amd] %llu frames, avg %llu ms, worst %llu ms, timeouts %llu, refused %llu "
-            "(engine jobs %u, sync %u, engine timeouts %u)",
+            "(engine jobs %u, sync %u, engine timeouts %u, jobs seen %llu, %llu frames "
+            "since one)",
             static_cast<unsigned long long>(g_amd.frames),
             static_cast<unsigned long long>(g_amd.frames ? g_amd.eval_ms_sum / g_amd.frames : 0),
             static_cast<unsigned long long>(g_amd.eval_ms_max),
             static_cast<unsigned long long>(g_amd.timeouts),
             static_cast<unsigned long long>(g_amd.refused),
             g_amd.runtime.JobCount(), g_amd.runtime.SyncCount(),
-            g_amd.runtime.TimeoutCount());
+            g_amd.runtime.TimeoutCount(),
+            static_cast<unsigned long long>(g_amd.jobs_seen_total),
+            static_cast<unsigned long long>(g_amd.frames_without_job));
         // And what the ENGINE saw, in our file: a healthy host with a black
         // picture is the failure this whole path failed to describe, and the
         // only witness to it is the engine's own measure.

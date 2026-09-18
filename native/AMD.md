@@ -124,7 +124,8 @@ lines. Nothing has to be turned on: every line below is written always.
 | `[amd] FSR contexts: network 1664x936 (1:1), upscale work -> display` | the two dispatches are set up |
 | `[amd] FSR dispatch N: network at 1664x936, then the upscale` | frames are reaching the engine |
 | `[amd] engine surfaces at 1280x720` | the resolution the network runs at |
-| `[amd] N frames, avg X ms, worst Y ms, timeouts Z` | every 30 s: how it is doing |
+| `[amd] N frames, avg X ms, worst Y ms, timeouts Z` | every 30 s: how it is doing, and how many frames have gone by since the engine last queued a job |
+| `[amd] the engine has recorded NO job in the last 60 frames` | the frames reach it but nothing is queued - a feeding problem, not a picture one |
 | `[amd] WARNING: the runtime is unpatched...` | you skipped the patching step |
 | `[amd] this GPU is not supported by the AMD neural pass` | the card is not a Radeon: the program runs, the picture is not processed |
 
