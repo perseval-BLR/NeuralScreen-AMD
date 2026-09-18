@@ -233,9 +233,24 @@ def main() -> int:
                         "keeps the old keys and UseFsrInputs stays unset")
     # The order the runtime needs: it hooks D3D12/DXGI from its own thread, and
     # a swapchain created before those land is invisible to it.
-    if "hooked IDXGISwapChain1::Present1" not in runtime_src:
-        failures.append("the host does not wait for the runtime's hooks - a "
+    #
+    # The marker is NOT the detour list. Patch 0x1ffc disables the runtime's own
+    # hook-installer thread on purpose (the host owns the frame), so this image
+    # never logs `hooked IDXGIFactory...` - waiting for that line is a check
+    # that cannot pass, and it reported "hooks were NOT seen" on every healthy
+    # Radeon whose logs we have. What this image does print once it is up is the
+    # ffxCreateContext detour of OUR upscaler and `engine init ok`.
+    if "hooked IDXGISwapChain1::Present1" in runtime_src and \
+            "kReadyMarkers" not in runtime_src:
+        failures.append("the host waits for a detour line this patched image "
+                        "never writes - the wait can never succeed")
+    if "kReadyMarkers" not in runtime_src:
+        failures.append("the host does not wait for the runtime to be ready - a "
                         "swapchain created first is invisible to it")
+    for marker in ("ffxCreateContext", "engine init ok"):
+        if marker not in runtime_src:
+            failures.append(f"the readiness marker {marker!r} is gone from the "
+                            f"host - the wait has nothing to look for")
     # The upscale has to run AFTER the engine has edited the surface, and it
     # lives in the second command list for that reason.
     second_list = bridge_src.find("the second list: the processed frame back")

@@ -255,10 +255,16 @@ int wmain(int argc, wchar_t **argv) {
     out("\n");
 
     // --- 3. HIP -----------------------------------------------------------
+    // The runtime's own dependency, so it is looked for beside the runtime
+    // first: LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR is not in play for a bare name,
+    // but the explicit `dir + name` below covers the same ground. Kept in
+    // this order because Adrenalin installs HIP into System32 on most
+    // machines and the DLL folder on others.
     HMODULE hip = LoadLibraryExW(kHipName, nullptr, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!hip) {
         hip = LoadLibraryExW((dir + L"\\" + kHipName).c_str(), nullptr,
-                             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                 LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     }
     if (!hip) {
         out("HIP: %ls not found (error %lu) - install Adrenalin 26.1.1 or newer,\n"
@@ -314,8 +320,19 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
 
+    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR is what makes this probe work from
+    // ANY working directory, and its absence is a live bug report: run from
+    // the folder above, `probe_amd --init` died with "LoadLibrary failed
+    // (error 126)" while the same command inside native\ succeeded. 126 is
+    // ERROR_MOD_NOT_FOUND and here it means the runtime's OWN dependencies
+    // (the HIP runtime among them) were searched for relative to the process
+    // rather than to the DLL. DEFAULT_DIRS alone does not add the DLL's own
+    // folder to that search; the flag has to be named. The worker has always
+    // passed both; the probe did not, so a user who followed the README from
+    // the extracted folder got a failure that said nothing about the cause.
     HMODULE mod = LoadLibraryExW((dir + L"\\" + kRuntimeName).c_str(), nullptr,
-                                 LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+                                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!mod) {
         out("init: LoadLibrary failed (error %lu)\n", GetLastError());
         if (log) fclose(log);

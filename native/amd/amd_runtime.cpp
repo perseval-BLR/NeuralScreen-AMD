@@ -511,17 +511,45 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         // silent-passthrough path, and it is what our own log showed:
         //
         //     [amd] the runtime's D3D12/DXGI hooks are in place (0 ms)
+        // Readiness is read from what THIS image actually writes, and that is
+        // not the D3D12/DXGI detour list: patch 0x1ffc disables the runtime's
+        // own hook-installer thread on purpose (the host owns the frame), so
+        // our runs never log `hooked IDXGIFactory...` at all - live logs from
+        // three different Radeons show the wait failing on every single launch
+        // while the engine was working. Waiting for a line our own patch
+        // removed is a check that cannot pass; it reported "the runtime's hooks
+        // were NOT seen" on healthy machines and sent readers after a fault
+        // that was not there.
+        //
+        // What the engine DOES print once it is really up, verified on those
+        // same live logs:
+        //
+        //     engine init ok
+        //     hooked amd_fidelityfx_upscaler_dx12.dll!ffxCreateContext
+        //
+        // The ffxCreateContext line is the load-bearing one: it appears when
+        // the runtime detours OUR upscaler from OUR process, which is exactly
+        // the condition the old wait was trying to establish. `engine init ok`
+        // is what the engine says when it has accepted the device and the
+        // weights.
         const std::wstring log_path = runtime_dir + L"\\dlssnr_on_amd.log";
-        const char *kLastHook = "hooked IDXGISwapChain1::Present1";
+        // The FIRST of these to appear ends the wait.
+        const char *kReadyMarkers[] = {
+            "hooked amd_fidelityfx_upscaler_dx12.dll!ffxCreateContext",
+            "engine init ok",
+        };
         const DWORD budget_ms = 5000;
         DWORD waited = 0;
         bool hooked = false;
         while (waited < budget_ms) {
             unsigned long long now_end = 0;
-            if (LogContains(log_path, kLastHook, log_from_, &now_end)) {
-                hooked = true;
-                break;
+            for (const char *marker : kReadyMarkers) {
+                if (LogContains(log_path, marker, log_from_, &now_end)) {
+                    hooked = true;
+                    break;
+                }
             }
+            if (hooked) break;
             Sleep(25);
             waited += 25;
         }

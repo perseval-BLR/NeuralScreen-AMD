@@ -532,7 +532,17 @@ NR_VERDICT_FAIL = ("feature 18 create failed",   # [pure], the direct refusal
                    "NGX unavailable",            # [host], nothing came up
                    "no NVIDIA adapter found",    # [host], nothing to run on
                    "[amd] the runtime did not come up:",  # [amd], the engine's own reason
-                   "the neural pass is not running")      # [video], SAFE PASSTHROUGH
+                   # The three below are the SAME verdict written by other code
+                   # paths, and they were missing - a live report caught it: the
+                   # worker said "no neural runtime on this machine - SAFE
+                   # PASSTHROUGH" and the menu kept its "processing" line, so a
+                   # machine with no pass at all looked healthy. Every
+                   # SAFE PASSTHROUGH the worker can print has to be readable
+                   # here, or the user is told the opposite of the truth.
+                   "no neural runtime on this machine",   # [video], NGX-less run
+                   "the neural pass is not running",      # [video], generic
+                   "RNSZ: the AMD pass is not running",   # [video], resize path
+                   "RNSZ: feature create failed")         # [video], resize path
 
 #: The pass did not start for a reason that is about the INSTALL, not the card:
 #: a missing runtime file, the wrong build, no HIP. Kept apart from the failure

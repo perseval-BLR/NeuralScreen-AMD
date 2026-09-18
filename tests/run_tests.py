@@ -108,6 +108,7 @@ ABOUT = {
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_install_verdict.py": "a missing runtime file is not read as a bad graphics card",
     "test_amd_worker_survives.py": "a Radeon keeps its worker when the pass is off, and the magenta fill cannot reach an unkeyed layer",
+    "test_verdict_sentences.py": "every refusal the worker can print reaches the menu as one",
     "test_config_atomic.py": "the config write is atomic and persists profile/params/monitor",
     "test_dred_diag.py": "the worker logs DRED/device-removed diagnostics at startup",
     "test_env_header.py": "the log header carries version/OS/HDR and survives broken probes",
