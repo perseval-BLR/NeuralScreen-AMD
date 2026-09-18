@@ -177,6 +177,64 @@ def tracked_tests() -> list:
     return sorted(p.name for p in ROOT.glob("tests/test_*.py"))
 
 
+def _our_stuck_processes() -> list:
+    """PIDs of processes this suite left behind, and only those.
+
+    Three shapes, and the third is why this exists:
+
+      pythonw.exe  - a test that started the app through the VBS launcher;
+      nvngx.dll    - the worker, whose image name is the DLL;
+      python.exe   - a test that ran `main.py` DIRECTLY (test_dred_diag,
+                     test_direct_reconstruction, test_feature_leak all do).
+
+    A stuck `python.exe` was invisible to the previous version, which watched
+    only the first two. It still holds the single-instance mutex, so the NEXT
+    test that starts the app sees "NeuralScreen is already running", never
+    reaches NR, and fails - reading exactly like a flaky test
+    (test_dred_diag failed this way in a suite run while passing alone).
+
+    `python.exe` is also the interpreter RUNNING this file, and it is a very
+    common image name, so the match is narrowed by command line: only
+    processes whose cmdline mentions this project's directory or one of its
+    scripts. Killing an unrelated python the user happens to be running is
+    not a risk worth taking to fix a test harness.
+    """
+    import csv
+    import io
+
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+
+    me = os.getpid()
+    out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                         capture_output=True).stdout
+    text = out.decode("cp1251", errors="replace")
+    rows = [row for row in csv.reader(io.StringIO(text)) if row and len(row) > 1]
+    pids = [r[1] for r in rows
+            if r[0].lower() in ("pythonw.exe", "nvngx.dll")]
+    if psutil is not None:
+        marker = str(ROOT).lower()
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                if proc.info["pid"] == me:
+                    continue
+                if (proc.info["name"] or "").lower() != "python.exe":
+                    continue
+                cmd = " ".join(proc.info["cmdline"] or []).lower()
+                if marker in cmd or "main.py" in cmd or "run_tests" in cmd:
+                    pids.append(str(proc.info["pid"]))
+            except (psutil.Error, KeyError):
+                continue
+    seen, out_pids = set(), []
+    for pid in pids:
+        if pid not in seen:
+            seen.add(pid)
+            out_pids.append(pid)
+    return out_pids
+
+
 def settle(limit: float = SETTLE_LIMIT) -> float:
     """Wait until none of our processes are left, and say how long it took.
 
@@ -202,19 +260,11 @@ def settle(limit: float = SETTLE_LIMIT) -> float:
     the tests themselves do on their own workers.
     """
     started = time.monotonic()
-    killed: list = []
     while time.monotonic() - started < limit:
-        out = subprocess.run(["tasklist"], capture_output=True).stdout
-        text = out.decode("cp1251", errors="replace")
-        if not [l for l in text.splitlines()
-                if "pythonw.exe" in l or "nvngx.dll" in l]:
+        if not _our_stuck_processes():
             break
         time.sleep(0.25)
     else:
-        # Out of patience: name the leftovers, then clear them. tasklist is
-        # read as CSV because the plain columns are padded and a naive split
-        # picks the wrong field - the first version of this killed nothing and
-        # reported success.
         killed = _kill_leftovers()
     return time.monotonic() - started
 
@@ -224,18 +274,12 @@ def _kill_leftovers() -> list:
 
     taskkill on the IMAGE NAME is what the tests use, and it is unreliable
     for pythonw.exe: several tools in this project are pythonw, and a kill by
-    name can race a legitimate start. Killing the exact PIDs from tasklist
-    is narrow and repeatable.
+    name can race a legitimate start. Killing the exact PIDs is narrow and
+    repeatable - and for python.exe the PID came from a command-line match,
+    so nothing outside this project is touched.
     """
-    import csv
-    import io
-    out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                         capture_output=True).stdout
-    text = out.decode("cp1251", errors="replace")
-    pids = [row[1] for row in csv.reader(io.StringIO(text))
-            if row and row[0].lower() in ("pythonw.exe", "nvngx.dll")]
     done = []
-    for pid in pids:
+    for pid in _our_stuck_processes():
         r = subprocess.run(["taskkill", "/F", "/PID", pid, "/T"],
                            capture_output=True)
         if r.returncode == 0:
