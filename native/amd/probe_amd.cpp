@@ -32,6 +32,11 @@
 namespace {
 
 constexpr const wchar_t *kRuntimeName = L"dlssnr_amd_pass1.dll";
+//: The patched twin the preparation script writes beside it. Both are the same
+//: build with five bytes changed, so both are checked and named here - a probe
+//: that reported the patched file MISSING would send the user after a file that
+//: is simply the other half of the A/B.
+constexpr const wchar_t *kRuntimePatchedName = L"dlssnr_amd_pass1_patched.dll";
 constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
 constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
 //: The FidelityFX upscaler. Not part of the runtime, but the runtime cannot
@@ -190,7 +195,8 @@ int wmain(int argc, wchar_t **argv) {
     // the one tool built to prevent exactly that.
     struct Item { const wchar_t *name; bool required; };
     const Item items[] = {
-        {kRuntimeName, true}, {kWeightsName, true}, {kIniName, false},
+        {kRuntimeName, true}, {kRuntimePatchedName, false},
+        {kWeightsName, true}, {kIniName, false},
         {kUpscalerName, true},
     };
     bool runtime_present = false;
@@ -211,6 +217,9 @@ int wmain(int argc, wchar_t **argv) {
             if (wcscmp(it.name, kUpscalerName) == 0) upscaler_present = true;
         } else if (it.required) {
             out("   <- required");
+        } else if (wcscmp(it.name, kRuntimePatchedName) == 0) {
+            // Optional, and only optional: the stock file is the one that runs.
+            out("   <- optional, the stock build runs by default");
         }
         out("\n");
     }
@@ -227,6 +236,14 @@ int wmain(int argc, wchar_t **argv) {
     }
 
     // --- 2. size and hash -------------------------------------------------
+    // TWO images are accepted, because the A/B needs both: the stock build (the
+    // default) and the same file with the five patches. They differ by a few
+    // bytes, so the size gate is the same for each and the hash decides which
+    // one this is.
+    static const char kPatchedHash[] =
+        "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8";
+    static const char kStockHash[] =
+        "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84";
     bool hash_match = false;
     if (runtime_present) {
         // The size gate runs first: the table belongs to one exact image, and
@@ -238,14 +255,20 @@ int wmain(int argc, wchar_t **argv) {
         const std::string hex = sha256_hex(dir + L"\\" + kRuntimeName, &ok);
         if (ok) {
             out("sha256 %s\n", hex.c_str());
-            // Compare bytes, report by prefix for the issue paste.
-            hash_match = hex.rfind(
-                "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8",
-                0) == 0;
-            out("expected 3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8\n");
-            out("verdict: %s\n", hash_match
-                ? "this is the build NeuralScreen AMD knows how to drive"
-                : "UNKNOWN build - offsets are not verified against this file");
+            const bool stock = hex.rfind(kStockHash, 0) == 0;
+            const bool patched = hex.rfind(kPatchedHash, 0) == 0;
+            hash_match = stock || patched;
+            out("expected %s (stock, default) or %s (patched)\n",
+                kStockHash, kPatchedHash);
+            if (stock)
+                out("verdict: the STOCK build - the engine installs its own "
+                    "hooks and owns the frame\n");
+            else if (patched)
+                out("verdict: the PATCHED build - the hook installer is "
+                    "disabled, the host drives it (NS_AMD_PATCHED=1)\n");
+            else
+                out("verdict: UNKNOWN build - offsets are not verified against "
+                    "this file\n");
         } else {
             out("sha256: could not read the file\n");
         }

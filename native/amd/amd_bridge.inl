@@ -864,11 +864,26 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // kernel launched before submission can occupy the GPU while the frame it
     // depends on is still queued on the CPU.
     //
-    // This is our substitute for the runtime's own ExecuteCommandLists detour:
-    // the host disables that detour's installer on purpose (patch 0x1ffc), so
-    // the engine has to be told about the submission by hand or it never looks
-    // at the list at all.
-    g_amd.runtime.Notify(h.queue, h.list);
+    // WHO TELLS THE ENGINE ABOUT THE SUBMISSION depends on WHICH BUILD is
+    // loaded, and that is a property of the file - its hash - so it is read
+    // from the loader rather than guessed from a log line.
+    //
+    // STOCK: the runtime installs its own ExecuteCommandLists detour from the
+    // thread it starts on load, and it carries its own notify call after that
+    // hook. Both are intact in this build. Calling Notify here as well would
+    // announce one submission to an engine that has already seen it - the
+    // duplicate the runtime's own patch 0x3a53 exists to remove ("without the
+    // hook it would execute the frame twice"). A build that keeps its hooks
+    // does not need this call and is not helped by it.
+    //
+    // PATCHED (patch 0x1ffc): that detour's installer is disabled, so the
+    // engine never sees a submission by itself and this call is the only thing
+    // that keeps the dispatch route alive. The two patches are a pair - 0x3a53
+    // removes the notify call precisely because 0x1ffc removes the hook that
+    // made it necessary - so the host has to supply it again.
+    const bool engine_owns_submission = g_amd.runtime.Kind() == amd_nr::ImageKind::Stock;
+    if (!engine_owns_submission)
+        g_amd.runtime.Notify(h.queue, h.list);
 
     // How completion is established depends on which path feeds the engine.
     //
@@ -1152,10 +1167,16 @@ static bool AmdInit()
     // report, so ours is re-installed once the engine has had its turn.
     SetUnhandledExceptionFilter(CrashFilter);
 
+    // Which image is in play, said out loud. The two are a deliberate A/B and
+    // the log line is how a report says which side of it ran: the stock build
+    // keeps the runtime's own hooks (the shape the one host that produces a
+    // picture runs), the patched one has them disabled and is driven by hand.
     if (g_amd.runtime.Kind() == amd_nr::ImageKind::Stock)
-        Log("[amd] WARNING: the runtime is unpatched, so it will install its own "
-            "hooks and fight this host for the frame - expect glitches; the tested "
-            "build is the patched v0.2.14");
+        Log("[amd] runtime image: STOCK - the engine installs its own hooks and "
+            "owns the submission; this host does not notify it by hand");
+    else if (g_amd.runtime.Kind() == amd_nr::ImageKind::Patched)
+        Log("[amd] runtime image: PATCHED - the hook installer is disabled, so "
+            "this host notifies the engine by hand (NS_AMD_PATCHED=1)");
 
     if (!AmdEnsurePipeline())
     { Log("[amd] ===== AMD path off (no conversion pipeline) ====="); g_amd.failed = true; return false; }

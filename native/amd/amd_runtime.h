@@ -48,6 +48,10 @@ namespace amd_nr {
 // Both live next to the worker unless BYO overrides the location - the same
 // "bring your own" model as native/libraries/ for the NVIDIA runtime.
 inline constexpr const wchar_t *kRuntimeName = L"dlssnr_amd_pass1.dll";
+//: The same build with the five documented patches applied. Kept as a separate
+//: FILE rather than a replacement, so switching between the two is one
+//: environment variable instead of a reinstall (see RuntimeImageName).
+inline constexpr const wchar_t *kRuntimeNamePatched = L"dlssnr_amd_pass1_patched.dll";
 inline constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
 inline constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
 inline constexpr const wchar_t *kHipName = L"amdhip64_7.dll";

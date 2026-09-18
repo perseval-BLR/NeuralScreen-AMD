@@ -73,11 +73,12 @@ def main() -> int:
                         "protect anything")
 
     # --- 3. it is CALLED on every path that leaves the files in place -----
-    # Two early returns write dst and return without reaching the tail of
-    # main(): the "already accepted" path and the "already patched" path. A
-    # second run of the script is exactly the case where the installer's
-    # version.dll is back, so both of them must drop it.
-    calls = re.findall(r"drop_loose_proxy\(folder, dst\)", src)
+    # A second run of the script is exactly the case where the installer's
+    # `version.dll` is back, so every path that writes an image must drop it -
+    # including the two early returns in main() and the already-patched one.
+    # Counted by function name (the arguments differ per call site), and the
+    # definition itself does not count.
+    calls = re.findall(r"(?<!def )drop_loose_proxy\(", src)
     if len(calls) < 3:
         failures.append(f"drop_loose_proxy is called {len(calls)} time(s): it "
                         "must run on the early-return paths too, or a second "
@@ -102,13 +103,52 @@ def main() -> int:
                             "file is dangerous")
 
     print(f"    prepare script: {len(src)} chars, {len(calls)} call(s)")
+
+    # --- 6. the A/B is ONE VARIABLE, and both images are written ----------
+    #
+    # The driver reads NS_AMD_PATCHED to pick which file to load, and the script
+    # produces both, so the comparison needs no reinstall: same machine, same
+    # session, one setting apart. Losing either half makes the A/B impossible to
+    # run from a user's log.
+    driver = (BASE / "native" / "amd" / "amd_runtime.cpp").read_text(
+        encoding="utf-8", errors="replace")
+    header = (BASE / "native" / "amd" / "amd_runtime.h").read_text(
+        encoding="utf-8", errors="replace")
+    if "NS_AMD_PATCHED" not in driver:
+        failures.append("the driver never reads NS_AMD_PATCHED - the patched "
+                        "image cannot be selected, so the A/B is unreachable")
+    if "kRuntimeNamePatched" not in header:
+        failures.append("amd_runtime.h has no name for the patched image")
+    if 'dlssnr_amd_pass1_patched.dll' not in header:
+        failures.append("the patched image has no file name - the two copies "
+                        "would collide")
+    # The default must be the STOCK image: that is the whole direction change.
+    if "want_patched ? kRuntimeNamePatched : kRuntimeName" not in driver:
+        failures.append("the default image is not the stock build - the driver "
+                        "must pick kRuntimeNamePatched only when asked")
+    # ...and both files must actually be produced.
+    if "dlssnr_amd_pass1_patched.dll" not in src:
+        failures.append("the prepare script never writes the patched copy")
+    if "unpatch(" not in src:
+        failures.append("there is no way back from an already-patched file, so "
+                        "a user who has one cannot produce the stock half")
+
+    # --- 7. the probe has to know both images ----------------------------
+    probe = (BASE / "native" / "amd" / "probe_amd.cpp").read_text(
+        encoding="utf-8", errors="replace")
+    if "kStockHash" not in probe or "kPatchedHash" not in probe:
+        failures.append("probe_amd only accepts one image: it would call the "
+                        "stock build UNKNOWN, which is now the default")
+    if "kRuntimePatchedName" not in probe:
+        failures.append("probe_amd does not report the patched copy")
+
     if failures:
         print()
         for f in failures:
             print(f"  FAIL: {f}")
         print(f"\n{len(failures)} problem(s)")
         return 1
-    print("OK: the loose version.dll is removed on every path the script can take")
+    print("OK: the loose version.dll goes, and both images of the A/B exist")
     return 0
 
 

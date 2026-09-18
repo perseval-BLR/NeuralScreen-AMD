@@ -228,7 +228,30 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     ready_ = false;
     last_error_.clear();
 
-    const std::wstring runtime_path = runtime_dir + L"\\" + kRuntimeName;
+    // --- 0. which of the two images to drive --------------------------------
+    //
+    // The STOCK build is the default. That is a change of direction, and the
+    // reason is the one host that produces a picture: it drives the runtime
+    // WITHOUT modifying it - no writes into the image at all, no hand-made
+    // Notify call - because the build it uses installs its own hooks and owns
+    // the frame from there. Our patched build is the opposite shape: patch
+    // 0x1ffc disables that hook installer so the host has to drive everything
+    // by hand.
+    //
+    // Both images are the same file with five in-place patches, so the offset
+    // table above belongs to either one - the patches change bytes, not layout.
+    // Which is loaded is therefore a one-variable A/B, and it needs no
+    // reinstall: prepare_amd_runtime.py writes both files side by side.
+    //
+    // NS_AMD_PATCHED=1 selects the patched image (the previously tested path).
+    bool want_patched = false;
+    {
+        char v[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_PATCHED", v, sizeof(v));
+        want_patched = got > 0 && got < sizeof(v) && v[0] == '1';
+    }
+    const std::wstring chosen_name = want_patched ? kRuntimeNamePatched : kRuntimeName;
+    const std::wstring runtime_path = runtime_dir + L"\\" + chosen_name;
     const std::wstring weights_path = runtime_dir + L"\\" + kWeightsName;
     const std::wstring ini_path = runtime_dir + L"\\" + kIniName;
     // Kept for WriteScale: the menu's Intensity reaches the network as `Scale`
@@ -238,7 +261,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // --- 1. the runtime file, size and hash ------------------------------
     WIN32_FILE_ATTRIBUTE_DATA fad{};
     if (!GetFileAttributesExW(runtime_path.c_str(), GetFileExInfoStandard, &fad)) {
-        last_error_ = "dlssnr_amd_pass1.dll not found in " + narrow(runtime_dir);
+        last_error_ = narrow(chosen_name) + " not found in " + narrow(runtime_dir);
         return false;
     }
     {
@@ -247,7 +270,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         li.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
         const uint64_t size = static_cast<uint64_t>(li.QuadPart);
         if (size != kRuntimeSize) {
-            last_error_ = "dlssnr_amd_pass1.dll is " + std::to_string(size) +
+            last_error_ = narrow(chosen_name) + " is " + std::to_string(size) +
                           " bytes, the known build is " +
                           std::to_string(kRuntimeSize) + " (this table belongs "
                           "to exactly one image; refusing rather than guessing)";
@@ -256,7 +279,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     }
     uint8_t actual[32] = {};
     if (!sha256_of_file(runtime_path, actual)) {
-        last_error_ = "could not hash dlssnr_amd_pass1.dll";
+        last_error_ = "could not hash " + narrow(chosen_name);
         return false;
     }
     found_hash_ = to_hex(actual, 32);
@@ -269,7 +292,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         if (patched) kind_ = ImageKind::Patched;
         else if (stock) kind_ = ImageKind::Stock;
         else {
-            last_error_ = "dlssnr_amd_pass1.dll is not a build these offsets "
+            last_error_ = narrow(chosen_name) + " is not a build these offsets "
                           "belong to (found " + found_hash_ + "); refusing rather "
                           "than guessing";
             return false;
@@ -407,7 +430,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                                  LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (module_ == nullptr) {
-        last_error_ = "LoadLibrary of dlssnr_amd_pass1.dll failed (error " +
+        last_error_ = "LoadLibrary of " + narrow(chosen_name) + " failed (error " +
                       std::to_string(GetLastError()) + ")";
         return false;
     }

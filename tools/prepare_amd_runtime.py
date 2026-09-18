@@ -31,11 +31,18 @@ WHAT IT DOES
     the frame ("the two cannot both hold the wheel"). The patches are
     documented in the community's own runtime-patches.json; this script
     applies the same bytes to YOUR copy, on YOUR machine, for your own use;
-  * writes the result as dlssnr_amd_pass1.dll next to the worker.
+  * writes TWO files beside the worker, from the one you supplied:
+      dlssnr_amd_pass1.dll          the stock build. This is what runs.
+      dlssnr_amd_pass1_patched.dll  the same build with the five patches.
 
-  Pass --keep-stock to skip the patching step. The driver accepts the
-  unpatched build too, with a warning - it is useful for a report but is
-  expected to glitch.
+  STOCK is the default because that is the shape the one host that produces a
+  picture runs: it never modifies the runtime and never drives it by hand - the
+  engine installs its own hooks and owns the frame. The patched build disables
+  that hook installer (patch 0x1ffc), so the host has to drive everything itself.
+  Both are the same file with a few bytes changed, so the driver's offset table
+  belongs to either, and switching between them is one variable:
+  NS_AMD_PATCHED=1 selects the patched one. That is what a live A/B needs - the
+  same machine and session, one setting apart.
 
   Pass --download to fetch the installer from the author's own release page
   instead of copying it in by hand. The file is not redistributed here: it
@@ -183,10 +190,40 @@ def download_installer(folder: Path) -> int:
     return 0
 
 
+def stock_dst_is_valid(folder: Path) -> bool:
+    """Whether the stock copy beside the worker is the build the driver knows."""
+    p = folder / "dlssnr_amd_pass1.dll"
+    return p.is_file() and sha256_of(p) == STOCK_SHA256
+
+
+def patched_dst_is_valid(folder: Path) -> bool:
+    """Whether the patched copy beside the worker is the build the driver knows."""
+    p = folder / "dlssnr_amd_pass1_patched.dll"
+    return p.is_file() and sha256_of(p) == PATCHED_SHA256
+
+
+def unpatch(data: bytearray) -> None:
+    """Undo the five patches, in reverse, asserting the bytes first.
+
+    `apply_patches` is the only writer of these bytes, so the inverse is exact:
+    each entry lists (offset, stock_bytes, patched_bytes) and this walks it the
+    other way. It exists so an already-patched file the user hands us can still
+    produce the stock half of the A/B - the two copies differ by these bytes and
+    nothing else.
+    """
+    for off, before_hex, after_hex in PATCHES:
+        after = bytes.fromhex(after_hex)
+        before = bytes.fromhex(before_hex)
+        if data[off:off + len(after)] != after:
+            raise ValueError(
+                f"offset 0x{off:x}: expected the patched bytes {after_hex[:24]}..., "
+                f"found {data[off:off + len(after)].hex()[:24]}...; "
+                "this file is not this build")
+        data[off:off + len(after)] = before
+
+
 def drop_loose_proxy(folder: Path, dst: Path) -> None:
     """Remove a `version.dll` sitting beside the worker.
-
-    This is the one step here that is about the HOST rather than the runtime.
 
     The worker statically imports VERSION.dll (file-version reads for its
     signature checks), and the runtime is distributed AS `version.dll` - that
@@ -251,9 +288,6 @@ def main() -> int:
     ap.add_argument("folder", nargs="?",
                     help="folder with the installer's output "
                          "(default: the program's native folder)")
-    ap.add_argument("--keep-stock", action="store_true",
-                    help="do not patch; keep the runtime's own hooks "
-                         "(useful for a report, expected to glitch)")
     ap.add_argument("--download", action="store_true",
                     help="fetch the installer from the author's release page "
                          "instead of copying it in by hand")
@@ -285,18 +319,30 @@ def main() -> int:
                   "this folder first - see the docstring.", file=sys.stderr)
             return 2
 
-    # A file the worker already accepted is left alone - but the loose proxy is
-    # removed on EVERY path, including this one: a second run of this script is
-    # exactly the case where `version.dll` is still lying there, because the
-    # installer put it back.
+    # A second run: `version.dll` is gone (we removed it) and dst is one of the
+    # two images. Whichever one it is, make sure BOTH exist, so the A/B stays a
+    # single variable rather than something the user has to re-run this script
+    # for. The loose proxy is dropped on every path: a second run is exactly the
+    # case where the installer has just put `version.dll` back.
     if src == dst:
         have = sha256_of(src)
         if have in (STOCK_SHA256, PATCHED_SHA256):
-            kind = "already patched" if have == PATCHED_SHA256 else "stock"
-            print(f"{dst.name}: {kind}, nothing to do")
-            if have == STOCK_SHA256 and not args.keep_stock:
-                print("tip: pass nothing to patch it, or --keep-stock to keep it as is")
-            drop_loose_proxy(folder, dst)
+            data = bytearray(src.read_bytes())
+            if have == PATCHED_SHA256:
+                print(f"{dst.name}: the patched build")
+                if not stock_dst_is_valid(folder):
+                    data2 = bytearray(data)
+                    unpatch(data2)
+                    (folder / "dlssnr_amd_pass1.dll").write_bytes(bytes(data2))
+                    print("written the STOCK copy next to it (what runs by default)")
+            else:
+                print(f"{dst.name}: the stock build (runs by default)")
+                if not patched_dst_is_valid(folder):
+                    p = bytearray(data)
+                    apply_patches(p)
+                    (folder / "dlssnr_amd_pass1_patched.dll").write_bytes(bytes(p))
+                    print("written the PATCHED copy next to it (NS_AMD_PATCHED=1)")
+            drop_loose_proxy(folder, folder / "dlssnr_amd_pass1.dll")
             return 0
 
     data = bytearray(src.read_bytes())
@@ -323,10 +369,12 @@ def main() -> int:
     if have == STOCK_SHA256:
         pass
     elif have == PATCHED_SHA256:
-        print("the file is already the patched build")
-        if src != dst:
-            dst.write_bytes(bytes(data))
-            print(f"written: {dst}")
+        # The user pointed us at an already-patched file. Reconstruct the stock
+        # one from it so both sides of the A/B exist either way.
+        print("the file given is already the patched build; the stock copy is "
+              "written next to it")
+        dst.write_bytes(bytes(data))
+        print(f"written: {dst}")
         drop_loose_proxy(folder, dst)
         return 0
     else:
@@ -337,23 +385,40 @@ def main() -> int:
               "page and run it in this folder.", file=sys.stderr)
         return 4
 
-    if not args.keep_stock:
-        try:
-            apply_patches(data)
-        except ValueError as exc:
-            print(f"patching failed: {exc}", file=sys.stderr)
-            return 5
-        after = hashlib.sha256(data).hexdigest()
-        if after != PATCHED_SHA256:
-            print(f"patching produced an unexpected result ({after})", file=sys.stderr)
-            return 5
-        print("applied the five patches (hash verified)")
-    else:
-        print("keeping the stock build - the runtime will install its own hooks")
+    # BOTH images are written, and that is the point of this script now.
+    #
+    # They are the same build with five in-place patches, so the driver's offset
+    # table belongs to either one. Having both files side by side makes the
+    # choice a single environment variable (NS_AMD_PATCHED=1) instead of a
+    # reinstall, which is what a live A/B needs: the same machine, the same
+    # session, one setting apart.
+    #
+    # STOCK is the default, because that is the shape the one external host that
+    # produces a picture runs: it never modifies the runtime, never writes into
+    # its image, and never notifies the engine by hand - the engine installs its
+    # own hooks and owns the frame from there. The patched build is the opposite
+    # shape (patch 0x1ffc disables that hook installer), and it stays available
+    # for the comparison.
+    stock_dst = folder / "dlssnr_amd_pass1.dll"
+    patched_dst = folder / "dlssnr_amd_pass1_patched.dll"
+    stock_dst.write_bytes(bytes(data))
+    print(f"written: {stock_dst}  <- what runs by default")
 
-    dst.write_bytes(bytes(data))
-    print(f"written: {dst}")
-    drop_loose_proxy(folder, dst)
+    patched = bytearray(data)
+    try:
+        apply_patches(patched)
+    except ValueError as exc:
+        print(f"patching failed: {exc}", file=sys.stderr)
+        return 5
+    after = hashlib.sha256(bytes(patched)).hexdigest()
+    if after != PATCHED_SHA256:
+        print(f"patching produced an unexpected result ({after})", file=sys.stderr)
+        return 5
+    patched_dst.write_bytes(bytes(patched))
+    print(f"written: {patched_dst}  <- NS_AMD_PATCHED=1 runs this one")
+    print("applied the five patches (hash verified)")
+
+    drop_loose_proxy(folder, stock_dst)
 
     # The FidelityFX upscaler is the other half of the picture, and its absence
     # is not a crash - it is a pass that runs and processes nothing (the runtime

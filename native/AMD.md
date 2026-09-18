@@ -48,9 +48,27 @@ installer for you.
    runtime\python.exe tools\prepare_amd_runtime.py
    ```
 
-   It verifies the runtime is the build the driver knows, applies the five
-   documented patches (without them the runtime installs its own hooks and
-   fights NeuralScreen for the frame), and writes `dlssnr_amd_pass1.dll`.
+   It verifies the runtime is the build the driver knows and writes **two**
+   files:
+
+   - `dlssnr_amd_pass1.dll` - the stock build. **This is what runs.**
+   - `dlssnr_amd_pass1_patched.dll` - the same build with the five documented
+     patches applied.
+
+   The stock build is the default because that is the shape the one external
+   host that produces a picture runs: it never modifies the runtime, and it does
+   not drive the engine by hand - the engine installs its own hooks and owns the
+   frame from there. The patched build disables that hook installer (patch
+   `0x1ffc`), so NeuralScreen has to drive everything itself. Both files are the
+   same build with a few bytes changed, so the driver's offset table belongs to
+   either one, and switching is a single variable:
+
+   ```
+   set NS_AMD_PATCHED=1     (before starting NeuralScreen - runs the patched build)
+   ```
+
+   That is what the A/B needs: the same machine and the same session, one
+   setting apart. `native\probe_amd.exe` names which one it found.
 
    It also **deletes `version.dll` from that folder**, and that is not
    housekeeping: NeuralScreen's worker reads file versions, so it statically
