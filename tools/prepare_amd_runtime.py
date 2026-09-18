@@ -183,6 +183,68 @@ def download_installer(folder: Path) -> int:
     return 0
 
 
+def drop_loose_proxy(folder: Path, dst: Path) -> None:
+    """Remove a `version.dll` sitting beside the worker.
+
+    This is the one step here that is about the HOST rather than the runtime.
+
+    The worker statically imports VERSION.dll (file-version reads for its
+    signature checks), and the runtime is distributed AS `version.dll` - that
+    is the name a game imports, which is how the proxy gets into a game at all.
+    Both facts point at the same hazard: a copy of the runtime lying in the
+    folder the worker is loaded from can be resolved by that import instead of
+    the system's own version.dll, putting a second, self-initialising engine in
+    the process - entering before the host has bound its device, queue or flags,
+    running its own hook installer and its own frame loop.
+
+    Measured, not assumed: with a copy of version.dll beside a test exe,
+    `GetModuleHandleW("version.dll")` reports THAT file; with no copy it
+    reports C:\\Windows\\SYSTEM32\\VERSION.dll. version.dll is not a KnownDLL
+    (checked in the registry: 37 entries, none of them version), so the local
+    file wins - which is exactly why the runtime's own distribution name is
+    dangerous HERE and not inside a game.
+
+    Our Radeon log is the witness that a second engine is there: one worker run
+    loads the runtime more than once, and the load that installs the
+    D3D12/DXGI detours is NOT the one this host drives. Two engines in one
+    process is the documented route to a black picture ("the two cannot both
+    hold the wheel").
+
+    The host that produces a picture sidesteps this by never importing the name:
+    its build links only kernel32/user32/d3d12/dxgi and loads the runtime
+    through an explicit path, and its probe carries a note that a static import
+    makes the exe refuse to start when the runtime is absent. We do import the
+    name, so we remove the file that can hijack it. With no local copy the
+    import resolves to the system's version.dll and the only engine in the
+    process is the one the host loads BY NAME (`dst`).
+    """
+    loose = folder / "version.dll"
+    if not loose.is_file():
+        return
+    have = sha256_of(loose)
+    if have not in (STOCK_SHA256, PATCHED_SHA256):
+        # Somebody else's version.dll - a game's own copy of the runtime, or an
+        # unrelated module. It is not ours to delete, and it cannot be THIS
+        # build (the one the offsets belong to), so say what it is and leave it.
+        print(f"\nNOTE: {loose} is present but is not this runtime "
+              f"(sha256 {have[:16]}...). Left alone.\n"
+              "  If the pass misbehaves with that file in place, the folder is "
+              "holding a second copy of the runtime that this host does not "
+              "drive - move it out by hand.", file=sys.stderr)
+        return
+    try:
+        loose.unlink()
+        print(f"removed {loose.name}: beside the worker it is resolved as the "
+              "system version.dll and starts a second engine; the host loads "
+              f"{dst.name} by name instead")
+    except OSError as exc:
+        print(f"\nWARNING: could not remove {loose} ({exc})\n"
+              "  A version.dll beside the worker can be resolved as the system "
+              "version.dll at process start, which starts a SECOND, "
+              "self-initialising copy of the runtime. Move or delete it by hand "
+              "before running the pass.", file=sys.stderr)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -223,7 +285,10 @@ def main() -> int:
                   "this folder first - see the docstring.", file=sys.stderr)
             return 2
 
-    # A file the worker already accepted is left alone.
+    # A file the worker already accepted is left alone - but the loose proxy is
+    # removed on EVERY path, including this one: a second run of this script is
+    # exactly the case where `version.dll` is still lying there, because the
+    # installer put it back.
     if src == dst:
         have = sha256_of(src)
         if have in (STOCK_SHA256, PATCHED_SHA256):
@@ -231,6 +296,7 @@ def main() -> int:
             print(f"{dst.name}: {kind}, nothing to do")
             if have == STOCK_SHA256 and not args.keep_stock:
                 print("tip: pass nothing to patch it, or --keep-stock to keep it as is")
+            drop_loose_proxy(folder, dst)
             return 0
 
     data = bytearray(src.read_bytes())
@@ -261,6 +327,7 @@ def main() -> int:
         if src != dst:
             dst.write_bytes(bytes(data))
             print(f"written: {dst}")
+        drop_loose_proxy(folder, dst)
         return 0
     else:
         print(f"this runtime is not the build the driver knows.\n"
@@ -286,6 +353,7 @@ def main() -> int:
 
     dst.write_bytes(bytes(data))
     print(f"written: {dst}")
+    drop_loose_proxy(folder, dst)
 
     # The FidelityFX upscaler is the other half of the picture, and its absence
     # is not a crash - it is a pass that runs and processes nothing (the runtime

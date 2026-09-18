@@ -51,6 +51,18 @@ installer for you.
    It verifies the runtime is the build the driver knows, applies the five
    documented patches (without them the runtime installs its own hooks and
    fights NeuralScreen for the frame), and writes `dlssnr_amd_pass1.dll`.
+
+   It also **deletes `version.dll` from that folder**, and that is not
+   housekeeping: NeuralScreen's worker reads file versions, so it statically
+   imports `VERSION.dll` - a system module name. Windows resolves such an import
+   from the program's own folder first, and `version.dll` is not a KnownDLL, so
+   a copy of the runtime sitting there (the installer names it exactly that) is
+   the file that import binds to. That starts a **second, self-initialising
+   copy of the engine** inside the worker, before NeuralScreen has set anything
+   up, with its own frame loop. Two engines in one process is the documented way
+   to get a black picture. Nothing is lost by removing it: the worker loads the
+   runtime by name (`dlssnr_amd_pass1.dll`), which is the file the script just
+   wrote.
 4. Check the result:
 
    ```
