@@ -34,6 +34,7 @@ Checked against the sources, plus the exit-code table driven directly. Run:
 
     runtime\\python.exe tests\\test_radeon_report_gaps.py
 """
+import re
 import sys
 from pathlib import Path
 
@@ -234,33 +235,75 @@ def main() -> int:
     # The order the runtime needs: it hooks D3D12/DXGI from its own thread, and
     # a swapchain created before those land is invisible to it.
     #
-    # The marker is NOT the detour list. Patch 0x1ffc disables the runtime's own
-    # hook-installer thread on purpose (the host owns the frame), so this image
-    # never logs `hooked IDXGIFactory...` - waiting for that line is a check
+    # WHICH LINES prove that depends on the image, and the wait has to know
+    # which one it is looking at. Patch 0x1ffc disables the runtime's own
+    # hook-installer thread on purpose (the host owns the frame), so the PATCHED
+    # image never logs `hooked IDXGIFactory...` - waiting for one is a check
     # that cannot pass, and it reported "hooks were NOT seen" on every healthy
-    # Radeon whose logs we have. What this image does print once it is up is the
-    # ffxCreateContext detour of OUR upscaler and `engine init ok`.
-    if "hooked IDXGISwapChain1::Present1" in runtime_src and \
-            "kReadyMarkers" not in runtime_src:
-        failures.append("the host waits for a detour line this patched image "
-                        "never writes - the wait can never succeed")
+    # Radeon whose logs we have. The STOCK image does write them, and for it the
+    # swapchain line is the one that must land before we create ours.
+    #
+    # The old version of this check demanded `ffxCreateContext` / `engine init
+    # ok` as markers. Both are written AFTER Load() returns in this host's own
+    # order (AmdInit calls the upscaler's Load later), so waiting for either is
+    # waiting for something this function is itself responsible for. That is the
+    # same class of mistake the check was written to catch, which is why it is
+    # pinned here instead.
     if "kReadyMarkers" not in runtime_src:
         failures.append("the host does not wait for the runtime to be ready - a "
                         "swapchain created first is invisible to it")
-    for marker in ("ffxCreateContext", "engine init ok"):
+    if "HooksApplicable" not in runtime_src and "hooks_applicable_" not in runtime_src:
+        failures.append("the readiness wait does not distinguish the two images - "
+                        "the patched one cannot print the detour lines it waits for")
+    for marker in ("hooked IDXGISwapChain1::Present1", "env: d3d12 device yes"):
         if marker not in runtime_src:
             failures.append(f"the readiness marker {marker!r} is gone from the "
-                            f"host - the wait has nothing to look for")
-    # The upscale has to run AFTER the engine has edited the surface, and it
-    # lives in the second command list for that reason.
-    second_list = bridge_src.find("the second list: the processed frame back")
+                            f"host - the stock image's wait has nothing to look for")
+    # And the marker the patched image cannot write must not be the one the
+    # stock wait depends on, or the wait is conditional on nothing.
+    if "engine init ok" in runtime_src.split("kReadyMarkers")[1][:400]:
+        failures.append("the wait still depends on 'engine init ok', which this "
+                        "host only writes after Load() returns - it waits for "
+                        "something it is itself responsible for")
+
+    # The upscale has to run AFTER the engine has edited the surface.
+    #
+    # In this host the engine works INLINE: its log says "mode inline
+    # (same-frame, the game waits for the network)", and the working host puts
+    # dispatch A, dispatch B and the composite in ONE command list for exactly
+    # that reason. So B follows A in the list, and the property to protect is
+    # "B is recorded after A", not "B lives in a second submission" - the second
+    # submission was the bug: with a 5000 ms fence wait between them, the engine
+    # spent every frame reporting it was still "waiting for the capture".
     upscale_at = bridge_src.find("DispatchUpscale")
     net_dispatch_at = bridge_src.find("DispatchNet")
-    if second_list < 0 or upscale_at < 0 or net_dispatch_at < 0:
+    if upscale_at < 0 or net_dispatch_at < 0:
         failures.append("the dispatch calls are gone from the frame path")
-    elif not (net_dispatch_at < second_list <= upscale_at):
-        failures.append("the upscale is not recorded after the engine's work - "
+    elif not (net_dispatch_at < upscale_at):
+        failures.append("the upscale is recorded before the network's dispatch - "
                         "it would scale the frame the network has not touched")
+    # One submission per frame: a second submission between the two dispatches
+    # is the split this fix removed, and with it the mid-frame fence wait.
+    #
+    # Only the frame function is searched. A raw find over the file also matches
+    # the exposure texture's own upload (a different function, before the frame
+    # path) and even the words "EndCommands()" inside a comment - both were
+    # false positives on the first run of this check.
+    frame_fn = bridge_src.find("static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)\n{")
+    dispatch_calls = [m.start() for m in re.finditer(r"^\s*const UINT64 \w+ = EndCommands\(\);",
+                                                     bridge_src, re.M)]
+    if frame_fn >= 0:
+        in_frame = [a for a in dispatch_calls if a > frame_fn]
+        # The frame does exactly one submission. Anything more means the frame
+        # is split again, and the engine waits for a capture it has already
+        # been given.
+        if len(in_frame) > 1:
+            failures.append(f"the frame submits {len(in_frame)} times - the engine "
+                            "reads its frame off ONE submission plus the present, so "
+                            "a split frame costs it a wait every frame")
+    else:
+        failures.append("the frame function is gone - this check can no longer "
+                        "see how many times a frame is submitted")
 
     # --- 10. the upscaler ships, and the build refuses without it ---------
     # Its absence is the quietest failure in the whole path: the pass comes up,

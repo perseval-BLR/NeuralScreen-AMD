@@ -519,11 +519,29 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // (IDXGISwapChain::GetDevice for a D3D12 queue) cannot work - the frame is
     // discarded as "a swapchain that is not on our device" and never retried.
     //
-    // This is a wait for EVIDENCE, not a sleep: the runtime names every detour
-    // in its own log, and the last one it prints is Present1. The budget is
-    // generous because it costs nothing when the hooks land early, and the
-    // alternative - creating our swapchain first - is the silent passthrough
-    // this whole release is about.
+    // This is a wait for EVIDENCE, not a sleep. The evidence is the detour
+    // lines the runtime prints for itself - and WHICH LINES those are depends
+    // on which build is loaded, which this loader already knows by hash
+    // (kind_, set above):
+    //
+    //   STOCK   the hook-installer thread is intact, so every detour is
+    //           announced: `hooked ID3D12CommandQueue::ExecuteCommandLists`,
+    //           `hooked IDXGIFactory2::CreateSwapChainForHwnd`,
+    //           `hooked IDXGISwapChain1::Present1`. The last of these is the
+    //           one that has to be in place before our swapchain is created.
+    //
+    //   PATCHED patch 0x1ffc DISABLES that installer on purpose (the host owns
+    //           the frame), so none of those lines will ever appear. Waiting
+    //           for one is a check that cannot pass - and that is exactly what
+    //           it did: live logs from three different Radeons carried
+    //           "the runtime's hooks were NOT seen" on every launch while the
+    //           engine was working. For this build there is nothing to wait
+    //           for, and the honest answer is "not applicable", not "not seen".
+    //
+    // The ffxCreateContext line is NOT usable as a marker either: the runtime
+    // only detours our upscaler once the upscaler is loaded, and this host
+    // loads it after this call returns (AmdInit -> fsr.Load). Waiting for it
+    // here waits for something this function is itself responsible for.
     {
         // The runtime's log lives in its own directory and is opened in APPEND
         // mode across runs, so the wait below searches only what THIS run
@@ -534,53 +552,42 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         // silent-passthrough path, and it is what our own log showed:
         //
         //     [amd] the runtime's D3D12/DXGI hooks are in place (0 ms)
-        // Readiness is read from what THIS image actually writes, and that is
-        // not the D3D12/DXGI detour list: patch 0x1ffc disables the runtime's
-        // own hook-installer thread on purpose (the host owns the frame), so
-        // our runs never log `hooked IDXGIFactory...` at all - live logs from
-        // three different Radeons show the wait failing on every single launch
-        // while the engine was working. Waiting for a line our own patch
-        // removed is a check that cannot pass; it reported "the runtime's hooks
-        // were NOT seen" on healthy machines and sent readers after a fault
-        // that was not there.
-        //
-        // What the engine DOES print once it is really up, verified on those
-        // same live logs:
-        //
-        //     engine init ok
-        //     hooked amd_fidelityfx_upscaler_dx12.dll!ffxCreateContext
-        //
-        // The ffxCreateContext line is the load-bearing one: it appears when
-        // the runtime detours OUR upscaler from OUR process, which is exactly
-        // the condition the old wait was trying to establish. `engine init ok`
-        // is what the engine says when it has accepted the device and the
-        // weights.
         const std::wstring log_path = runtime_dir + L"\\dlssnr_on_amd.log";
-        // The FIRST of these to appear ends the wait.
-        const char *kReadyMarkers[] = {
-            "hooked amd_fidelityfx_upscaler_dx12.dll!ffxCreateContext",
-            "engine init ok",
-        };
-        const DWORD budget_ms = 5000;
-        DWORD waited = 0;
-        bool hooked = false;
-        while (waited < budget_ms) {
-            unsigned long long now_end = 0;
-            for (const char *marker : kReadyMarkers) {
-                if (LogContains(log_path, marker, log_from_, &now_end)) {
-                    hooked = true;
-                    break;
-                }
-            }
-            if (hooked) break;
-            Sleep(25);
-            waited += 25;
-        }
-        if (hooked) {
-            hooks_ms_ = waited;
-            hooks_seen_ = true;
-        } else {
+        if (kind_ == ImageKind::Patched) {
+            // Nothing this build prints can prove the wait's condition, and the
+            // host deliberately drives the engine by hand here. Say so, rather
+            // than reporting a fault that does not exist.
+            hooks_applicable_ = false;
             hooks_seen_ = false;
+        } else {
+            hooks_applicable_ = true;
+            // The FIRST of these to appear ends the wait: the swapchain is the
+            // one that must land before we create ours, and it is printed last.
+            const char *kReadyMarkers[] = {
+                "hooked IDXGISwapChain1::Present1",
+                "env: d3d12 device yes",
+            };
+            const DWORD budget_ms = 5000;
+            DWORD waited = 0;
+            bool hooked = false;
+            while (waited < budget_ms) {
+                unsigned long long now_end = 0;
+                for (const char *marker : kReadyMarkers) {
+                    if (LogContains(log_path, marker, log_from_, &now_end)) {
+                        hooked = true;
+                        break;
+                    }
+                }
+                if (hooked) break;
+                Sleep(25);
+                waited += 25;
+            }
+            if (hooked) {
+                hooks_ms_ = waited;
+                hooks_seen_ = true;
+            } else {
+                hooks_seen_ = false;
+            }
         }
     }
 

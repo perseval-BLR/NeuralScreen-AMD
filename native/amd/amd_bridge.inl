@@ -115,6 +115,10 @@ struct AmdState
     uint64_t eval_ms_sum = 0, eval_ms_max = 0;
     uint64_t last_report_tick = 0;
     uint32_t last_jobs = 0;
+
+    // The frame's start, read by AmdFrameAccounting. Kept in the state rather
+    // than a local because the frame now has two exits and both count.
+    uint64_t frame_t0 = 0;
 };
 
 static AmdState g_amd;
@@ -512,12 +516,20 @@ static bool AmdCreateExposure(float value)
     return true;
 }
 
-// Create the three engine surfaces at a given extent. Depth is zeroed and
-// never written by anyone - the reference hands one over anyway and the engine
-// expects the field populated; the flag that would make it read the surface is
-// off. The zero fill is a barrier-free Clear on the copy queue's terms: it is
-// written by ClearUnorderedAccessViewUint through a CPU descriptor, which is
-// why the resource carries ALLOW_UNORDERED_ACCESS.
+// Create the three engine surfaces at a given extent. Depth is never written
+// by anyone and is not cleared either - and that is deliberate, not an
+// oversight: the working host creates its depth this way too ("R32F, flat: a
+// desktop frame has none"), a desktop capture has no depth buffer to hand over,
+// and the engine's own switch for reading it is off (`UseDepth=0` in the ini,
+// and the driver writes that key itself). What matters is that the field is
+// populated, which it is.
+//
+// An earlier version of this comment claimed a zero fill "written by
+// ClearUnorderedAccessViewUint through a CPU descriptor". No such call exists
+// anywhere in native/amd/ - the resource is created, bound and handed over
+// untouched. The comment was describing an operation that was never written;
+// corrected rather than implemented, because the host that produces a picture
+// does not do it either.
 static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
 {
     if (g_amd.resources_ready && g_amd.net_w == net_w && g_amd.net_h == net_h &&
@@ -611,6 +623,9 @@ static void AmdCrashCounters(char *out, size_t cap)
 // Defined below with the frame; declared here because the router above it
 // needs the name.
 static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted);
+// Defined below the frame path; the skipped-frame exit calls it too, so the
+// counters describe the whole run rather than only the frames that finished.
+static void AmdFrameAccounting();
 
 // The one place the loop's evaluate goes through. Keeps every AMD detail out
 // of the main file: same signature, same contract (submitted != nullptr means
@@ -707,7 +722,7 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     }
 
     const bool ts = ProfileGpuBegin(PS_EVAL);
-    const uint64_t t0 = GetTickCount64();
+    g_amd.frame_t0 = GetTickCount64();
 
     // ---- 1. the first list: convert in, resample motion, hand to the engine
     if (!BeginCommands()) return false;
@@ -857,87 +872,42 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         Log("[amd] the engine is fed by the dispatch alone (no packet recorded)");
     }
 
-    const UINT64 fence_first = EndCommands();
-    if (fence_first == 0) return false;
-
-    // Notify only after the frame has actually been submitted: a capture-wait
-    // kernel launched before submission can occupy the GPU while the frame it
-    // depends on is still queued on the CPU.
+    // ---- the submission is ONE list, and it happens at the end -----------
     //
-    // WHO TELLS THE ENGINE ABOUT THE SUBMISSION depends on WHICH BUILD is
-    // loaded, and that is a property of the file - its hash - so it is read
-    // from the loader rather than guessed from a log line.
+    // What used to be here: EndCommands() for dispatch A alone, then a
+    // 5000 ms wait on that submission's fence, then BeginCommands() for a
+    // second list carrying dispatch B and the composite.
     //
-    // STOCK: the runtime installs its own ExecuteCommandLists detour from the
-    // thread it starts on load, and it carries its own notify call after that
-    // hook. Both are intact in this build. Calling Notify here as well would
-    // announce one submission to an engine that has already seen it - the
-    // duplicate the runtime's own patch 0x3a53 exists to remove ("without the
-    // hook it would execute the frame twice"). A build that keeps its hooks
-    // does not need this call and is not helped by it.
+    // The one host that produces a picture does the opposite, and its own
+    // comment says why: it records A, B and the composite into a SINGLE list,
+    // calls Close/ExecuteCommandLists once, and presents immediately after,
+    // because "the runtime runs its network inline off this submission and the
+    // present that follows". Splitting the frame across two submissions with a
+    // CPU fence wait in between is exactly what our logs show the engine
+    // objecting to: `job 1 ... history off` on every line, a frame landing on
+    // every SECOND dispatch, and the other one waiting out ~3.5 s for a
+    // "capture" that had already been submitted. Nothing above needs that wait
+    // either - the packet path is off by default, and the engine's own counters
+    // are read from its image, not from the fence.
     //
-    // PATCHED (patch 0x1ffc): that detour's installer is disabled, so the
-    // engine never sees a submission by itself and this call is the only thing
-    // that keeps the dispatch route alive. The two patches are a pair - 0x3a53
-    // removes the notify call precisely because 0x1ffc removes the hook that
-    // made it necessary - so the host has to supply it again.
-    const bool engine_owns_submission = g_amd.runtime.Kind() == amd_nr::ImageKind::Stock;
-    if (!engine_owns_submission)
-        g_amd.runtime.Notify(h.queue, h.list);
+    // So the two lists are now one. Dispatch B and the final composite follow
+    // dispatch A directly, and the single EndCommands below submits the lot.
 
-    // How completion is established depends on which path feeds the engine.
+    // The upscale dispatch (B) and the composite follow A in the SAME list.
     //
-    // Packet on: the engine's own counter is the authority - it publishes the
-    // list it accepted, and the sync counter moves when that job is done.
-    // Packet off: there is no accepted job to count, and the reference waits
-    // on the QUEUE FENCE instead, because its engine runs inline off the
-    // submission and the present that follows. Gating on a counter that
-    // nothing increments would skip every frame.
-    const uint32_t budget = g_amd.frames < 3 ? 20000u : 2000u;
-    bool engine_ok = true;
-    if (g_amd.use_packet)
-        engine_ok = g_amd.runtime.WaitJobs(wanted, budget);
-    const bool engine_failed = g_amd.runtime.FailedOnEngineSide();
-    if (!WaitFenceValue(h.fence, fence_first, 5000))
-    { Log("[amd] the first submission did not retire"); return false; }
-
-    // Packet off: the engine's counters are the only proof it did anything at
-    // all. Worth one line, because "the fence retired" is true even when the
-    // engine ignored us completely.
-    if (!g_amd.use_packet && (g_amd.frames == 0 || (g_amd.frames % 300) == 0))
-    {
-        Log("[amd] engine counters after %llu frames: jobs %u, sync %u",
-            static_cast<unsigned long long>(g_amd.frames),
-            g_amd.runtime.JobCount(), g_amd.runtime.SyncCount());
-    }
-
-    if (!engine_ok || engine_failed)
-    {
-        ++g_amd.timeouts;
-        g_amd.runtime.InvalidateHistory();
-        if (g_amd.timeouts <= 5 || (g_amd.timeouts % 60) == 0)
-            Log("[amd] frame skipped: %s (timeouts=%llu, jobs=%u/%u)",
-                engine_failed ? "the engine gave up" : "the engine did not finish in time",
-                static_cast<unsigned long long>(g_amd.timeouts),
-                g_amd.runtime.SyncCount(), wanted);
-        // The previous frame's contents stay in v.output - the picture is
-        // stale for one frame, which is exactly what the reference does.
-        if (submitted) *submitted = fence_first;
-        return true;
-    }
-
-    // ---- 2. the second list: the processed frame back into v.output
-    if (!BeginCommands()) return false;
-
-    // The upscale dispatch (B) belongs HERE, not with A: the engine edits
-    // `net` through its own worker between the two submissions, so this is the
-    // first moment the network's result exists. No motion vectors - that is
-    // how the runtime knows not to run the network on this one too.
+    // This is the part that used to be separated, and the separation was
+    // wrong. Our old note said B "has to run after the engine has edited
+    // `net`, and the engine works through its own worker between this
+    // submission and the second list". The reference host says the opposite
+    // and its log line is in our own file too: the engine runs its network
+    // INLINE, off the submission itself ("mode inline (same-frame, the game
+    // waits for the network)"). So the engine's work is inserted into the very
+    // command list that carries dispatch A, and the frame it produces exists
+    // by the time B is reached in that same list. Splitting the frame into two
+    // submissions is what made each frame cost a fence round trip and left the
+    // engine's job reporting that it spent seconds "waiting for the capture".
     //
-    // The round trip below is taken from the host that WORKS, barrier for
-    // barrier, because a state mismatch is invisible: no error, no warning,
-    // and only a wrong picture. What the reference does, and this host now
-    // does the same:
+    // Barrier round trip below, unchanged and taken from the host that WORKS:
     //
     //   net      created UNORDERED_ACCESS (dispatch A declares it as its
     //            output), readable while dispatch B reads it as its colour,
@@ -1048,7 +1018,111 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     const UINT64 fence = EndCommands();
     if (fence == 0) return false;
 
+    // ---- the tick the engine needs ---------------------------------------
+    //
+    // The engine's frame is driven off the submission AND the present that
+    // follows it. The working host's own comment: its swapchain "exists to
+    // drive the runtime's per-frame tick", and its `Present()` runs straight
+    // after `ExecuteCommandLists` with nothing waited on in between.
+    //
+    // What used to break that here was not a missing present - PresentFrame
+    // below does present this frame - it was the CPU stall sitting between the
+    // submission and it: a 5000 ms wait on this submission's fence, and then a
+    // whole second command list to record. The engine, which reads its frame
+    // off the submission-plus-present pair, spent that window reporting it was
+    // "waiting for the capture".
+    //
+    // With the frame now in one list, the order is: submit the dispatches ->
+    // PresentFrame records the copy into the overlay and presents it. Only a
+    // GPU copy separates them, no CPU wait. That is the working host's order.
+    //
+    // Deliberately NOT presented twice: a second present per frame flips a
+    // second (stale) back buffer to the compositor, and this overlay is what
+    // the user sees.
+
+    // Notify, for the build whose own hook was disabled.
+    //
+    // WHO TELLS THE ENGINE ABOUT THE SUBMISSION depends on WHICH BUILD is
+    // loaded, and that is a property of the file - its hash - so it is read
+    // from the loader rather than guessed from a log line.
+    //
+    // STOCK: the runtime installs its own ExecuteCommandLists detour from the
+    // thread it starts on load, and it carries its own notify call after that
+    // hook. Both are intact in this build. Calling Notify here as well would
+    // announce one submission to an engine that has already seen it - the
+    // duplicate the runtime's own patch 0x3a53 exists to remove ("without the
+    // hook it would execute the frame twice"). A build that keeps its hooks
+    // does not need this call and is not helped by it.
+    //
+    // PATCHED (patch 0x1ffc): that detour's installer is disabled, so the
+    // engine never sees a submission by itself and this call is the only thing
+    // that keeps the dispatch route alive. The two patches are a pair - 0x3a53
+    // removes the notify call precisely because 0x1ffc removes the hook that
+    // made it necessary - so the host has to supply it again.
+    const bool engine_owns_submission = g_amd.runtime.Kind() == amd_nr::ImageKind::Stock;
+    if (!engine_owns_submission)
+        g_amd.runtime.Notify(h.queue, h.list);
+
+    // ---- completion ------------------------------------------------------
+    //
+    // Packet on: the engine's own counter is the authority - it publishes the
+    // list it accepted, and the sync counter moves when that job is done.
+    // Packet off: there is no accepted job to count, and the reference waits
+    // on the QUEUE FENCE instead, because its engine runs inline off the
+    // submission and the present that follows. Gating on a counter that
+    // nothing increments would skip every frame.
+    //
+    // This is now the only wait in the frame: the wait that used to sit
+    // between the two submissions is gone with the second submission.
+    const uint32_t budget = g_amd.frames < 3 ? 20000u : 2000u;
+    bool engine_ok = true;
+    if (g_amd.use_packet)
+        engine_ok = g_amd.runtime.WaitJobs(wanted, budget);
+    const bool engine_failed = g_amd.runtime.FailedOnEngineSide();
+    if (!WaitFenceValue(h.fence, fence, 5000))
+    { Log("[amd] the submission did not retire"); return false; }
+
+    // Packet off: the engine's counters are the only proof it did anything at
+    // all. Worth one line, because "the fence retired" is true even when the
+    // engine ignored us completely.
+    if (!g_amd.use_packet && (g_amd.frames == 0 || (g_amd.frames % 300) == 0))
+    {
+        Log("[amd] engine counters after %llu frames: jobs %u, sync %u",
+            static_cast<unsigned long long>(g_amd.frames),
+            g_amd.runtime.JobCount(), g_amd.runtime.SyncCount());
+    }
+
+    if (!engine_ok || engine_failed)
+    {
+        ++g_amd.timeouts;
+        g_amd.runtime.InvalidateHistory();
+        if (g_amd.timeouts <= 5 || (g_amd.timeouts % 60) == 0)
+            Log("[amd] frame skipped: %s (timeouts=%llu, jobs=%u/%u)",
+                engine_failed ? "the engine gave up" : "the engine did not finish in time",
+                static_cast<unsigned long long>(g_amd.timeouts),
+                g_amd.runtime.SyncCount(), wanted);
+        // The previous frame's contents stay in v.output - the picture is
+        // stale for one frame, which is exactly what the reference does.
+        if (submitted) *submitted = fence;
+        // ---- 3. accounting
+        AmdFrameAccounting();
+        return true;
+    }
+
     // ---- 3. accounting
+    AmdFrameAccounting();
+
+    g_last_eval_result = 1;   // the client reads this as "the frame went through"
+    if (submitted) *submitted = fence;
+    return true;
+}
+
+// Per-frame accounting and the periodic report. Split out because the frame
+// has two exits now (the skipped one and the ordinary one) and both have to
+// count, or the numbers in the log stop describing the run.
+static void AmdFrameAccounting()
+{
+    const uint64_t t0 = g_amd.frame_t0;
     ++g_amd.frames;
     const uint64_t elapsed = GetTickCount64() - t0;
     g_amd.eval_ms_sum += elapsed;
@@ -1079,11 +1153,8 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         // only witness to it is the engine's own measure.
         AmdEngineHealth();
     }
-
-    g_last_eval_result = 1;   // the client reads this as "the frame went through"
-    if (submitted) *submitted = fence;
-    return true;
 }
+
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -1152,7 +1223,16 @@ static bool AmdInit()
     // The hook wait's verdict. A runtime whose detours never appeared cannot
     // see our frames at all - the pass would run and process nothing, which is
     // the failure this release exists to end, so it is worth a line of its own.
-    if (g_amd.runtime.HooksSeen())
+    //
+    // Three answers, not two, and they must not be confused: the patched build
+    // cannot print the detour lines by design (its installer is disabled on
+    // purpose), so for it the question does not apply. Reporting "NOT seen"
+    // there told every reader of a live log to look for a fault that was not
+    // there, on three different Radeons.
+    if (!g_amd.runtime.HooksApplicable())
+        Log("[amd] detour wait: not applicable - this is the patched image, whose "
+            "hook installer is disabled on purpose and which this host drives by hand");
+    else if (g_amd.runtime.HooksSeen())
         Log("[amd] the runtime's D3D12/DXGI hooks are in place (%lu ms)",
             g_amd.runtime.HooksMs());
     else

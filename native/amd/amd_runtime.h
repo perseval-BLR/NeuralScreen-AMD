@@ -231,6 +231,8 @@ public:
     //: how long they took. The host logs it: a missing hook is the difference
     //: between a neural pass and a silent passthrough.
     bool HooksSeen() const { return hooks_seen_; }
+    //: Whether the wait could apply at all to the loaded build (see the .cpp).
+    bool HooksApplicable() const { return hooks_applicable_; }
     unsigned long HooksMs() const { return hooks_ms_; }
 
     // Which of the two known images was found (Stock when the host and the
@@ -314,6 +316,11 @@ private:
     //: Set by the hook wait in Load(): whether the runtime announced its
     //: detours, and how long they took to appear.
     bool hooks_seen_ = false;
+    //: False when the loaded build cannot print the detour lines at all (the
+    //: patched image, whose hook installer is disabled on purpose). The two are
+    //: different answers and the log must not confuse them: "not seen" sends a
+    //: reader after a fault, "not applicable" is simply the shape of that build.
+    bool hooks_applicable_ = false;
     unsigned long hooks_ms_ = 0;
     //: Where the runtime's log ended before this run loaded the module. The
     //: hook wait searches only bytes after this, because the log is appended

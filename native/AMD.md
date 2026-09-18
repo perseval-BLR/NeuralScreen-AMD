@@ -118,7 +118,8 @@ lines. Nothing has to be turned on: every line below is written always.
 | `[amd] sha256: 3c9ca13f...` | which build is actually on disk |
 | `[amd] the runtime did not come up: <reason>` | the exact reason, in words |
 | `[amd] the runtime's D3D12/DXGI hooks are in place (N ms)` | the runtime can see our frames |
-| `[amd] the runtime's hooks were NOT seen` | it cannot - the pass will process nothing |
+| `[amd] detour wait: not applicable` | the patched image is loaded, whose hook installer is off by design - nothing to wait for |
+| `[amd] the runtime's hooks were NOT seen` | it cannot see them - the pass will process nothing |
 | `[amd] FidelityFX upscaler loaded` | the dispatch the engine follows is available |
 | `[amd] FSR contexts: network 1664x936 (1:1), upscale work -> display` | the two dispatches are set up |
 | `[amd] FSR dispatch N: network at 1664x936, then the upscale` | frames are reaching the engine |
