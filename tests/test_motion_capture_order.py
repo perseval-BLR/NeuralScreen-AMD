@@ -46,7 +46,8 @@ def main():
              guides=guides, shm=SimpleNamespace(read_gray=lambda: frame), work_frame=None,
              pending_shot=None, recorder=None, motion_small=True, dda_mode=True,
              split_pos=0, lang='en', guide_fails=0)
-        status = SimpleNamespace(failed=False, worker=worker, update=lambda *a: hardware)
+        status = SimpleNamespace(failed=False, install_fault=False, worker=worker,
+                                 update=lambda *a: hardware)
         send = Mock()
         namespace = dict(st=st, bypass=bypass, motion_status=status, time=time, sys=sys,
                          check_worker=Mock(), prepare_capture=capture, send_frame=send,

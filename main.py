@@ -734,8 +734,19 @@ def main() -> int:
                         guide = st.guides.zero_guide()
                     elif st.gray_active:
                         was_failed = motion_status.failed and motion_status.worker is st.worker
+                        was_install = (motion_status.install_fault
+                                       and motion_status.worker is st.worker)
                         hardware_motion = motion_status.update(st.worker, st.worker_logs)
-                        if motion_status.failed and not was_failed:
+                        if motion_status.install_fault and not was_install:
+                            # The pass did not START because a file is missing -
+                            # not because the motion backend failed. Blaming
+                            # NVOFA here sent a Radeon owner looking for a
+                            # feature his card never had (issue #2).
+                            st.display.alert(UI_STRINGS[st.lang].get(
+                                "amd_runtime_missing",
+                                "Neural pass: the runtime is not installed - "
+                                "see native/AMD.md"))
+                        elif motion_status.failed and not was_failed:
                             st.display.alert(UI_STRINGS[st.lang].get(
                                 "motion_fallback", "NVOFA unavailable - using CPU DIS"))
                         guide = st.guides.process(

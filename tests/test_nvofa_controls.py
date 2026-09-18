@@ -50,8 +50,42 @@ def main():
     assert state.update(worker, ["old logs evicted"])
     assert not state.update(worker, ["[nvofa] active: driver", "[nvofa] unavailable: execute"])
     assert state.failed
+    assert not state.install_fault, "an NVOFA failure is not an install fault"
     assert not state.update(worker, []) and state.failed
     assert not state.update(replacement, []) and not state.failed
+
+    # A missing AMD runtime is an INSTALL fault, NOT a motion-backend failure.
+    #
+    # Both used to set `failed`, and `main.py` reads that flag to show an alert
+    # whose text is about NVOFA - so a Radeon owner who had never selected
+    # NVOFA was told "NVOFA unavailable - using CPU DIS" and asked why the
+    # program "always looks to hook on NVOFA" (issue #2, second report).
+    runtime_missing = MotionBackendStatus()
+    assert not runtime_missing.update(
+        worker, ["[amd] the runtime did not come up: dlssnr_amd_pass1.dll not found"])
+    assert runtime_missing.install_fault, \
+        "a missing runtime must be reported as an install fault"
+    assert not runtime_missing.failed, \
+        "a missing runtime must NOT read as the motion backend failing - that " \
+        "alert blames NVOFA, which this run never tried"
+    assert not runtime_missing.amd
+    # ...and the AMD pass coming up clears it again.
+    assert runtime_missing.update(worker, ["[amd] ===== AMD path active ====="])
+    assert not runtime_missing.install_fault and runtime_missing.amd
+
+    # The main loop must actually USE the new state, and keep the old alert for
+    # the case it was written for.
+    main_src = (ROOT / "main.py").read_text(encoding="utf-8", errors="replace")
+    assert "motion_status.install_fault" in main_src, \
+        "main.py never consults install_fault, so a missing runtime still " \
+        "shows the NVOFA message"
+    assert '"amd_runtime_missing"' in main_src, \
+        "the install fault has no message of its own"
+    assert '"motion_fallback"' in main_src, \
+        "the NVOFA alert was replaced instead of being kept for its own case"
+    for key in ("en", "ru"):
+        assert "amd_runtime_missing" in settings_io.UI_STRINGS[key], \
+            f"the alert text is missing from the {key} strings"
 
     guide = TemporalGuideGenerator(320, 180, emit_small=True)
     rng = np.random.default_rng(17)
