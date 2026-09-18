@@ -15,19 +15,40 @@
 //
 // --- which build this table belongs to -------------------------------------
 //
-// The pinned image is danielblnc v0.2.14 with the five in-place patches that
-// the ecosystem's external hosts apply to it: the first two disable the
-// runtime's own hook-install thread and its own notify call, so the DLL does
-// not fight the host for ExecuteCommandLists ("the two cannot both hold the
-// wheel"). Both working external hosts - OptiScaler's PreSR path and the
-// Magpie fork - drive exactly this image. Its size and hash are enforced here.
+// The pinned image is danielblnc **v0.2.17** with the two in-place patches that
+// the ecosystem's external hosts apply to it: one neutralises the notify call
+// that would execute the frame twice, one corrects the log text for a timed-out
+// frame. Both working external hosts drive a runtime this way - the MIT host
+// publishes exactly this pair for v0.2.17 - and its size and hash are enforced
+// here.
 //
-// The stock upstream images are DIFFERENT and refused: vanilla v0.2.14 is
-// 1062237... and the newer releases moved the whole data region (v0.2.17:
-// +0x16A20..+0x16BB0; v0.3.0: again), so their tables are different. If a
-// newer build is ever wanted, the recipe is in
-// dlss5/tmp/amd-red-research/SPEC-OPTISCALER.md section 12, and every RVA must
-// be re-derived against that image before anything is written.
+// WHY v0.2.17 AND NOT v0.2.14: the maintainer's own release notes for this
+// build carry "Fixed crashes and black screens on multi-GPU systems" and
+// "Improved HDR exposure handling", both of which land on the reports this
+// project actually receives (two Radeons plus an iGPU in one machine, and a
+// 9070 XT that faults inside D3D12Core before the engine records anything).
+// v0.2.14 predates all of it.
+//
+// WHAT IS NOT PATCHED ON THIS BUILD, and why:
+//   * The v0.2.14 hook-installer kill (0x1ffc there, 0x6006 here) MUST NOT be
+//     applied. On v0.2.14 that thread only installed D3D12/DXGI detours, so
+//     killing it was free. On v0.2.17 the same thread ALSO resolves the proxy:
+//     it builds the system paths for d3d12.dll and dxgi.dll and loads them. With
+//     the CreateThread nopped those stay null and the first call through one
+//     lands on address 0 - measured elsewhere as 0xc0000005 at 0000000000000000
+//     on the first frame after Enabled. Consequence: on this build the runtime
+//     installs its own detours and the host does not fight that.
+//   * The timeout-fallback shader edit (0x62bd4 on v0.2.14) is unnecessary:
+//     v0.2.17 exposes the same choice as ToneChannels bit 4 set with bit 2
+//     clear, which the host writes per frame instead of editing the binary.
+//   * The GPU wait spin cap is dropped on every build - it bounds the wait
+//     below the network's real cost, so it makes inline mode time out on
+//     essentially every frame.
+//
+// The stock upstream images are DIFFERENT and refused by hash: vanilla v0.2.14
+// is 1062237... and every release from v0.2.15 moved the data region
+// (v0.2.17: four different deltas, +0x16980..+0x16BB0; v0.3.0: again), so their
+// tables are different tables.
 //
 // The user supplies the runtime and the weights: they are third-party binaries
 // that cannot be redistributed (NVIDIA-derived weights). This module never
@@ -60,23 +81,24 @@ inline constexpr const wchar_t *kHipName = L"amdhip64_7.dll";
 // hard gate too: it catches truncation and re-extraction mistakes before the
 // hash does any work.
 //
-// Two images are known: the stock v0.2.14 payload, and the same image with the
-// five in-place patches the ecosystem's hosts apply (byte-identical table - the
-// patches change bytes, not layout). The patched one is the tested path; the
-// stock one is accepted so a machine that only has v0.2.14 still runs and
-// reports, but it will try to drive itself at the same time as the host and is
-// expected to misbehave (the patch's own reason: "the two cannot both hold the
-// wheel").
-inline constexpr uint64_t kRuntimeSize = 7156224;
+// Two images are known: the stock v0.2.17 payload, and the same image with the
+// two in-place patches the ecosystem's hosts apply (byte-identical table - the
+// patches change bytes, not layout). The patched one is the pair that has been
+// checked against a published build; the stock one is accepted so a machine
+// that has only the unmodified file still runs and reports. On this build BOTH
+// are expected to work: unlike v0.2.14, the runtime's own setup thread is left
+// alive here (it resolves the proxy), so the runtime may install its detours
+// while the host drives from outside - the MIT host runs exactly this way.
+inline constexpr uint64_t kRuntimeSize = 7248384;
 inline constexpr uint8_t kRuntimeSha256Patched[32] = {
-    0x3c, 0x9c, 0xa1, 0x3f, 0x0f, 0x5f, 0xc3, 0x6a, 0x69, 0x0b, 0xa4, 0x24,
-    0xc4, 0x57, 0x00, 0x3b, 0xcf, 0xcc, 0x10, 0x80, 0xb4, 0xb7, 0x85, 0x97,
-    0x4c, 0xdd, 0x7e, 0x9a, 0xe2, 0xbc, 0x1d, 0xd8,
+    0xc8, 0xa5, 0xd3, 0xaf, 0x65, 0xf3, 0x50, 0x58, 0xa2, 0x27, 0x4f, 0xa3,
+    0xfb, 0xd3, 0xaa, 0x7a, 0x71, 0x3f, 0xf8, 0x6c, 0x33, 0x75, 0xe1, 0x2d,
+    0x74, 0xaf, 0x7d, 0x96, 0x18, 0x27, 0x90, 0x66,
 };
 inline constexpr uint8_t kRuntimeSha256Stock[32] = {
-    0x10, 0x62, 0x23, 0x72, 0x3f, 0xd9, 0x26, 0x6c, 0x44, 0xd3, 0x8d, 0xc2,
-    0xfb, 0x77, 0x93, 0x39, 0x48, 0xab, 0x37, 0x80, 0x3f, 0x46, 0xbf, 0xce,
-    0xa2, 0xba, 0xe3, 0xa0, 0xa4, 0x74, 0xac, 0x84,
+    0xbc, 0x97, 0xf3, 0xb0, 0x67, 0x18, 0xe1, 0x90, 0x42, 0xac, 0xaf, 0x22,
+    0x7b, 0xfe, 0x15, 0xd1, 0xe4, 0x3d, 0x49, 0x77, 0xf9, 0xdc, 0x2e, 0x39,
+    0x99, 0x4f, 0xcc, 0x51, 0x14, 0x45, 0xff, 0x4e,
 };
 
 enum class ImageKind { Unknown, Stock, Patched };
@@ -88,55 +110,59 @@ enum class ImageKind { Unknown, Stock, Patched };
 // every data RVA against the writable .data section bounds.
 namespace rva {
 // The callable addresses.
-inline constexpr uintptr_t kInit = 0x12380;      // bool(void *ctx, const std::string *weights)
-inline constexpr uintptr_t kRecord = 0xa0b0;     // void(Packet *)
-inline constexpr uintptr_t kNotify = 0x4640;     // void(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *)
-inline constexpr uintptr_t kShutdown = 0xc520;   // void(void) - stops the engine's workers
+inline constexpr uintptr_t kInit = 0x19240;      // bool(void *ctx, const std::string *weights)
+inline constexpr uintptr_t kRecord = 0xf600;     // void(Packet *)
+inline constexpr uintptr_t kNotify = 0x9170;     // void(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *)
+inline constexpr uintptr_t kShutdown = 0x12690;  // void(void) - stops the engine's workers
 
 // One-time bindings (written by the host before Init).
-inline constexpr uintptr_t kDevice = 0x764c8;   // ID3D12Device * (host AddRefs)
-inline constexpr uintptr_t kQueue = 0x764d0;    // ID3D12CommandQueue * (host AddRefs)
-inline constexpr uintptr_t kInitCtx = 0x764d8;  // the ctx struct the Init call takes
-inline constexpr uintptr_t kHipDevice = 0x76f20;
-inline constexpr uintptr_t kInlineMode = 0x76be0;  // pinned to 1
-inline constexpr uintptr_t kInterop = 0x76c8c;     // pinned to 1
-inline constexpr uintptr_t kEnabled = 0x76e1c;
-inline constexpr uintptr_t kFlagAfterInit = 0x767f8;  // written only AFTER init returns
+inline constexpr uintptr_t kDevice = 0x8cee8;   // ID3D12Device * (host AddRefs)
+inline constexpr uintptr_t kQueue = 0x8cef0;    // ID3D12CommandQueue * (host AddRefs)
+inline constexpr uintptr_t kInitCtx = 0x8cef8;  // the ctx struct the Init call takes
+inline constexpr uintptr_t kHipDevice = 0x8dad0;
+inline constexpr uintptr_t kInlineMode = 0x8d6c0;  // pinned to 1
+inline constexpr uintptr_t kInterop = 0x8d82c;     // pinned to 1
+inline constexpr uintptr_t kEnabled = 0x8d9bc;
+inline constexpr uintptr_t kFlagAfterInit = 0x8d218;  // written only AFTER init returns
 
 // Per-frame knobs.
-inline constexpr uintptr_t kUseFsrInputs = 0x76e1e;
-inline constexpr uintptr_t kUseDepth = 0x76e1f;
-inline constexpr uintptr_t kPerPassFlag = 0x76e1d;  // Temporal / per-pass flag
-inline constexpr uintptr_t kDepthInverted = 0x76e10;  // UINT, 0
-inline constexpr uintptr_t kDepthExplicit = 0x76e14;  // uint8, 1
-inline constexpr uintptr_t kLocalTone = 0x76e30;
-inline constexpr uintptr_t kLocalStructure = 0x76e34;
-inline constexpr uintptr_t kSkinStructure = 0x76e38;
-inline constexpr uintptr_t kCharMask = 0x76e40;
-inline constexpr uintptr_t kToneChannels = 0x76e44;
+inline constexpr uintptr_t kUseFsrInputs = 0x8d9be;
+inline constexpr uintptr_t kUseDepth = 0x8d9bf;
+inline constexpr uintptr_t kPerPassFlag = 0x8d9bd;  // Temporal / per-pass flag
+inline constexpr uintptr_t kDepthInverted = 0x8d9b0;  // UINT, 0
+inline constexpr uintptr_t kDepthExplicit = 0x8d9b4;  // uint8, 1
+inline constexpr uintptr_t kLocalTone = 0x8d9d0;
+inline constexpr uintptr_t kLocalStructure = 0x8d9d4;
+inline constexpr uintptr_t kSkinStructure = 0x8d9d8;
+inline constexpr uintptr_t kCharMask = 0x8d9e0;
+inline constexpr uintptr_t kToneChannels = 0x8d9e4;
+inline constexpr uintptr_t kScale = 0x8d9dc;        // ini `Scale` - the network's strength
 
 // History control.
-inline constexpr uintptr_t kHistory = 0x765f0;      // void *, nullptr invalidates
-inline constexpr uintptr_t kWantHistory = 0x765f8;  // uint8
+inline constexpr uintptr_t kHistory = 0x8d010;      // void *, nullptr invalidates
+inline constexpr uintptr_t kWantHistory = 0x8d018;  // uint8
 
 // Status and accounting (read-only for the host).
-inline constexpr uintptr_t kJobCounter = 0x76d74;    // UINT, jobs recorded
-inline constexpr uintptr_t kStatusFlag = 0x767fa;    // uint8, non-zero after record = engine gave up
-inline constexpr uintptr_t kSyncCounter = 0x76c14;   // UINT, jobs completed
-inline constexpr uintptr_t kTimeoutCounter = 0x76c18;  // UINT, engine-side GPU wait timeouts
+inline constexpr uintptr_t kJobCounter = 0x8d914;    // UINT, jobs recorded
+inline constexpr uintptr_t kStatusFlag = 0x8d21a;    // uint8, non-zero after record = engine gave up
+inline constexpr uintptr_t kSyncCounter = 0x8d6f4;   // UINT, jobs completed
+inline constexpr uintptr_t kTimeoutCounter = 0x8d6f8;  // UINT, engine-side GPU wait timeouts
 
 // Frame-acceptance machinery.
-inline constexpr uintptr_t kPendingList = 0x76d68;  // ID3D12CommandList * - equals the list iff the
+inline constexpr uintptr_t kPendingList = 0x8d908;  // ID3D12CommandList * - equals the list iff the
                                                     // engine accepted the record; the real acceptance
                                                     // test (record's void return says nothing)
-inline constexpr uintptr_t kAbortWord = 0x76c68;    // volatile LONG - stale watchdog abort token,
+inline constexpr uintptr_t kAbortWord = 0x8d808;    // volatile LONG - stale watchdog abort token,
                                                     // cleared by the host after each accepted record
 
 // Deliberately NOT written by the host:
-//   0x76c44  wait allowance / iteration ceiling. The engine maintains it and
+//   0x8d808/0x8d80c  the engine's watchdog job pair. NOT a pointer - writing
+//            through it crashes. (kAbortWord above is the abort token, which is
+//            a different field.)
+//   the wait allowance / iteration ceiling. The engine maintains it and
 //            shortens its own budget after each timeout; writing it fights the
 //            engine (documented in both reference implementations).
-//   0x76e20  Tonemap. The ini file keeps the last word; its own default is -1.
+//   0x8d9c0  Tonemap. The ini file keeps the last word; its own default is -1.
 }  // namespace rva
 
 // --- the job packet --------------------------------------------------------

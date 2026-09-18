@@ -68,13 +68,14 @@ import struct
 import sys
 from pathlib import Path
 
-# The build the driver's offset table belongs to (v0.2.14, extracted payload).
-STOCK_SIZE = 7_156_224
-STOCK_SHA256 = "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84"
-#: The four patches below applied to the stock file. Was 3c9ca13f... while the
-#: spin cap was still in the list; dropping it changes the bytes and therefore
-#: the hash, so this constant and the driver's own check move together.
-PATCHED_SHA256 = "81efaadc8d0deaa2c23f64aee83b81e9f48e2da4d0c3fbae73fc68e056070117"
+# The build the driver's offset table belongs to (v0.2.17, extracted payload).
+STOCK_SIZE = 7_248_384
+STOCK_SHA256 = "bc97f3b06718e19042acaf227bfe15d1e43d4977f9dc2e39994fcc511445ff4e"
+#: The two patches below applied to the stock file. The pair is the same one the
+#: MIT host publishes for this build, and this hash is what comes out of it -
+#: reproduced here and checked against the published value, byte for byte.
+#: It is also the hash the driver's own image check pins.
+PATCHED_SHA256 = "c8a5d3af65f35058a2274fa3fbd3aa7a713ff86c3375e12d74af7d9618279066"
 
 #: Where --download gets the installer. The author's own release page, so the
 #: file goes from him to the user and never through this project - his licence
@@ -82,22 +83,39 @@ PATCHED_SHA256 = "81efaadc8d0deaa2c23f64aee83b81e9f48e2da4d0c3fbae73fc68e0560701
 #: a release is immutable, so a download of a different size is not the file
 #: this driver's patches were written against.
 INSTALLER_URL = ("https://github.com/danielblnc/DLSS-NR-on-AMD/releases/download/"
-                 "v0.2.14/dlssnr_on_amd_setup.exe")
+                 "v0.2.17/dlssnr_on_amd_setup.exe")
 INSTALLER_NAME = "dlssnr_on_amd_setup.exe"
-INSTALLER_SIZE = 7_396_082
+INSTALLER_SIZE = 7_538_418
 
 # The patches applied to the runtime, with the expected bytes asserted before
 # anything is written so a different build cannot be silently corrupted.
 #
-#   0x1ffc  disable the runtime's own hook-installer thread (it would install
-#           detours on ExecuteCommandLists and Present - the host does that)
-#   0x3a53  a notify call after the hook above; without the hook it would
-#           execute the frame twice
-#   0x62bd4 timeout fallback: keep the current input instead of showing a
-#           stale residual
-#   0x6321d the matching log message
+#   0x8583  the notify call the runtime makes after ExecuteCommandLists. On
+#           v0.2.14 the host had to disable the hook-installer thread for this
+#           to matter; on v0.2.17 that thread must STAY ALIVE (it resolves the
+#           proxy), so the runtime does install its own ExecuteCommandLists
+#           detour - and that detour already calls the notify entry itself. The
+#           call here would execute the frame a second time.
+#   0x6e3db report the timeout fallback accurately: with ToneChannels bit 4 set
+#           and bit 2 clear the shader shows nothing, not the previous residual.
 #
-# Two patches that the ecosystem's list carries are deliberately NOT here:
+# What is NOT here, and must not come back:
+#
+#   0x6006 (0x1ffc on v0.2.14) "disable the hook-installer thread" - REMOVED,
+#           and this one is not a tuning choice. On v0.2.14 that thread only
+#           installed D3D12/DXGI detours, so killing it was free. On v0.2.17 the
+#           same thread ALSO resolves the proxy: it builds the system paths for
+#           d3d12.dll and dxgi.dll and loads them. Nop the CreateThread and those
+#           stay null - the first call through one lands on address 0, measured
+#           as 0xc0000005 at 0000000000000000 on the first frame after Enabled.
+#           The thread proc grew between the two builds and shares only its
+#           opening bytes with the old one, which is the shape of a function that
+#           took on a second job.
+#
+#   0x62bd4 / 0x6321d "timeout keeps its input" - NOT NEEDED on this build.
+#           v0.2.17 exposes that choice as ToneChannels bit 4 on with bit 2
+#           clear, and the driver writes those bits per frame. Editing the
+#           shader as well would fight it. (0x6e3db above is only the log text.)
 #
 #   0x625ac "bound the GPU wait loop" - REMOVED, and it should stay removed.
 #           It caps the wait shader's spin at 2097152 iterations, which at the
@@ -112,17 +130,9 @@ INSTALLER_SIZE = 7_396_082
 #           "every one of the 13 timeouts in the run", and the MIT host lists
 #           the cap under `dropped` - "so inline mode would time out on every
 #           frame". Do not re-add it on the strength of the upstream list.
-#
-#   0x62bd4 / 0x6321d are KEPT (v0.2.14 has no flag for this behaviour). On
-#           v0.2.17+ the same choice is an ini/flag pair - ToneChannels bit 4
-#           on, bit 2 clear - so those two become unnecessary there.
 PATCHES = [
-    (0x1FFC, "ff15d6910600", "31c090909090"),
-    (0x3A53, "ff15e7280700", "909090909090"),
-    (0x62BD4,
-     "69662028666c6167732e4c6f61642831322920213d2030292064203d20707265765b69642e78795d2e7267623b",
-     "69662028666c6167732e4c6f61642831322920213d2030292072657475726e3b20202020202020202020202020"),
-    (0x6321D,
+    (0x8583, "ff156f490800", "909090909090"),
+    (0x6E3DB,
      "70726576696f757320726573696475616c2073686f776e",
      "63757272656e7420696e707574206b6570742020202020"),
 ]

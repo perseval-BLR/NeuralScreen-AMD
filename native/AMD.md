@@ -41,22 +41,26 @@ You do not need to run an installer, and you do not need to fetch anything.
 
 ### Which of the two runtime builds runs
 
-They are one build with 55 bytes changed in four places, all in place and all
-the same length, so no address moves and the driver's offset table accepts
-either. The difference between them is a single variable:
+Both are the same **v0.2.17** build; the patched one has two byte-level
+corrections, all the same length, so no address moves and the driver's offset
+table accepts either. The difference between them is a single variable:
 
 ```
 dlssnr_amd_pass1.dll          stock    <- runs by default
 dlssnr_amd_pass1_patched.dll  patched  <- set NS_AMD_PATCHED=1 before starting
 ```
 
-The stock build is the default because that is the shape the external host that
-produces a picture runs: it never modifies the runtime and never drives the
-engine by hand - the engine installs its own hooks and owns the frame from
-there. The patched build disables that hook installer (patch `0x1ffc`), so
-NeuralScreen has to drive everything itself. `native\probe_amd.exe` names which
-one it found, and the worker's log opens with `runtime image: STOCK` or
-`PATCHED`.
+The two corrections are small and specific: one removes the notify call the
+runtime makes after `ExecuteCommandLists` (it would announce the same submission
+twice), one corrects a log line about a timed-out frame. Neither disables the
+runtime's own hooks - on this build that is not an option, and worth knowing if
+you came from an older version of this program: the setup thread that installs
+those hooks also resolves the runtime's own `d3d12.dll`/`dxgi.dll` proxy, so
+disabling it leaves those null and the first call through one lands on address
+zero. That was the previous version's patch; it is gone.
+
+`native\probe_amd.exe` names which image it found, and the worker's log opens
+with `runtime image: STOCK` or `PATCHED`.
 
 ### If you supply your own copy instead
 
@@ -120,11 +124,11 @@ lines. Nothing has to be turned on: every line below is written always.
 | Line | Meaning |
 |---|---|
 | `[amd] ===== AMD path active =====` | the engine came up; frames are processed |
-| `[amd] runtime: patched v0.2.14 (the tested build)` | the right build was found |
+| `[amd] runtime: patched v0.2.17 (the tested build)` | the right build was found |
 | `[amd] sha256: 81efaadc...` | which build is actually on disk |
 | `[amd] the runtime did not come up: <reason>` | the exact reason, in words |
 | `[amd] the runtime's D3D12/DXGI hooks are in place (N ms)` | the runtime can see our frames |
-| `[amd] detour wait: not applicable` | the patched image is loaded, whose hook installer is off by design - nothing to wait for |
+| `[amd] runtime image: STOCK` or `PATCHED` | which of the two v0.2.17 images is in play |
 | `[amd] the runtime's hooks were NOT seen` | it cannot see them - the pass will process nothing |
 | `[amd] FidelityFX upscaler loaded` | the dispatch the engine follows is available |
 | `[amd] FSR contexts: network 1664x936 (1:1), upscale work -> display` | the two dispatches are set up |

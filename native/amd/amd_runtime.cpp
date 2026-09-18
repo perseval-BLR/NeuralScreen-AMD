@@ -553,13 +553,17 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         //
         //     [amd] the runtime's D3D12/DXGI hooks are in place (0 ms)
         const std::wstring log_path = runtime_dir + L"\\dlssnr_on_amd.log";
-        if (kind_ == ImageKind::Patched) {
-            // Nothing this build prints can prove the wait's condition, and the
-            // host deliberately drives the engine by hand here. Say so, rather
-            // than reporting a fault that does not exist.
-            hooks_applicable_ = false;
-            hooks_seen_ = false;
-        } else {
+        // On v0.2.17 the setup thread is alive in BOTH images: the patch that
+        // used to disable it must not be applied any more (the same thread
+        // resolves the d3d12.dll/dxgi.dll proxy, and nop'ing it faults at
+        // address 0). Both images therefore install their detours and both
+        // print the lines this wait looks for, so it applies to both.
+        //
+        // What still differs between them is the NOTIFY: patch 0x8583 removes
+        // the call the detour makes after ExecuteCommandLists, so on the
+        // patched image the host supplies it. A detour being installed is a
+        // different question from who announces the submission.
+        {
             hooks_applicable_ = true;
             // The FIRST of these to appear ends the wait: the swapchain is the
             // one that must land before we create ours, and it is printed last.
@@ -638,7 +642,7 @@ void Runtime::SetOptions(const Options &opt) {
     At<float>(module_, rva::kLocalStructure) = cl01(opt.local_structure);
     At<float>(module_, rva::kSkinStructure) = cl01(opt.skin_structure);
     At<uint32_t>(module_, rva::kCharMask) = opt.auto_mask ? 1u : 0u;
-    At<uint32_t>(module_, rva::kToneChannels) = opt.tone_channels;
+    At<uint32_t>(module_, rva::kToneChannels) = (opt.tone_channels & ~2u) | 4u;
     At<uint8_t>(module_, rva::kEnabled) = opt.enabled ? 1 : 0;
 
     // Intensity is the exception: it is NOT in that block. The runtime reads

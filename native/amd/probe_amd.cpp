@@ -51,9 +51,9 @@ constexpr uint8_t kExpectedSha256[32] = {
     0x4c, 0xdd, 0x7e, 0x9a, 0xe2, 0xbc, 0x1d, 0xd8,
 };
 
-constexpr uintptr_t kRvaInitCtx = 0x764d8;
-constexpr uintptr_t kRvaHipDevice = 0x76f20;
-constexpr uintptr_t kRvaInit = 0x12380;
+constexpr uintptr_t kRvaInitCtx = 0x8cef8;
+constexpr uintptr_t kRvaHipDevice = 0x8dad0;
+constexpr uintptr_t kRvaInit = 0x19240;
 
 std::wstring dir_of(const std::wstring &path) {
     const size_t pos = path.find_last_of(L"\\/");
@@ -165,7 +165,7 @@ struct alignas(16) HipProps {
 constexpr size_t kHipPropsLuidOffset = 272;
 
 // The known build (see amd_runtime.h).
-constexpr unsigned long long kKnownRuntimeSize = 7156224;
+constexpr unsigned long long kKnownRuntimeSize = 7248384;
 
 FILE *g_out = nullptr;
 
@@ -265,22 +265,36 @@ int wmain(int argc, wchar_t **argv) {
     // so the size gate is the same for each and the hash decides which one this
     // is.
     //
-    // The patched hash is 81efaadc..., not the 3c9ca13f... every other host
-    // pins. The difference is one entry of the patch list: we do NOT apply the
-    // GPU wait spin cap (0x625ac). That cap bounds the wait shader at ~5.7 ms
-    // of spinning, which is less than the network itself costs here (8-16 ms in
-    // every Radeon log we have), so the wait would expire on effectively every
-    // frame and the apply pass would keep its input. Both hosts that produce a
-    // picture refuse that patch for the same reason. A file hashed 3c9ca13f...
-    // therefore carries a cap we do not want, and it is refused rather than
-    // accepted silently - the user must re-run the prepare script.
+    // The patched hash is c8a5d3af... - the same two-patch pair the MIT host
+    // publishes for this build, reproduced here. What it does NOT contain
+    // matters more than what it does:
+    //
+    //   * no hook-installer kill. On v0.2.14 we nopped that thread; on v0.2.17
+    //     the same thread also resolves the proxy (it loads d3d12.dll and
+    //     dxgi.dll), so nop'ing it leaves those null and the first call through
+    //     one lands on address 0 - a crash on the first frame after Enabled.
+    //   * no timeout-fallback shader edit. v0.2.17 exposes that choice as
+    //     ToneChannels bit 4 set with bit 2 clear, which this driver writes per
+    //     frame.
+    //   * no GPU wait spin cap: it bounds the wait shader at ~5.7 ms of
+    //     spinning, less than the network itself costs here (8-16 ms in every
+    //     Radeon log we have), so the wait would expire on effectively every
+    //     frame and the apply pass would keep its input. Both hosts that
+    //     produce a picture refuse that patch for the same reason.
     static const char kPatchedHash[] =
+        "c8a5d3af65f35058a2274fa3fbd3aa7a713ff86c3375e12d74af7d9618279066";
+    //: The v0.2.14 pair and the spin-cap build every other host pins. Both are
+    //: named so an older folder says WHICH file it found instead of a bare
+    //: "unknown build".
+    static const char kPatchedHashOldBuild[] =
         "81efaadc8d0deaa2c23f64aee83b81e9f48e2da4d0c3fbae73fc68e056070117";
-    //: The older patched build (with the spin cap). Named so the probe can say
-    //: WHICH file it found instead of a bare "unknown".
     static const char kPatchedHashWithSpinCap[] =
         "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8";
     static const char kStockHash[] =
+        "bc97f3b06718e19042acaf227bfe15d1e43d4977f9dc2e39994fcc511445ff4e";
+    //: The previous stock build: the offset table is not this one, because the
+    //: whole data region moved between them.
+    static const char kStockHashOldBuild[] =
         "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84";
     bool hash_match = false;
     if (runtime_present) {
@@ -295,25 +309,30 @@ int wmain(int argc, wchar_t **argv) {
             out("sha256 %s\n", hex.c_str());
             const bool stock = hex.rfind(kStockHash, 0) == 0;
             const bool patched = hex.rfind(kPatchedHash, 0) == 0;
-            // The build every other host pins, refused here on purpose: it
-            // carries the GPU wait spin cap, which makes the inline wait expire
-            // below the network's real cost. Naming it turns "UNKNOWN build"
-            // into an instruction.
-            const bool old_patched = hex.rfind(kPatchedHashWithSpinCap, 0) == 0;
+            // Older files are matched by name so a stale folder gets an
+            // instruction instead of "UNKNOWN build": the offset table moved
+            // between the builds, so an old file is not "close enough".
+            const bool old_patched = hex.rfind(kPatchedHashOldBuild, 0) == 0;
+            const bool spin_cap = hex.rfind(kPatchedHashWithSpinCap, 0) == 0;
+            const bool old_stock = hex.rfind(kStockHashOldBuild, 0) == 0;
             hash_match = stock || patched;
             out("expected %s (stock, default) or %s (patched)\n",
                 kStockHash, kPatchedHash);
             if (stock)
-                out("verdict: the STOCK build - the engine installs its own "
-                    "hooks and owns the frame\n");
+                out("verdict: the STOCK build (v0.2.17) - the runtime's own "
+                    "setup thread is alive and installs its hooks; the host "
+                    "drives it from outside alongside them\n");
             else if (patched)
-                out("verdict: the PATCHED build - the hook installer is "
-                    "disabled, the host drives it (NS_AMD_PATCHED=1)\n");
-            else if (old_patched)
-                out("verdict: an OLDER patched build - this one still carries "
-                    "the GPU wait spin cap, which makes the runtime time out on "
-                    "almost every frame. Re-run the prepare script to get the "
-                    "current pair\n");
+                out("verdict: the PATCHED build (v0.2.17) - the same image with "
+                    "the notify call and one log string corrected\n");
+            else if (spin_cap)
+                out("verdict: the v0.2.14 pair that carries the GPU wait spin "
+                    "cap - that cap makes the runtime time out on almost every "
+                    "frame. Re-run the prepare script (it downloads v0.2.17)\n");
+            else if (old_patched || old_stock)
+                out("verdict: an OLDER runtime (v0.2.14) - this driver's offset "
+                    "table belongs to v0.2.17 and the data region moved between "
+                    "them. Re-run the prepare script\n");
             else
                 out("verdict: UNKNOWN build - offsets are not verified against "
                     "this file\n");

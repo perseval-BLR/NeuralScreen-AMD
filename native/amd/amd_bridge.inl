@@ -134,8 +134,9 @@ static const char *AmdImageKindName(amd_nr::ImageKind k)
 {
     switch (k)
     {
-    case amd_nr::ImageKind::Patched: return "patched v0.2.14 (the tested build)";
-    case amd_nr::ImageKind::Stock:   return "stock v0.2.14 (NOT tested - the runtime will also try to drive the frame)";
+    case amd_nr::ImageKind::Patched: return "patched v0.2.17 (the tested build)";
+    case amd_nr::ImageKind::Stock:   return "stock v0.2.17 (both images are driven by the host; "
+                                            "the runtime's own setup thread stays alive in each)";
     default:                          return "unknown";
     }
 }
