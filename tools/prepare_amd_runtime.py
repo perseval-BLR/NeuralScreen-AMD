@@ -28,14 +28,18 @@ WHAT IT EXPECTS TO FIND
 WHAT IT DOES
   * verifies the runtime is the build the driver knows (v0.2.14, 7,156,224
     bytes, sha256 1062237...);
-  * applies the five in-place patches every external host applies to it -
+  * applies the in-place patches every external host applies to it -
     without them the runtime installs its own hooks and fights the host for
     the frame ("the two cannot both hold the wheel"). The patches are
     documented in the community's own runtime-patches.json; this script
-    applies the same bytes to YOUR copy, on YOUR machine, for your own use;
+    applies the same bytes to YOUR copy, on YOUR machine, for your own use.
+    One patch from that list is deliberately left out - the GPU wait spin cap
+    (0x625ac). It bounds the wait shader below the network's real cost, so the
+    inline wait would expire on every frame; both hosts that produce a picture
+    refuse it, for exactly this reason. See PATCHES below.
   * writes TWO files beside the worker, from the one you supplied:
       dlssnr_amd_pass1.dll          the stock build. This is what runs.
-      dlssnr_amd_pass1_patched.dll  the same build with the five patches.
+      dlssnr_amd_pass1_patched.dll  the same build with those patches.
 
   STOCK is the default because that is the shape the one host that produces a
   picture runs: it never modifies the runtime and never drives it by hand - the
@@ -67,7 +71,10 @@ from pathlib import Path
 # The build the driver's offset table belongs to (v0.2.14, extracted payload).
 STOCK_SIZE = 7_156_224
 STOCK_SHA256 = "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84"
-PATCHED_SHA256 = "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8"
+#: The four patches below applied to the stock file. Was 3c9ca13f... while the
+#: spin cap was still in the list; dropping it changes the bytes and therefore
+#: the hash, so this constant and the driver's own check move together.
+PATCHED_SHA256 = "81efaadc8d0deaa2c23f64aee83b81e9f48e2da4d0c3fbae73fc68e056070117"
 
 #: Where --download gets the installer. The author's own release page, so the
 #: file goes from him to the user and never through this project - his licence
@@ -79,9 +86,8 @@ INSTALLER_URL = ("https://github.com/danielblnc/DLSS-NR-on-AMD/releases/download
 INSTALLER_NAME = "dlssnr_on_amd_setup.exe"
 INSTALLER_SIZE = 7_396_082
 
-# The five patches, exactly as the ecosystem's runtime-patches.json carries
-# them - file offsets, with the expected bytes asserted before anything is
-# written so a different build cannot be silently corrupted.
+# The patches applied to the runtime, with the expected bytes asserted before
+# anything is written so a different build cannot be silently corrupted.
 #
 #   0x1ffc  disable the runtime's own hook-installer thread (it would install
 #           detours on ExecuteCommandLists and Present - the host does that)
@@ -90,7 +96,26 @@ INSTALLER_SIZE = 7_396_082
 #   0x62bd4 timeout fallback: keep the current input instead of showing a
 #           stale residual
 #   0x6321d the matching log message
-#   0x625ac bound the GPU wait loop
+#
+# Two patches that the ecosystem's list carries are deliberately NOT here:
+#
+#   0x625ac "bound the GPU wait loop" - REMOVED, and it should stay removed.
+#           It caps the wait shader's spin at 2097152 iterations, which at the
+#           measured rate (~371k iterations/ms, from Magpie's backend spec) is
+#           about 5.7 ms - LESS than the network itself costs on this hardware
+#           (8-16 ms per job in every Radeon log we have, 9-187 ms in the MIT
+#           host's). A cap below the real cost makes the inline wait expire on
+#           effectively every frame, and the apply pass then keeps its input.
+#           That is the exact failure the cap was meant to prevent.
+#           Both working hosts reach the same conclusion from opposite sides:
+#           Magpie's spec records that writing `262144 + pixels/2` produced
+#           "every one of the 13 timeouts in the run", and the MIT host lists
+#           the cap under `dropped` - "so inline mode would time out on every
+#           frame". Do not re-add it on the strength of the upstream list.
+#
+#   0x62bd4 / 0x6321d are KEPT (v0.2.14 has no flag for this behaviour). On
+#           v0.2.17+ the same choice is an ini/flag pair - ToneChannels bit 4
+#           on, bit 2 clear - so those two become unnecessary there.
 PATCHES = [
     (0x1FFC, "ff15d6910600", "31c090909090"),
     (0x3A53, "ff15e7280700", "909090909090"),
@@ -100,9 +125,6 @@ PATCHES = [
     (0x6321D,
      "70726576696f757320726573696475616c2073686f776e",
      "63757272656e7420696e707574206b6570742020202020"),
-    (0x625AC,
-     "0a676c6f62616c6c79636f686572656e74205257427974654164647265737342756666657220666c616773203a207265676973746572287530293b0a42797465416464726573734275666665722061626f727462203a207265676973746572287430293b2020202f2f2075706c6f61642d6865617020776f7264207772697474656e2062792074686520686f7374207761746368646f673a2067697665207570206f6e206672616d6573203c3d20746869732076616c756520287265616c2d74696d65206275646765742c20696e646570656e64656e74206f6620746865207370696e2072617465290a636275666665722043203a20726567697374657228623029207b2075696e74206d6f64653b2075696e742076616c75653b2075696e74206d6178497465723b2075696e74207061643b207d0a5b6e756d7468726561647328312c20312c2031295d20766f6964206d61696e2829207b0a20202020696620286d6f6465203d3d203029207b20666c6167732e53746f726528302c2076616c7565293b2072657475726e3b207d0a2020202075696e742076203d20303b2075696e742069203d20303b0a20202020666f7220283b2069203c206d6178497465723b202b2b6929207b20666c6167732e496e7465726c6f636b656441646428342c20302c2076293b206966202876203e3d2076616c756529207b20666c6167732e53746f72652831362c2069293b20666c6167732e53746f72652831322c2030293b2072657475726e3b207d2069662028286920262032353529203d3d203235352026262061626f7274622e4c6f6164283029203e3d2076616c75652920627265616b3b207d0a20202020666c6167732e53746f72652831362c2069293b20666c6167732e53746f72652831322c2031293b20666c6167732e496e7465726c6f636b656441646428382c20312c2076293b2020202020202020202020202020202020202020202f2f2074696d6564206f75743a20636f756e7420697420616e642074656c6c20746865206170706c79207061737320746f207265757365207468652070726576696f7573206672616d65277320726573696475616c0a7d",
-     "0a676c6f62616c6c79636f686572656e74205257427974654164647265737342756666657220666c616773203a207265676973746572287530293b0a42797465416464726573734275666665722061626f727462203a207265676973746572287430293b2020200a636275666665722043203a20726567697374657228623029207b2075696e74206d6f64653b2075696e742076616c75653b2075696e74206d6178497465723b2075696e74207061643b207d0a5b6e756d7468726561647328312c20312c2031295d20766f6964206d61696e2829207b0a20202020696620286d6f6465203d3d203029207b20666c6167732e53746f726528302c2076616c7565293b2072657475726e3b207d0a2020202075696e742076203d20303b2075696e742069203d20303b0a20202020666f7220283b2069203c206d696e286d6178497465722c203230393731353275293b202b2b6929207b20666c6167732e496e7465726c6f636b656441646428342c20302c2076293b206966202876203e3d2076616c756529207b20666c6167732e53746f72652831362c2069293b20666c6167732e53746f72652831322c2030293b2072657475726e3b207d2069662028286920262032353529203d3d203235352026262061626f7274622e4c6f6164283029203e3d2076616c75652920627265616b3b207d0a20202020666c6167732e53746f72652831362c2069293b20666c6167732e53746f72652831322c2031293b20666c6167732e496e7465726c6f636b656441646428382c20312c2076293b2020202020202020202020202020202020202020200a7d2020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020"),
 ]
 
 
@@ -207,7 +229,7 @@ def patched_dst_is_valid(folder: Path) -> bool:
 
 
 def unpatch(data: bytearray) -> None:
-    """Undo the five patches, in reverse, asserting the bytes first.
+    """Undo the patches, in reverse, asserting the bytes first.
 
     `apply_patches` is the only writer of these bytes, so the inverse is exact:
     each entry lists (offset, stock_bytes, patched_bytes) and this walks it the
@@ -391,7 +413,7 @@ def main() -> int:
 
     # BOTH images are written, and that is the point of this script now.
     #
-    # They are the same build with five in-place patches, so the driver's offset
+    # They are the same build with a few in-place patches, so the driver's offset
     # table belongs to either one. Having both files side by side makes the
     # choice a single environment variable (NS_AMD_PATCHED=1) instead of a
     # reinstall, which is what a live A/B needs: the same machine, the same
@@ -420,7 +442,7 @@ def main() -> int:
         return 5
     patched_dst.write_bytes(bytes(patched))
     print(f"written: {patched_dst}  <- NS_AMD_PATCHED=1 runs this one")
-    print("applied the five patches (hash verified)")
+    print("applied the patches (hash verified)")
 
     drop_loose_proxy(folder, stock_dst)
 

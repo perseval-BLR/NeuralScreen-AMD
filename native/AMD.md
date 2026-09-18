@@ -27,7 +27,7 @@ Everything the pass needs is in `native\`:
 | File | What it is |
 | --- | --- |
 | `dlssnr_amd_pass1.dll` | the runtime, stock build - **this is what runs** |
-| `dlssnr_amd_pass1_patched.dll` | the same build with five patches (see below) |
+| `dlssnr_amd_pass1_patched.dll` | the same build with the patches below |
 | `dlssnr_on_amd_weights.bin` | the network weights, 153 tensors |
 | `dlssnr_on_amd.ini` | the keys the runtime reads from its own DllMain |
 | `amd_fidelityfx_upscaler_dx12.dll` | AMD's FSR upscaler, needed for the frame |
@@ -115,7 +115,7 @@ lines. Nothing has to be turned on: every line below is written always.
 |---|---|
 | `[amd] ===== AMD path active =====` | the engine came up; frames are processed |
 | `[amd] runtime: patched v0.2.14 (the tested build)` | the right build was found |
-| `[amd] sha256: 3c9ca13f...` | which build is actually on disk |
+| `[amd] sha256: 81efaadc...` | which build is actually on disk |
 | `[amd] the runtime did not come up: <reason>` | the exact reason, in words |
 | `[amd] the runtime's D3D12/DXGI hooks are in place (N ms)` | the runtime can see our frames |
 | `[amd] detour wait: not applicable` | the patched image is loaded, whose hook installer is off by design - nothing to wait for |

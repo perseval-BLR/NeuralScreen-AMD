@@ -238,7 +238,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // 0x1ffc disables that hook installer so the host has to drive everything
     // by hand.
     //
-    // Both images are the same file with five in-place patches, so the offset
+    // Both images are the same file with a few in-place patches, so the offset
     // table above belongs to either one - the patches change bytes, not layout.
     // Which is loaded is therefore a one-variable A/B, and it needs no
     // reinstall: prepare_amd_runtime.py writes both files side by side.

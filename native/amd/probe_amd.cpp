@@ -237,10 +237,24 @@ int wmain(int argc, wchar_t **argv) {
 
     // --- 2. size and hash -------------------------------------------------
     // TWO images are accepted, because the A/B needs both: the stock build (the
-    // default) and the same file with the five patches. They differ by a few
-    // bytes, so the size gate is the same for each and the hash decides which
-    // one this is.
+    // default) and the same file with the patches. They differ by a few bytes,
+    // so the size gate is the same for each and the hash decides which one this
+    // is.
+    //
+    // The patched hash is 81efaadc..., not the 3c9ca13f... every other host
+    // pins. The difference is one entry of the patch list: we do NOT apply the
+    // GPU wait spin cap (0x625ac). That cap bounds the wait shader at ~5.7 ms
+    // of spinning, which is less than the network itself costs here (8-16 ms in
+    // every Radeon log we have), so the wait would expire on effectively every
+    // frame and the apply pass would keep its input. Both hosts that produce a
+    // picture refuse that patch for the same reason. A file hashed 3c9ca13f...
+    // therefore carries a cap we do not want, and it is refused rather than
+    // accepted silently - the user must re-run the prepare script.
     static const char kPatchedHash[] =
+        "81efaadc8d0deaa2c23f64aee83b81e9f48e2da4d0c3fbae73fc68e056070117";
+    //: The older patched build (with the spin cap). Named so the probe can say
+    //: WHICH file it found instead of a bare "unknown".
+    static const char kPatchedHashWithSpinCap[] =
         "3c9ca13f0f5fc36a690ba424c457003bcfcc1080b4b785974cdd7e9ae2bc1dd8";
     static const char kStockHash[] =
         "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84";
@@ -257,6 +271,11 @@ int wmain(int argc, wchar_t **argv) {
             out("sha256 %s\n", hex.c_str());
             const bool stock = hex.rfind(kStockHash, 0) == 0;
             const bool patched = hex.rfind(kPatchedHash, 0) == 0;
+            // The build every other host pins, refused here on purpose: it
+            // carries the GPU wait spin cap, which makes the inline wait expire
+            // below the network's real cost. Naming it turns "UNKNOWN build"
+            // into an instruction.
+            const bool old_patched = hex.rfind(kPatchedHashWithSpinCap, 0) == 0;
             hash_match = stock || patched;
             out("expected %s (stock, default) or %s (patched)\n",
                 kStockHash, kPatchedHash);
@@ -266,6 +285,11 @@ int wmain(int argc, wchar_t **argv) {
             else if (patched)
                 out("verdict: the PATCHED build - the hook installer is "
                     "disabled, the host drives it (NS_AMD_PATCHED=1)\n");
+            else if (old_patched)
+                out("verdict: an OLDER patched build - this one still carries "
+                    "the GPU wait spin cap, which makes the runtime time out on "
+                    "almost every frame. Re-run the prepare script to get the "
+                    "current pair\n");
             else
                 out("verdict: UNKNOWN build - offsets are not verified against "
                     "this file\n");
