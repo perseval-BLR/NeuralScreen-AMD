@@ -41,8 +41,9 @@ You do not need to run an installer, and you do not need to fetch anything.
 
 ### Which of the two runtime builds runs
 
-They are one build with five bytes changed, so the driver's offset table accepts
-either, and the difference is a single variable:
+They are one build with 55 bytes changed in four places, all in place and all
+the same length, so no address moves and the driver's offset table accepts
+either. The difference between them is a single variable:
 
 ```
 dlssnr_amd_pass1.dll          stock    <- runs by default

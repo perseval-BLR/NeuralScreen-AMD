@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.1.15-alpha"
+VERSION = "0.1.16-alpha"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
@@ -69,7 +69,8 @@ extra = [
     # So the four files the installer would have produced ship here:
     #
     #   dlssnr_amd_pass1.dll          the runtime, stock build (this is what runs)
-    #   dlssnr_amd_pass1_patched.dll  the same build with the five patches
+    #   dlssnr_amd_pass1_patched.dll  the same build with the four patches
+    #                                 (55 bytes, four places)
     #                                 (NS_AMD_PATCHED=1 selects it - the A/B)
     #   dlssnr_on_amd_weights.bin     the network weights, 153 tensors
     #   dlssnr_on_amd.ini             the keys the runtime reads in its DllMain
