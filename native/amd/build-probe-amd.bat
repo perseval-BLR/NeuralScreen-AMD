@@ -22,3 +22,15 @@ if errorlevel 1 (
     exit /b 1
 )
 echo built: %~dp0probe_amd.exe
+
+REM The release archive ships native\probe_amd.exe (next to the worker, where a
+REM user runs it from), while this script builds into native\amd\. Without this
+REM copy the archive silently packs the PREVIOUS build - which is exactly what
+REM happened once: a probe that did not know the new runtime image was shipped
+REM with a build that did.
+copy /Y probe_amd.exe "..\probe_amd.exe" >nul
+if errorlevel 1 (
+    echo warning: could not copy the probe to native\probe_amd.exe
+    exit /b 1
+)
+echo copied: %~dp0..\probe_amd.exe  (what the archive ships)

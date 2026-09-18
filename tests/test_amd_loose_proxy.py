@@ -142,6 +142,25 @@ def main() -> int:
     if "kRuntimePatchedName" not in probe:
         failures.append("probe_amd does not report the patched copy")
 
+    # --- 8. the probe build must land where the ARCHIVE reads it ----------
+    # build_release_zip.py ships `native/probe_amd.exe`; build-probe-amd.bat
+    # compiles into `native/amd/`. Without the copy the archive silently packs
+    # the previous probe - which happened: a probe that did not know the new
+    # runtime image shipped alongside a build that did.
+    bat = (BASE / "native" / "amd" / "build-probe-amd.bat").read_text(
+        encoding="utf-8", errors="replace")
+    if "probe_amd.exe" not in bat:
+        failures.append("the probe build script does not name its output")
+    if "..\\probe_amd.exe" not in bat or "copy /Y" not in bat.lower() and "copy /y" not in bat.lower():
+        failures.append("the probe build does not copy its output to "
+                        "native\\probe_amd.exe - the archive would ship the "
+                        "previous probe")
+    shipped = (BASE / "build_release_zip.py").read_text(
+        encoding="utf-8", errors="replace")
+    if '"native/probe_amd.exe"' not in shipped:
+        failures.append("the archive no longer ships native/probe_amd.exe - "
+                        "this check is looking at the wrong path")
+
     if failures:
         print()
         for f in failures:

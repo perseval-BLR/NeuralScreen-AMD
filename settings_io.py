@@ -551,11 +551,12 @@ NR_VERDICT_FAIL = ("feature 18 create failed",   # [pure], the direct refusal
 #: switch must NOT be reverted, and the card must NOT be marked, on a fault the
 #: user fixes by copying a file (issue #2: clicking through the picker looped,
 #: because every card was judged and condemned for a file that was not there).
-NR_VERDICT_INSTALL = ("dlssnr_amd_pass1.dll not found",
+NR_VERDICT_INSTALL = ("not found in",
                       "is not a build these offsets belong to",
                       "amdhip64_7.dll not found",
                       "HIP reports no devices",
-                      "dlssnr_on_amd_weights.bin not found")
+                      "dlssnr_on_amd_weights.bin not found",
+                      "not found next to the runtime")
 
 #: The card is not the kind the pass runs on. A verdict of its own: nothing
 #: is broken and nothing the user can install will change it, so the menu
