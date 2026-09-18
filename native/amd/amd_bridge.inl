@@ -1061,25 +1061,26 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // second (stale) back buffer to the compositor, and this overlay is what
     // the user sees.
 
-    // Notify, for the build whose own hook was disabled.
+    // Notify, for the image whose own announce was removed.
     //
     // WHO TELLS THE ENGINE ABOUT THE SUBMISSION depends on WHICH BUILD is
     // loaded, and that is a property of the file - its hash - so it is read
     // from the loader rather than guessed from a log line.
     //
-    // STOCK: the runtime installs its own ExecuteCommandLists detour from the
-    // thread it starts on load, and it carries its own notify call after that
-    // hook. Both are intact in this build. Calling Notify here as well would
-    // announce one submission to an engine that has already seen it - the
-    // duplicate the runtime's own patch 0x3a53 exists to remove ("without the
-    // hook it would execute the frame twice"). A build that keeps its hooks
-    // does not need this call and is not helped by it.
+    // Both v0.2.17 images install their own ExecuteCommandLists detour: the
+    // setup thread that installs it has to stay alive on this build (see the
+    // loader - nopping it faults at address 0). What differs is what the
+    // detour does afterwards.
     //
-    // PATCHED (patch 0x1ffc): that detour's installer is disabled, so the
-    // engine never sees a submission by itself and this call is the only thing
-    // that keeps the dispatch route alive. The two patches are a pair - 0x3a53
-    // removes the notify call precisely because 0x1ffc removes the hook that
-    // made it necessary - so the host has to supply it again.
+    // STOCK: the detour carries its own notify call, so the engine hears about
+    // the submission by itself. Calling Notify here as well would announce one
+    // submission twice - exactly the duplicate that patch 0x8583 exists to
+    // remove ("without the hook it would execute the frame twice").
+    //
+    // PATCHED (patch 0x8583): that call inside the detour is nopped, so
+    // nothing announces the submission and this call is the only thing that
+    // keeps the dispatch route alive. The host supplies what the patch took
+    // out.
     const bool engine_owns_submission = g_amd.runtime.Kind() == amd_nr::ImageKind::Stock;
     if (!engine_owns_submission)
         g_amd.runtime.Notify(h.queue, h.list);
