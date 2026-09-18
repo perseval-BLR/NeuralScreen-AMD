@@ -60,6 +60,30 @@ std::wstring dir_of(const std::wstring &path) {
     return pos == std::wstring::npos ? L"." : path.substr(0, pos);
 }
 
+// The folder this probe works in, made ABSOLUTE.
+//
+// `dir` comes from argv[0], so it is relative whenever the user runs the
+// command the README itself prints - either `native\probe_amd.exe` from the
+// extracted folder or `probe_amd.exe` from inside `native\`. It is then handed
+// to LoadLibraryExW together with LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, and that
+// flag requires a FULLY QUALIFIED path: given a relative one the call fails
+// with ERROR_INVALID_PARAMETER (87) before any search happens. Measured on the
+// bench, all four combinations:
+//
+//     relative + DLL_LOAD_DIR  -> 87      .\relative + DLL_LOAD_DIR -> 87
+//     relative + DEFAULT_DIRS  -> 126     relative, no flags        -> 126
+//
+// 87 is why the probe stopped working one release after it started working:
+// the flag was added to fix 126, and it turned a not-found into a bad
+// parameter for every relative invocation. Resolving the path once here is
+// what makes the command work from any working directory.
+std::wstring absolute_dir(const std::wstring &dir) {
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetFullPathNameW(dir.c_str(), MAX_PATH, buf, nullptr);
+    if (n == 0 || n >= MAX_PATH) return dir;
+    return std::wstring(buf, n);
+}
+
 bool file_exists(const std::wstring &path, unsigned long long *size = nullptr) {
     WIN32_FILE_ATTRIBUTE_DATA fad{};
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad))
@@ -176,11 +200,11 @@ int wmain(int argc, wchar_t **argv) {
     FILE *log = _wfopen(log_path.c_str(), L"w");
     g_out = log;
 
-    std::wstring dir = exe_dir;
+    std::wstring dir = absolute_dir(exe_dir);
     bool do_init = false;
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--init") == 0) do_init = true;
-        else dir = argv[i];
+        else dir = absolute_dir(argv[i]);
     }
 
     out("probe_amd - the AMD neural runtime check\n");
@@ -367,16 +391,21 @@ int wmain(int argc, wchar_t **argv) {
         return 1;
     }
 
-    // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR is what makes this probe work from
-    // ANY working directory, and its absence is a live bug report: run from
-    // the folder above, `probe_amd --init` died with "LoadLibrary failed
-    // (error 126)" while the same command inside native\ succeeded. 126 is
-    // ERROR_MOD_NOT_FOUND and here it means the runtime's OWN dependencies
-    // (the HIP runtime among them) were searched for relative to the process
-    // rather than to the DLL. DEFAULT_DIRS alone does not add the DLL's own
-    // folder to that search; the flag has to be named. The worker has always
-    // passed both; the probe did not, so a user who followed the README from
-    // the extracted folder got a failure that said nothing about the cause.
+    // Both flags are needed, and so is the absolute path they are given.
+    //
+    // Without them the runtime's OWN dependencies (the HIP runtime among them)
+    // are searched for relative to the process rather than to the DLL, and the
+    // call fails with ERROR_MOD_NOT_FOUND (126) - reported by a user who ran
+    // the command the README prints, from the folder above native\.
+    // DEFAULT_DIRS alone does not add the DLL's own folder to that search, the
+    // flag has to be named.
+    //
+    // With them but a RELATIVE path the call fails even earlier, with
+    // ERROR_INVALID_PARAMETER (87): that flag requires a fully qualified path.
+    // A second user got exactly that, from both folders, one release after the
+    // 126 fix landed. `dir` is resolved with GetFullPathNameW at the entry
+    // point for this reason - the flags and the absolute path are one
+    // requirement, not two.
     HMODULE mod = LoadLibraryExW((dir + L"\\" + kRuntimeName).c_str(), nullptr,
                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                                      LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);

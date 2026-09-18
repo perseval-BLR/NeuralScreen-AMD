@@ -83,6 +83,11 @@ name (`dlssnr_amd_pass1.dll`).
    card. **Keep `native\probe_amd.log`** - it is the first thing a bug report
    should carry.
 
+   It works from any folder, and its first line prints the folder it looked in.
+   That line is worth a glance in a report: the path is made absolute before
+   anything is loaded, so a relative one there means the check looked somewhere
+   other than where you are.
+
 The FidelityFX upscaler (`amd_fidelityfx_upscaler_dx12.dll`) needs nothing from
 you: it **ships in the archive**, because AMD's licence permits redistributing
 that binary (see `THIRD-PARTY-NOTICES.md`). It is not optional - without it the

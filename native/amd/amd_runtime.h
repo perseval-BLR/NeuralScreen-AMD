@@ -247,6 +247,14 @@ public:
     // "it does not work" report carries the build identity with it.
     const std::string &FoundHash() const { return found_hash_; }
 
+    // Where the runtime's own log ENDED before this run loaded the module.
+    // Everything at or after this offset was written by THIS run. Anything
+    // that reads that log must start here: the file is appended to across
+    // launches, so a read bounded only by "the last N KB" can quote a previous
+    // launch's line as if it were this one's - which is exactly how a stale
+    // `encoded mean` would reach a report and be read as the current frame.
+    unsigned long long LogFrom() const { return log_from_; }
+
     // Applies the host's parameters. Cheap - three stores.
     void SetOptions(const Options &opt);
 

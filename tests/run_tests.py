@@ -110,6 +110,7 @@ ABOUT = {
     "test_amd_worker_survives.py": "a Radeon keeps its worker when the pass is off, and the magenta fill cannot reach an unkeyed layer",
     "test_verdict_sentences.py": "every refusal the worker can print reaches the menu as one",
     "test_amd_single_route.py": "one route feeds the engine (no packet on the default path) and the wait matches it",
+    "test_amd_probe_and_echo.py": "the probe resolves its folder before loading, and the health echo reads only this run",
     "test_config_atomic.py": "the config write is atomic and persists profile/params/monitor",
     "test_dred_diag.py": "the worker logs DRED/device-removed diagnostics at startup",
     "test_env_header.py": "the log header carries version/OS/HDR and survives broken probes",

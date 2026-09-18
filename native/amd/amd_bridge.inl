@@ -414,19 +414,32 @@ static void AmdEngineHealth()
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
 
-    // The tail only: the log is opened in append mode across runs, and only
-    // the last few KB can belong to this one.
+    // This run's bytes only. The log is appended to across launches, and a
+    // tail read with no lower bound can quote a PREVIOUS launch's line as if
+    // it belonged to this one: `Encoded mean` from an earlier run would be
+    // reported as the current frame's measure, and a reader chasing a black
+    // picture would be sent after a run that is not the one in front of them.
+    // The loader records where the file ended before it loaded the module.
+    const unsigned long long from = g_amd.runtime.LogFrom();
     LARGE_INTEGER size{};
     constexpr LONGLONG kWant = 32 * 1024;
     std::string text;
-    if (GetFileSizeEx(file, &size) && size.QuadPart > 0)
+    if (GetFileSizeEx(file, &size) && size.QuadPart > 0 &&
+        static_cast<unsigned long long>(size.QuadPart) > from)
     {
-        const LONGLONG start = size.QuadPart > kWant ? size.QuadPart - kWant : 0;
+        // The tail of THIS run only: never below `from`, and never more than
+        // the last few KB of it.
+        const unsigned long long total =
+            static_cast<unsigned long long>(size.QuadPart) - from;
+        const unsigned long long want =
+            total > static_cast<unsigned long long>(kWant)
+                ? static_cast<unsigned long long>(kWant)
+                : total;
         LARGE_INTEGER pos{};
-        pos.QuadPart = start;
+        pos.QuadPart = size.QuadPart - static_cast<LONGLONG>(want);
         if (SetFilePointerEx(file, pos, nullptr, FILE_BEGIN))
         {
-            text.resize(static_cast<size_t>(size.QuadPart - start));
+            text.resize(static_cast<size_t>(want));
             DWORD got = 0;
             if (!ReadFile(file, &text[0], static_cast<DWORD>(text.size()), &got, nullptr))
                 text.clear();
