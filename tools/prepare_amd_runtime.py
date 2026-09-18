@@ -1,10 +1,12 @@
-"""Prepare the AMD neural runtime for NeuralScreen.
+"""Rebuild the AMD neural runtime pair from a copy you installed yourself.
 
-The AMD neural pass drives a third-party runtime (DLSS-NR-on-AMD). That
-runtime cannot be shipped with NeuralScreen - its licence forbids
-redistribution, and its weights are derived from NVIDIA's own - so the user
-brings their own copy. This script turns the copy they have into the shape the
-worker expects.
+The AMD neural pass drives a third-party runtime (DLSS-NR-on-AMD). **This build
+ships it**, so you normally have nothing to do here: `native\\` already carries
+`dlssnr_amd_pass1.dll`, `dlssnr_amd_pass1_patched.dll`, the weights and the ini.
+
+This script exists for the case where you want to produce that pair yourself -
+from the author's own installer, from an older runtime you already have, or to
+check that a copy is the build this driver's offset table belongs to.
 
 WHAT IT EXPECTS TO FIND
   A folder with the output of danielblnc's official installer
@@ -44,10 +46,12 @@ WHAT IT DOES
   NS_AMD_PATCHED=1 selects the patched one. That is what a live A/B needs - the
   same machine and session, one setting apart.
 
+  It also DELETES `version.dll` from that folder: beside the worker that name is
+  resolved as the system module by the worker's own import, which starts a
+  second, self-initialising engine in the process. See drop_loose_proxy below.
+
   Pass --download to fetch the installer from the author's own release page
-  instead of copying it in by hand. The file is not redistributed here: it
-  travels from his releases to your machine, verified against the size and
-  hash published for that release.
+  instead of copying it in by hand.
 
 Run from the NeuralScreen folder:   python tools\\prepare_amd_runtime.py
 """

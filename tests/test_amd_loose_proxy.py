@@ -161,6 +161,33 @@ def main() -> int:
         failures.append("the archive no longer ships native/probe_amd.exe - "
                         "this check is looking at the wrong path")
 
+    # --- 9. the runtime ships in the archive (unpack and it works) --------
+    # The four files the installer would have produced must be in the payload,
+    # or the archive is not self-contained and the user is back to a manual
+    # step before the first run - which the logs show is the step that gets
+    # skipped ("dlssnr_amd_pass1.dll not found", and no picture).
+    shipped_list = shipped  # build_release_zip.py source, read above
+    for f in ("native/dlssnr_amd_pass1.dll",
+              "native/dlssnr_amd_pass1_patched.dll",
+              "native/dlssnr_on_amd_weights.bin",
+              "native/dlssnr_on_amd.ini"):
+        if f'"{f}"' not in shipped_list:
+            failures.append(f"{f} is not in the archive payload - the archive "
+                            "is then not self-contained")
+    # ...and the filter that hides native/ must let them through: everything in
+    # native/ that is not a .dll is dropped unless it is named in RUNTIME_ASSETS.
+    zip_src = (BASE / "build_release_zip.py").read_text(encoding="utf-8",
+                                                        errors="replace")
+    for f in ("native/dlssnr_on_amd_weights.bin", "native/dlssnr_on_amd.ini"):
+        if f'"{f}"' not in zip_src.split("RUNTIME_ASSETS")[1].split(")")[0]:
+            failures.append(f"{f} is not in RUNTIME_ASSETS, so the native/ "
+                            "filter drops it from the archive")
+    # The archive must NOT carry a version.dll - that name is the hijack.
+    if '"native/version.dll"' in shipped_list:
+        failures.append("the archive would ship a version.dll: beside the "
+                        "worker that name is the system module, and the import "
+                        "would bind the runtime into every process")
+
     if failures:
         print()
         for f in failures:

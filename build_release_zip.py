@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.1.14-alpha"
+VERSION = "0.1.15-alpha"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
@@ -57,6 +57,37 @@ extra = [
     # from an FSR dispatch, so with no upscaler to dispatch it has nothing to
     # attach to. Shipping it turns a silent black screen into a working pass.
     "native/amd_fidelityfx_upscaler_dx12.dll",
+    # --- the AMD neural runtime, bundled -------------------------------------
+    #
+    # The archive is meant to be "unpack it and it works". Until this build it
+    # was not: the runtime was a separate install step the user had to perform,
+    # and the logs say what that cost - a 9070 XT owner whose pass never started
+    # had exactly one line about it (`dlssnr_amd_pass1.dll not found`), asked why
+    # the program "always looks to hook on NVOFA", and got no picture. A step
+    # that must be performed before the first run is a step that gets skipped.
+    #
+    # So the four files the installer would have produced ship here:
+    #
+    #   dlssnr_amd_pass1.dll          the runtime, stock build (this is what runs)
+    #   dlssnr_amd_pass1_patched.dll  the same build with the five patches
+    #                                 (NS_AMD_PATCHED=1 selects it - the A/B)
+    #   dlssnr_on_amd_weights.bin     the network weights, 153 tensors
+    #   dlssnr_on_amd.ini             the keys the runtime reads in its DllMain
+    #
+    # The weights were produced from `nvngx_dlssnr.dll`, which this archive has
+    # always carried - verified byte-identical (sha256 dcc0dc24...) to the copy
+    # that producing install used. The two runtime images are one build with five
+    # bytes changed, which is why the driver's offset table accepts either.
+    #
+    # NOT here, on purpose: anything named `version.dll`. That name is how the
+    # runtime is distributed for games, and beside this worker it is resolved as
+    # the SYSTEM module by the worker's own import - a second engine inside the
+    # process, entering before anything is bound. The preparation script removes
+    # one if it finds it; the archive must not put one back.
+    "native/dlssnr_amd_pass1.dll",
+    "native/dlssnr_amd_pass1_patched.dll",
+    "native/dlssnr_on_amd_weights.bin",
+    "native/dlssnr_on_amd.ini",
 ]
 # tcl/tk stays out of the archive: the tkinter settings window is gone and the
 # whole interface lives in the overlay menu. Nothing in the project imports
@@ -190,6 +221,15 @@ def _skip(path: str) -> bool:
         "native/neuralscreen.ico",
         "native/probe_amd.exe",
         "native/AMD.md",
+        # The AMD neural runtime's non-DLL half: the network weights and the ini
+        # the runtime reads from its own DllMain. The "native/ is DLLs and build
+        # inputs" rule is about keeping developer baggage out; these two are
+        # runtime data, and without them the pass cannot start at all - which is
+        # the failure this bundling exists to remove. Named one by one, same as
+        # the rest of this list: a .bin dropped into native/ tomorrow is still
+        # baggage.
+        "native/dlssnr_on_amd_weights.bin",
+        "native/dlssnr_on_amd.ini",
     )
     if (norm.startswith("native/") and not norm.endswith(".dll")
             and norm not in RUNTIME_ASSETS):

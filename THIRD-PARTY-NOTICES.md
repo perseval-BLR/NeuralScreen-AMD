@@ -41,17 +41,19 @@ The disclaimers above apply in full: the software is provided "as is", without
 warranty of any kind. AMD's name is used here only to identify the file and to
 credit its author; nothing in this project is endorsed by AMD.
 
-## The neural runtime and its weights
+## The neural runtime and its weights (bundled)
 
-`dlssnr_amd_pass1.dll` (a `version.dll` proxy) and
-`dlssnr_on_amd_weights.bin` come from **danielblnc/DLSS-NR-on-AMD**, whose
-licence forbids redistribution and modification, and whose weights are derived
-from NVIDIA's own DLSS Neural Rendering binaries. They are also not source-
-available. Neither file is included in any release archive or committed to
-this repository - `tools/prepare_amd_runtime.py` turns a copy the user has into
-the build this driver knows how to drive, and refuses anything else. With
-`--download` it fetches the author's own installer from the author's release
-page, so the file travels from him to you and never through this project.
+`dlssnr_amd_pass1.dll`, `dlssnr_amd_pass1_patched.dll` and
+`dlssnr_on_amd_weights.bin` come from **danielblnc/DLSS-NR-on-AMD** and ship in
+this archive so that it works when it is unpacked. Its weights were produced from
+`nvngx_dlssnr.dll`, which this archive has always carried for the NVIDIA path
+(verified byte-identical to the copy that producing install used).
+
+`tools/prepare_amd_runtime.py` reproduces the same pair from a copy you installed
+yourself, and refuses any build whose offsets this driver was not written
+against. It also removes a `version.dll` from that folder - beside this worker
+that name is resolved as the system module by the worker's own import, which
+starts a second engine in the process.
 
 ## FidelityFX API headers (vendored)
 

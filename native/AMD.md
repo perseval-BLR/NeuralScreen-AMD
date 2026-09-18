@@ -16,80 +16,71 @@ what makes the next fix possible.
 - Radeon RX 7000 or 9000 series (RX 6000 is not supported by the runtime)
 - Windows 11, DirectX 12
 - AMD Adrenalin **26.1.1 or newer** (ships the HIP 7 runtime the pass needs)
-- Your own copy of the neural runtime (below)
 
-## 1. Prepare the runtime
+Nothing else. The neural runtime and its weights **ship in this archive** - unpack
+and run. `native\probe_amd.exe` says whether everything is in place.
 
-The pass drives a third-party runtime (the DLSS-NR-on-AMD project). It cannot
-be shipped inside NeuralScreen AMD - its licence forbids redistribution, and its
-weights are derived from NVIDIA's own - so you bring your own copy. Two steps
-turn it into the shape NeuralScreen expects; the first one fetches the
-installer for you.
+## 1. The runtime is already installed
 
-1. Get the installer. Either let the script fetch it:
+Everything the pass needs is in `native\`:
 
-   ```
-   runtime\python.exe tools\prepare_amd_runtime.py --download
-   ```
+| File | What it is |
+| --- | --- |
+| `dlssnr_amd_pass1.dll` | the runtime, stock build - **this is what runs** |
+| `dlssnr_amd_pass1_patched.dll` | the same build with five patches (see below) |
+| `dlssnr_on_amd_weights.bin` | the network weights, 153 tensors |
+| `dlssnr_on_amd.ini` | the keys the runtime reads from its own DllMain |
+| `amd_fidelityfx_upscaler_dx12.dll` | AMD's FSR upscaler, needed for the frame |
 
-   It downloads `dlssnr_on_amd_setup.exe` **v0.2.14** from the author's own
-   release page and checks the size against the one published for that release.
-   Nothing of it passes through this project - the file goes from his releases
-   to your machine, which is what his licence asks for. Or download it by hand
-   from https://github.com/danielblnc/DLSS-NR-on-AMD/releases (other versions
-   will be refused: the driver's offset table belongs to this one build) and
-   put it in the `native` folder.
-2. Run the installer in the `native` folder (answer `y` to "Use this folder?").
-   It writes `version.dll`, `dlssnr_on_amd.ini` and
-   `dlssnr_on_amd_weights.bin`.
-3. Run the preparation script from the NeuralScreen AMD folder:
+The runtime comes from the **DLSS-NR-on-AMD** project and is driven here as a
+component of this build. Its weights were produced from `nvngx_dlssnr.dll`,
+which this archive also carries (it is NVIDIA's redistributable and the same file
+the NVIDIA path uses on hybrid machines).
 
-   ```
-   runtime\python.exe tools\prepare_amd_runtime.py
-   ```
+You do not need to run an installer, and you do not need to fetch anything.
 
-   It verifies the runtime is the build the driver knows and writes **two**
-   files:
+### Which of the two runtime builds runs
 
-   - `dlssnr_amd_pass1.dll` - the stock build. **This is what runs.**
-   - `dlssnr_amd_pass1_patched.dll` - the same build with the five documented
-     patches applied.
+They are one build with five bytes changed, so the driver's offset table accepts
+either, and the difference is a single variable:
 
-   The stock build is the default because that is the shape the one external
-   host that produces a picture runs: it never modifies the runtime, and it does
-   not drive the engine by hand - the engine installs its own hooks and owns the
-   frame from there. The patched build disables that hook installer (patch
-   `0x1ffc`), so NeuralScreen has to drive everything itself. Both files are the
-   same build with a few bytes changed, so the driver's offset table belongs to
-   either one, and switching is a single variable:
+```
+dlssnr_amd_pass1.dll          stock    <- runs by default
+dlssnr_amd_pass1_patched.dll  patched  <- set NS_AMD_PATCHED=1 before starting
+```
 
-   ```
-   set NS_AMD_PATCHED=1     (before starting NeuralScreen - runs the patched build)
-   ```
+The stock build is the default because that is the shape the external host that
+produces a picture runs: it never modifies the runtime and never drives the
+engine by hand - the engine installs its own hooks and owns the frame from
+there. The patched build disables that hook installer (patch `0x1ffc`), so
+NeuralScreen has to drive everything itself. `native\probe_amd.exe` names which
+one it found, and the worker's log opens with `runtime image: STOCK` or
+`PATCHED`.
 
-   That is what the A/B needs: the same machine and the same session, one
-   setting apart. `native\probe_amd.exe` names which one it found.
+### If you supply your own copy instead
 
-   It also **deletes `version.dll` from that folder**, and that is not
-   housekeeping: NeuralScreen's worker reads file versions, so it statically
-   imports `VERSION.dll` - a system module name. Windows resolves such an import
-   from the program's own folder first, and `version.dll` is not a KnownDLL, so
-   a copy of the runtime sitting there (the installer names it exactly that) is
-   the file that import binds to. That starts a **second, self-initialising
-   copy of the engine** inside the worker, before NeuralScreen has set anything
-   up, with its own frame loop. Two engines in one process is the documented way
-   to get a black picture. Nothing is lost by removing it: the worker loads the
-   runtime by name (`dlssnr_amd_pass1.dll`), which is the file the script just
-   wrote.
-4. Check the result:
+`tools\prepare_amd_runtime.py` still works for a runtime you install yourself:
+point it at the folder the author's installer wrote, and it produces the same
+two files plus the A/B pair. It also **deletes `version.dll`** from that folder,
+and that is not housekeeping: NeuralScreen's worker reads file versions, so it
+statically imports `VERSION.dll` - a system module name. Windows resolves such an
+import from the program's own folder first, and `version.dll` is not a KnownDLL,
+so the runtime sitting there under that name (the installer names it exactly
+that) is the file the import binds to. That starts a **second, self-initialising
+copy of the engine** inside the worker, before NeuralScreen has set anything up,
+with its own frame loop. Two engines in one process is the documented way to get
+a black picture. Nothing is lost by removing it: the worker loads the runtime by
+name (`dlssnr_amd_pass1.dll`).
+
+## 2. Check it, then run it
 
    ```
    native\probe_amd.exe
    ```
 
-   It reports what it found, whether the build is the known one, and whether
-   HIP sees your card. **Keep `native\probe_amd.log`** - it is the first thing
-   a bug report should carry.
+   It reports what it found, which runtime image it is, and whether HIP sees your
+   card. **Keep `native\probe_amd.log`** - it is the first thing a bug report
+   should carry.
 
 The FidelityFX upscaler (`amd_fidelityfx_upscaler_dx12.dll`) needs nothing from
 you: it **ships in the archive**, because AMD's licence permits redistributing
