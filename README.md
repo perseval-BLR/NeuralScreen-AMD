@@ -27,9 +27,9 @@ this build is meant to find out.
 > **[README.ru.md](README.ru.md)** / **[TECHNICAL.ru.md](TECHNICAL.ru.md)**.
 
 > **Notice.** Not affiliated with NVIDIA or AMD. NVIDIA, DLSS and the NVIDIA
-> logo are NVIDIA Corporation's trademarks. The neural pass drives a
-> third-party runtime that is not bundled — its licence forbids it; see
-> `native/AMD.md`. Rights holders: say the word and it ships without it.
+> logo are NVIDIA Corporation's trademarks. The AMD neural runtime is a
+> third-party component and ships with this build; see `native/AMD.md`.
+> Rights holders: say the word and it ships without it.
 
 | Menu, light | Menu, dark | Settings | Window list |
 |---|---|---|---|
@@ -53,10 +53,10 @@ screen down the middle to show what the effect does.*
 - **AMD Adrenalin 26.1.1 or newer, and Windows up to date.** The pass needs
   the HIP 7 runtime that ships with the driver; whether an older driver can
   work at all is one of the open questions.
-- **The neural runtime** — third-party, installed once by hand: step by step
-  in **[native/AMD.md](native/AMD.md)**. One command fetches the installer from
-  the author's release page; without the runtime the program still starts and
-  logs what is missing.
+- **The neural runtime ships in the archive** — the runtime, its weights and the
+  FidelityFX upscaler are all in `native\`, so unpacking is enough. What each
+  file is, and which of the two runtime builds runs, is in
+  **[native/AMD.md](native/AMD.md)**.
 - **Nothing else installed.** The release archive brings its own Python, and
   the FidelityFX upscaler the pass dispatches (AMD's own DLL, redistributed
   under AMD's licence — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
@@ -65,8 +65,10 @@ screen down the middle to show what the effect does.*
 
 1. Download the archive from [Releases](https://github.com/perseval-BLR/NeuralScreen-AMD/releases)
    and unpack it anywhere.
-2. Set up the neural runtime — **[native/AMD.md](native/AMD.md)**, two steps.
-3. Run **`NeuralScreen.exe`**.
+2. Run **`NeuralScreen.exe`**.
+
+The neural pass has everything it needs from the first start; `native\probe_amd.exe`
+prints an inventory (files, build, whether HIP sees your card) if you want to check.
 
 Windows will probably warn you about an unknown publisher — the program is not
 signed with a paid certificate. Click *More info* → *Run anyway*, or use
@@ -144,8 +146,9 @@ Chinese, Japanese and Korean.
 
 ## The runtime
 
-The neural pass drives a third-party runtime that is not bundled — its
-licence forbids redistribution. How to prepare it: **[native/AMD.md](native/AMD.md)**.
+The neural pass drives a third-party runtime that **ships in this archive**,
+together with its weights — unpacking is enough. What each file is, and which of
+the two runtime builds runs: **[native/AMD.md](native/AMD.md)**.
 
 ## Recording and screenshots
 
