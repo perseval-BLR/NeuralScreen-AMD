@@ -4834,8 +4834,30 @@ static bool OpenWgc(HWND hwnd)
     // used to be called first and outside a try block; on a process where no
     // dependency happened to initialise COM for us, C++/WinRT terminated the
     // worker with 0xC0000409 before WGC could even log a refusal.
-    try { winrt::init_apartment(winrt::apartment_type::multi_threaded); }
-    catch (winrt::hresult_error const &) {}
+    //
+    // Asking COM first is the cheap half of that lesson, and it is here rather
+    // than nowhere because a terminate in this path is unfalsifiable from a
+    // report: CoInitializeEx reports the apartment (S_FALSE already owned,
+    // RPC_E_CHANGED_MODE owned by someone else) as a value, where C++/WinRT's
+    // own failure path does not throw - it terminates, and a terminate is
+    // __fastfail (0xC0000409), which bypasses SEH, the vectored handlers and
+    // SetUnhandledExceptionFilter alike. Such a death leaves no [crash] line,
+    // no address and no module.
+    //
+    // NOT CLAIMED: that this is what the three Radeon reports hit. Their logs
+    // put the last line at `[cap] adapter 0`, which is past this point, so the
+    // crash is later in this function than the apartment init. This block makes
+    // the earlier half impossible to misread; it does not close the later one.
+    {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (com == RPC_E_CHANGED_MODE)
+            Log("[wgc] this thread already owns an apartment of another kind - "
+                "carrying on (WGC needs no init here)");
+        else if (FAILED(com))
+            Log("[wgc] CoInitializeEx failed 0x%08X - carrying on", com);
+        try { winrt::init_apartment(winrt::apartment_type::multi_threaded); }
+        catch (winrt::hresult_error const &) {}
+    }
     try
     {
         if (!ns_wgc::GraphicsCaptureSession::IsSupported())

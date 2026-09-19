@@ -555,6 +555,111 @@ def _bounded_utf8_tail(text: str, limit: int) -> bytes:
     return raw[-limit:].decode("utf-8", errors="ignore").encode("utf-8")
 
 
+#: How much of a minidump a bundle may carry. The worker's own crash is a
+#: fast fail, and a fast fail cannot be caught: 0xC0000409 (STACK_BUFFER_OVERRUN)
+#: is __fastfail, which bypasses SEH, the vectored handlers and
+#: SetUnhandledExceptionFilter alike, so the host's CrashFilter is never called
+#: and no [crash] line with an address or a module is ever written. A three-Radeon
+#: report showed exactly that: six crashes in one log, zero [crash] lines.
+#:
+#: That leaves the process's own dump as the only place the faulting stack
+#: exists, and Windows writes one only when LocalDumps is configured. This is
+#: the collector for it - so a bundle carries the reason instead of the symptom.
+CRASH_DUMP_BYTES = 96 * 1024 * 1024
+_CRASH_DUMP_LIMIT = 3
+#: Only our own process's dumps, by executable name. A bundle must never ship
+#: some other program's crash (the same machine is a workstation).
+_CRASH_DUMP_EXES = ("nvngx.dll", "dlss5-feed-host64.exe")
+
+
+def _crash_dump_dirs() -> list[Path]:
+    """Where Windows writes dumps, in the order it is configured to."""
+    dirs: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        dirs.append(Path(local) / "CrashDumps")
+    program = os.environ.get("ProgramData")
+    if program:
+        dirs.append(Path(program) / "Microsoft" / "Windows" / "WER" / "ReportArchive")
+    return dirs
+
+
+def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes]]:
+    """Newest minidumps of OUR worker, as ``(name, bytes)`` for the archive.
+
+    Read-only and best effort: a missing folder, a dump another process still
+    holds, anything at all - the bundle is built without it rather than fail.
+    """
+    found: list[tuple[float, Path]] = []
+    for directory in _crash_dump_dirs():
+        try:
+            for entry in directory.glob("*.dmp"):
+                name = entry.name.casefold()
+                if not any(exe.casefold() in name for exe in _CRASH_DUMP_EXES):
+                    continue
+                try:
+                    found.append((entry.stat().st_mtime, entry))
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    found.sort(key=lambda item: item[0], reverse=True)
+
+    dumps: list[tuple[str, bytes]] = []
+    for _, path in found[:limit]:
+        try:
+            if path.stat().st_size > CRASH_DUMP_BYTES:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        # The archive name is ours, never the raw file name: a dump name can
+        # carry a username, and this zip is meant to be attached to an issue.
+        dumps.append((f"crashdump/{len(dumps) + 1}.dmp", data))
+    return dumps
+
+
+def crash_dump_policy() -> dict[str, Any]:
+    """Whether this machine WOULD have written one, and where to look.
+
+    Reported even when no dump was found, because the two answers differ:
+    "the crash left no dump" and "this machine is not configured to write
+    dumps at all" need different follow-ups, and a report that says only
+    "no dump" sends the reader after the wrong one.
+    """
+    configured = False
+    if os.name == "nt":
+        try:
+            import winreg
+
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",
+            )
+            try:
+                winreg.QueryValueEx(key, "DumpFolder")
+                configured = True
+            except OSError:
+                # The parent key exists, but only per-application subkeys do -
+                # which does NOT catch a process we did not name.
+                configured = False
+            finally:
+                winreg.CloseKey(key)
+        except OSError:
+            configured = False
+        except ImportError:
+            configured = False
+    return {
+        "local_dumps_configured": configured,
+        "searched": [str(p) for p in _crash_dump_dirs()],
+        "note": (
+            "a fast fail (0xC0000409) bypasses SetUnhandledExceptionFilter, so "
+            "the worker's own crash line cannot exist; the dump is the only "
+            "record of the faulting stack"
+        ),
+    }
+
+
 def _json_bytes(report: Mapping[str, Any]) -> bytes:
     return (
         json.dumps(
@@ -576,7 +681,12 @@ def _write_zip_entry(archive: zipfile.ZipFile, name: str, data: bytes) -> None:
     archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
-def _atomic_zip(destination: Path, report: bytes, log_tail: bytes) -> None:
+def _atomic_zip(
+    destination: Path,
+    report: bytes,
+    log_tail: bytes,
+    crash_dumps: Sequence[tuple[str, bytes]] = (),
+) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
@@ -587,6 +697,8 @@ def _atomic_zip(destination: Path, report: bytes, log_tail: bytes) -> None:
             with zipfile.ZipFile(handle, mode="w") as archive:
                 _write_zip_entry(archive, "diagnostics.json", report)
                 _write_zip_entry(archive, "log_tail.txt", log_tail)
+                for name, data in crash_dumps:
+                    _write_zip_entry(archive, name, data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, destination)
@@ -645,6 +757,16 @@ def create_diagnostic_bundle(
     safe_log = _bounded_utf8_tail(safe_log_text, request.max_log_bytes)
     log_metadata["bytes"] = len(safe_log)
 
+    # The dumps come with the bundle: on a fast-fail crash they are the only
+    # record of the faulting stack (see collect_crash_dumps). The policy is
+    # reported even when none was found, so "no dump here" is never confused
+    # with "this machine does not write dumps".
+    crash_dumps = collect_crash_dumps()
+    log_metadata["crash_dumps"] = {
+        "included": len(crash_dumps),
+        "policy": crash_dump_policy(),
+    }
+
     report = _sanitize_value(
         {
             "schema": SCHEMA,
@@ -669,15 +791,18 @@ def create_diagnostic_bundle(
     # idempotent, no archive replaces the existing destination.
     _assert_report_scrubbed(report, request.sensitive_values)
     _assert_scrubbed(safe_log.decode("utf-8", errors="strict"), request.sensitive_values)
-    _atomic_zip(target, report_bytes, safe_log)
+    _atomic_zip(target, report_bytes, safe_log, crash_dumps)
     return target
 
 
 __all__ = [
+    "CRASH_DUMP_BYTES",
     "DEFAULT_LOG_BYTES",
     "MAX_LOG_BYTES",
     "DiagnosticBundleRequest",
+    "collect_crash_dumps",
     "collect_system_snapshot",
+    "crash_dump_policy",
     "create_diagnostic_bundle",
     "discover_application_identity",
     "inspect_runtime",
