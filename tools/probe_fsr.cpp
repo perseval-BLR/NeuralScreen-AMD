@@ -259,6 +259,119 @@ int NonBlackPixels(ID3D12Device *dev, ID3D12GraphicsCommandList *cl,
     return non_black;
 }
 
+// The engine's own measure of a frame is the MEAN of what it is handed
+// (`auto-exposure: encoded mean %.3f`), and the log prints three decimals, so
+// a frame the engine calls 0.000 can still carry a pixel here and there.
+// Counting non-zero pixels cannot answer that question - and it is the
+// question every black-screen report actually turns on: the engine says the
+// frame was black while a non-black count says it was not.
+//
+// Two more ways a non-zero count can lie, both handled here:
+//   * it tests EVERY component, alpha included. A frame of pure black RGB with
+//     a=1 in every pixel ("not all zero") counts as fully non-black.
+//   * it says nothing about magnitude: 1/255 per channel passes it and still
+//     reads as black to anything that averages.
+// So both numbers come out of ONE readback: the mean over the colour channels
+// (what the engine averages) alongside the old count, which is kept because it
+// is what every earlier report quoted.
+static float HalfToFloat(uint16_t h)
+{
+    const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    uint32_t bits;
+    if (e == 0)
+    {
+        if (m == 0) bits = s << 31;
+        else
+        {
+            int exp = -1; uint32_t mm = m;
+            do { ++exp; mm <<= 1; } while ((mm & 0x400u) == 0);
+            bits = (s << 31) | (static_cast<uint32_t>(127 - 15 - exp) << 23) |
+                   ((mm & 0x3FFu) << 13);
+        }
+    }
+    else if (e == 31) bits = (s << 31) | 0x7F800000u | (m << 13);
+    else bits = (s << 31) | ((e - 15 + 127) << 23) | (m << 13);
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+
+struct Stats { int non_black; double colour_mean; };
+
+Stats FrameStats(ID3D12Device *dev, ID3D12GraphicsCommandList *cl,
+                 ID3D12Resource *src, D3D12_RESOURCE_STATES src_state,
+                 DXGI_FORMAT fmt, UINT w, UINT h, std::string &why) {
+    Stats out{ -1, -1.0 };
+    const bool half = (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT);
+    const UINT bpp = half ? 8u : 4u;
+    const UINT pitch = Align256(w * bpp);
+    const UINT64 bytes = (UINT64)pitch * h;
+
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = bytes; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+    bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ID3D12Resource *rb = nullptr;
+    if (FAILED(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                                            D3D12_RESOURCE_STATE_COPY_DEST,
+                                            nullptr, __uuidof(ID3D12Resource),
+                                            (void **)&rb))) {
+        why = "readback buffer failed";
+        return out;
+    }
+
+    Barrier(cl, src, src_state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION d{}, s{};
+    d.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    d.pResource = rb;
+    d.PlacedFootprint.Offset = 0;
+    d.PlacedFootprint.Footprint.Format = fmt;
+    d.PlacedFootprint.Footprint.Width = w;
+    d.PlacedFootprint.Footprint.Height = h;
+    d.PlacedFootprint.Footprint.Depth = 1;
+    d.PlacedFootprint.Footprint.RowPitch = pitch;
+    s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    s.pResource = src; s.SubresourceIndex = 0;
+    cl->CopyTextureRegion(&d, 0, 0, 0, &s, nullptr);
+    Barrier(cl, src, D3D12_RESOURCE_STATE_COPY_SOURCE, src_state);
+
+    std::string err;
+    if (!SubmitAndWait(dev, cl, err)) { rb->Release(); why = err; return out; }
+
+    double sum = 0.0;
+    uint64_t n = 0;
+    int non_black = 0;
+    uint8_t *p = nullptr;
+    D3D12_RANGE all{0, (SIZE_T)bytes};
+    if (SUCCEEDED(rb->Map(0, &all, (void **)&p))) {
+        for (UINT y = 0; y < h; ++y) {
+            const uint8_t *row = p + (size_t)y * pitch;
+            for (UINT x = 0; x < w; ++x) {
+                const uint8_t *px = row + (size_t)x * bpp;
+                bool any = false;
+                for (UINT c = 0; c < bpp; ++c) if (px[c]) { any = true; break; }
+                if (any) ++non_black;
+                for (UINT c = 0; c < 3; ++c) {   // colour only: alpha is not what the engine averages
+                    if (half) sum += HalfToFloat(reinterpret_cast<const uint16_t *>(px)[c]);
+                    else      sum += px[c] / 255.0;
+                    ++n;
+                }
+            }
+        }
+        D3D12_RANGE none{0, 0};
+        rb->Unmap(0, &none);
+        out.non_black = non_black;
+        out.colour_mean = n ? sum / static_cast<double>(n) : 0.0;
+    } else {
+        why = "readback map failed";
+    }
+    rb->Release();
+    return out;
+}
+
 // A root signature matching the host's own binding layout: one table holding
 // two SRVs (t0, t1) and one UAV (u0), plus four 32-bit constants in b0. The
 // extra SRV slot is there because the host writes three descriptors per slot
@@ -450,6 +563,7 @@ int main() {
     if (!have_pso) printf("  %s\n", why3.c_str());
 
     int conv_non_black = -1, net_non_black = -1;
+    double conv_mean = -1.0, net_mean = -1.0;
     if (have_pso) {
         // A desktop-like sRGB frame: mid-grey with a warm patch. Never black.
         const uint8_t bgra[4] = { 200, 120, 80, 255 };
@@ -515,11 +629,13 @@ int main() {
             Barrier(cl, fsr_in, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-            conv_non_black = NonBlackPixels(dev, cl, fsr_in,
+            const Stats cs = FrameStats(dev, cl, fsr_in,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                DXGI_FORMAT_R16G16B16A16_FLOAT, work_w, work_h, 8, why4);
+                DXGI_FORMAT_R16G16B16A16_FLOAT, work_w, work_h, why4);
+            conv_non_black = cs.non_black;
+            conv_mean = cs.colour_mean;
             printf("  the conversion's output (what the dispatch reads): "
-                   "non-black pixels=%d\n", conv_non_black);
+                   "non-black pixels=%d  mean=%.4f\n", conv_non_black, conv_mean);
         } else {
             printf("  chain setup failed: %s\n", why4.c_str());
         }
@@ -530,11 +646,13 @@ int main() {
             SimpleList(dev, &alloc, &cl);
             std::string why5;
             if (fsr.DispatchNet(cl, fsr_in, depth, motion, net, 16.6f, false, why5)) {
-                net_non_black = NonBlackPixels(dev, cl, net,
+                const Stats ns = FrameStats(dev, cl, net,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    DXGI_FORMAT_R16G16B16A16_FLOAT, work_w, work_h, 8, why5);
+                    DXGI_FORMAT_R16G16B16A16_FLOAT, work_w, work_h, why5);
+                net_non_black = ns.non_black;
+                net_mean = ns.colour_mean;
                 printf("  the dispatch's output (what the engine edits):   "
-                       "non-black pixels=%d\n", net_non_black);
+                       "non-black pixels=%d  mean=%.4f\n", net_non_black, net_mean);
             } else {
                 printf("  the dispatch refused: %s\n", why5.c_str());
             }
@@ -561,6 +679,43 @@ int main() {
           "THE HOST'S CONVERSION PRODUCES A NON-BLACK FRAME");
     Check(net_non_black > 0,
           "the dispatch's output carries pixels (the engine's input)");
+
+    // The metric itself, controlled. A count of non-zero pixels and a mean of
+    // the colour channels are different measurements, and only the second one
+    // answers `encoded mean 0.000`. A negative control proves the new one can
+    // report a black frame AS black - otherwise "mean > 0" would pass on an
+    // instrument that cannot fail.
+    {
+        ID3D12CommandAllocator *a2 = nullptr;
+        ID3D12GraphicsCommandList *l2 = nullptr;
+        SimpleList(dev, &a2, &l2);
+        ID3D12Resource *blk = Tex(dev, work_w, work_h,
+                                  DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        const uint8_t zero[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        ID3D12Resource *up2 = nullptr;
+        std::string why6;
+        double black_mean = -1.0;
+        if (blk != nullptr && UploadPattern(dev, l2, blk,
+                DXGI_FORMAT_R16G16B16A16_FLOAT, work_w, work_h, zero, 8, why6, &up2)) {
+            const Stats b = FrameStats(dev, l2, blk,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                DXGI_FORMAT_R16G16B16A16_FLOAT, work_w, work_h, why6);
+            black_mean = b.colour_mean;
+        }
+        printf("  negative control: a black frame reads as mean=%.4f\n", black_mean);
+        Check(black_mean == 0.0,
+              "the mean metric reports a black frame as 0.0000");
+        if (up2) up2->Release();
+        if (blk) blk->Release();
+        if (l2) l2->Release();
+        if (a2) a2->Release();
+    }
+
+    Check(conv_mean > 0.0,
+          "THE CONVERSION'S MEAN IS NOT ZERO (the engine's own measure)");
+    Check(net_mean > 0.0,
+          "THE DISPATCH OUT'S MEAN IS NOT ZERO (what the engine averages)");
 
     for (ID3D12Resource *r : { depth, motion, out }) if (r) r->Release();
     dev->Release();
