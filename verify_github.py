@@ -91,6 +91,21 @@ def main() -> int:
              "README.md", "README.ru.md", "TECHNICAL.md", "TECHNICAL.ru.md"]
     tmp = ROOT / "_work" / "verify-github"
     tmp.mkdir(parents=True, exist_ok=True)
+    # EVERY downloaded copy is deleted at the end of this run (see _cleanup
+    # below). It used to keep them: 11 archives at ~240 MB each accumulated
+    # into 2.4 GB of release copies that were already on GitHub, and a folder
+    # named "verify" read as evidence rather than as a cache. Anything this
+    # script needs it can fetch again in seconds.
+    def _cleanup() -> None:
+        for f in tmp.glob("*"):
+            try:
+                f.unlink()
+            except OSError:
+                pass           # a leftover file is not worth failing a release
+        try:
+            tmp.rmdir()
+        except OSError:
+            pass               # something else put a file there; leave it
     for name in files:
         if name.endswith(".png"):
             local = _sha256(ROOT / name)
@@ -162,6 +177,7 @@ def main() -> int:
     print(f"    [OK] repo description: {desc}")
 
     print("=" * 60)
+    _cleanup()
     if failures:
         print(f"FAIL: {len(failures)}")
         for f in failures:
