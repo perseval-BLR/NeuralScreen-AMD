@@ -4156,10 +4156,53 @@ static float g_pw_exposure = 1.0f;   // current smoothed value
 static double g_pw_last = 0.0;       // last update time (GetTickCount64 ms)
 static bool   g_pw_logged = false;
 
+//: The CAPTURE's own mean luminance, and how many recent frames were black.
+//:
+//: Both numbers are free: UpdateAdaptiveExposure already sums g_gray_map on
+//: every captured frame and divides by the pixel count. What was missing is
+//: that nobody kept the result, and that is the one fact every black-screen
+//: report has lacked. The engine says `encoded mean 0.000` about the frame IT
+//: was handed, while our own log never says whether the frame we captured was
+//: black to begin with - so the two very different cases read the same from
+//: outside:
+//:
+//:   capture mean > 0, engine mean 0  -> the loss is inside our pass
+//:   capture mean == 0                -> there was nothing to lose
+//:
+//: Kept as a milli-unit integer so the reader thread sees a torn-free value,
+//: and read by the AMD bridge's periodic report, where the engine's number is
+//: already quoted.
+static volatile LONG g_cap_mean_milli = -1;   // -1 = not measured yet
+static uint64_t      g_cap_dark_frames = 0;   // frames whose capture mean was 0
+static uint64_t      g_cap_frames = 0;
+
 // Called once per captured frame, after AreaToGray filled g_gray_map.
 static void UpdateAdaptiveExposure()
 {
-    if (!PwEnabled() || !g_gray_mapped || g_gray_w == 0 || g_gray_h == 0)
+    if (!g_gray_mapped || g_gray_w == 0 || g_gray_h == 0)
+    {
+        g_pw_exposure = 1.0f;
+        return;
+    }
+    // The capture's own mean, taken BEFORE the exposure switch is consulted.
+    // The two questions are independent: adaptive exposure is a tuning knob,
+    // while "was the captured frame black" is the fact a black-picture report
+    // turns on. Reading it only when the knob is on would make the answer
+    // disappear for anyone who turned it off - exactly the person most likely
+    // to be staring at a black screen.
+    //
+    // The bytes are summed as integers and scaled once: a division per pixel
+    // was 57 600 of them per frame for a number that is the same either way.
+    uint64_t sum = 0;
+    const size_t n = static_cast<size_t>(g_gray_w) * g_gray_h;
+    for (size_t i = 0; i < n; ++i) sum += g_gray_map[i];
+    const float avg = static_cast<float>(
+        static_cast<double>(sum) / (255.0 * static_cast<double>(n)));
+    InterlockedExchange(&g_cap_mean_milli,
+                        static_cast<LONG>(avg * 1000.0f + 0.5f));
+    ++g_cap_frames;
+    if (avg <= 0.0f) ++g_cap_dark_frames;
+    if (!PwEnabled())
     {
         g_pw_exposure = 1.0f;
         return;
@@ -4193,16 +4236,10 @@ static void UpdateAdaptiveExposure()
     // Average luminance of the AREA frame (0..1). The bytes are summed as
     // integers and scaled once: a division per pixel was 57 600 of them per
     // frame for a number that is the same either way.
-    uint64_t sum = 0;
-    const size_t n = static_cast<size_t>(g_gray_w) * g_gray_h;
-    for (size_t i = 0; i < n; ++i) sum += g_gray_map[i];
-    const float avg = static_cast<float>(
-        static_cast<double>(sum) / (255.0 * static_cast<double>(n)));
-
-    // smoothstep(dark, lit, avg): 0 in dark scenes, 1 in lit ones. The
-    // exposure goes UP in dark scenes (the network sees a brighter frame
-    // and stops producing artifacts in the shadows - the Ghady983
-    // principle) and stays at 1.0 in lit ones.
+    //
+    // The sum itself is taken above, before the switch, because the same
+    // number answers a second question (was the captured frame black). Doing
+    // it twice would double a per-pixel loop for nothing.
     float t = (avg - dark) / (lit - dark);
     t = (t < 0.0f) ? 0.0f : (t > 1.0f) ? 1.0f : t;
     const float target = mx - (mx - mn) * (t * t * (3.0f - 2.0f * t));

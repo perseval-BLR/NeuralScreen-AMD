@@ -472,6 +472,32 @@ static void AmdEngineHealth()
         Log("[amd] the engine's own measure: %s%s", mean.c_str(),
             black ? "  <- it was handed a BLACK frame (our side produced it)" : "");
     }
+    // ...and OURS, on the capture, in the same breath.
+    //
+    // The engine's number alone cannot separate the two cases a black picture
+    // splits into, and they need opposite work:
+    //
+    //   capture mean > 0, engine mean 0  -> the frame WAS there; the loss is
+    //                                       inside our own pass
+    //   capture mean == 0                -> there was nothing to lose; go and
+    //                                       look at the capture instead
+    //
+    // Until now only the engine's half was reported, so a reader could not
+    // tell them apart from any log we have ever received.
+    {
+        const LONG milli = InterlockedCompareExchange(&g_cap_mean_milli, 0, 0);
+        if (milli < 0)
+            Log("[amd] the capture's own mean luminance: not measured yet "
+                "(no captured frame has reached the guides)");
+        else
+            Log("[amd] the capture's own mean luminance: %.3f over %llu frames "
+                "(%llu of them fully black)%s",
+                static_cast<double>(milli) / 1000.0,
+                static_cast<unsigned long long>(g_cap_frames),
+                static_cast<unsigned long long>(g_cap_dark_frames),
+                milli == 0 ? "  <- THE CAPTURE ITSELF IS BLACK; the pass is not "
+                             "what lost the picture" : "");
+    }
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
     const std::string frames = last_with("frames ");
