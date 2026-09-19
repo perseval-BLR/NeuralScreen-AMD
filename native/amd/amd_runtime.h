@@ -284,6 +284,24 @@ public:
     bool HooksApplicable() const { return hooks_applicable_; }
     unsigned long HooksMs() const { return hooks_ms_; }
 
+    //: The engine's OWN verdict that it came up: the `engine init ok` line it
+    //: writes to its own log right after its initialisation returns.
+    //:
+    //: This is a different question from Ready(), and the difference is the
+    //: whole reason the field exists. Load() calls the engine's init entry and
+    //: checks its return value - and our logs show `AMD path active` with the
+    //: engine's own log carrying no `engine init ok` and no `env: HIP` at all,
+    //: on twelve consecutive launches of one machine. So a host that reports
+    //: Ready() can still be talking to an engine that never started, and the
+    //: only witness is the engine's own line.
+    //:
+    //: Never gates anything. It is read once, after init, and printed.
+    bool EngineInitSeen() const { return engine_init_seen_; }
+    //: Whether the wait for that line could apply (false for a build that
+    //: writes no such line), so the log can say "not applicable" rather than
+    //: "not seen" - the same three-answer discipline as HooksApplicable().
+    bool EngineInitApplicable() const { return engine_init_applicable_; }
+
     // Which of the two known images was found (Stock when the host and the
     // runtime would both try to drive the frame; Patched when the runtime's
     // own hook installer is off and only the host drives).
@@ -383,6 +401,15 @@ private:
     //: reader after a fault, "not applicable" is simply the shape of that build.
     bool hooks_applicable_ = false;
     unsigned long hooks_ms_ = 0;
+    //: The engine's own `engine init ok` line, read from ITS log after our
+    //: init call returned success - the only witness that the engine really
+    //: started. `hooks_seen_` answers a different question (our detours) and
+    //: reads identically whether the engine came up or not.
+    bool engine_init_seen_ = false;
+    //: False when this build cannot print such a line at all, so the log says
+    //: "not applicable" instead of sending a reader after a fault that is not
+    //: there.
+    bool engine_init_applicable_ = true;
     //: Where the runtime's log ended before this run loaded the module. The
     //: hook wait searches only bytes after this, because the log is appended
     //: to across runs and a whole-file search is satisfied by a previous

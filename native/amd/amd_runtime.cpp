@@ -647,6 +647,29 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // Only after init returns: the flag the engine expects set once ready.
     At<uint8_t>(module_, rva::kFlagAfterInit) = 1;
 
+    // Ask the ENGINE's own log whether it actually came up, because our return
+    // value cannot answer that. `engine init %s` is the engine's own format
+    // string and the line appears only after its initialisation runs; a machine
+    // whose engine never reached it still gets `AMD path active` from the host,
+    // which is how twelve consecutive launches read as healthy while the engine
+    // had not started.
+    //
+    // Read only what THIS run appended (log_from_): the file is appended to
+    // across runs, so a whole-file search is answered by a previous launch.
+    {
+        const std::wstring engine_log = runtime_dir + L"\\dlssnr_on_amd.log";
+        const DWORD budget_ms = 3000;
+        DWORD waited = 0;
+        while (waited < budget_ms) {
+            if (LogContains(engine_log, "engine init ok", log_from_, nullptr)) {
+                engine_init_seen_ = true;
+                break;
+            }
+            Sleep(25);
+            waited += 25;
+        }
+    }
+
     ready_ = true;
     return true;
 }

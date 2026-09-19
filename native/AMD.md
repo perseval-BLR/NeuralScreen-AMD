@@ -136,6 +136,8 @@ lines. Nothing has to be turned on: every line below is written always.
 | `[amd] engine surfaces at 1280x720` | the resolution the network runs at |
 | `[amd] N frames, avg X ms, worst Y ms, timeouts Z` | every 30 s: how it is doing, and how many frames have gone by since the engine last queued a job |
 | `[amd] the engine has recorded NO job in the last 60 frames` | the frames reach it but nothing is queued - a feeding problem, not a picture one |
+| `[amd] engine init: ok (the engine wrote its own 'engine init ok')` | the engine itself confirmed it came up - the line below is not this |
+| `[amd] engine init: THE ENGINE NEVER CAME UP` | our init call returned success, but the engine's own log has no `engine init ok`: nothing after this line describes a working pass |
 | `[amd] the engine's own measure: ... encoded mean 0.000` | the engine measured the frame it was handed and found it black |
 | `[amd] the capture's own mean luminance: 0.412 over N frames` | the same measurement on OUR side: what the desktop capture actually contained |
 | `[amd] ... (N of them fully black)` | how many captured frames were entirely black - a non-zero count means the capture, not the pass, is losing the picture |

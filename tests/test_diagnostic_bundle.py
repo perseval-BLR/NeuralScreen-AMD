@@ -199,6 +199,62 @@ class DiagnosticBundleTests(unittest.TestCase):
             self.assertFalse(
                 report["log"]["crash_dumps"]["policy"]["local_dumps_configured"])
 
+    def test_engine_log_rides_along_and_secrets_stay_out(self) -> None:
+        """The engine's own log is the only place that says it initialised.
+
+        Every black-picture report carried the engine's `encoded mean 0.000`
+        while nothing said whether the engine had come up at all - and the
+        answer sat in a file nobody attached. The negative controls are the
+        point: a machine without that file must say so, and its contents must
+        be scrubbed like everything else.
+        """
+        engine = self.work / "native" / "dlssnr_on_amd.log"
+        engine.parent.mkdir()
+        engine.write_text(
+            "dlssnr_amd v0.2.17 loaded\n"
+            "env: HIP device 0: AMD Radeon RX 9070 XT, arch gfx1201\n"
+            "engine init ok\n"
+            r"game exe C:\Users\Alice\Games\game.exe" "\n"
+            "opaque=opaque-secret-value\n",
+            encoding="utf-8",
+        )
+
+        with mock.patch.object(diagnostics, "BASE_DIR", self.work), \
+             mock.patch.dict(diagnostics.os.environ, {}, clear=False):
+            diagnostics.os.environ.pop("NS_AMD_DIR", None)
+            raw, meta = diagnostics.collect_runtime_log()
+            self.assertTrue(meta["found"])
+            self.assertIn(b"engine init ok", raw)
+
+            bundle = diagnostics.create_diagnostic_bundle(
+                self.work / "with-engine-log.zip", self.request())
+            with zipfile.ZipFile(bundle) as archive:
+                names = archive.namelist()
+                self.assertIn("amd_runtime_log_tail.txt", names)
+                carried = archive.read("amd_runtime_log_tail.txt").decode("utf-8")
+                report = json.loads(archive.read("diagnostics.json"))
+            self.assertIn("engine init ok", carried)
+            # Same gate as the host log: nothing personal survives.
+            self.assertNotIn("Alice", carried)
+            self.assertNotIn("opaque-secret-value", carried)
+            self.assertTrue(report["log"]["runtime_log"]["found"])
+
+        # Negative control: no file at all is reported as such, and the bundle
+        # is still built - an absent log must never fail the collection.
+        empty = self.work / "elsewhere"
+        empty.mkdir()
+        with mock.patch.object(diagnostics, "BASE_DIR", empty):
+            raw, meta = diagnostics.collect_runtime_log()
+            self.assertEqual(raw, b"")
+            self.assertFalse(meta["found"])
+            bundle = diagnostics.create_diagnostic_bundle(
+                self.work / "no-engine-log.zip", self.request())
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertNotIn("amd_runtime_log_tail.txt", archive.namelist())
+                report = json.loads(archive.read("diagnostics.json"))
+            self.assertFalse(report["log"]["runtime_log"]["found"])
+            self.assertIn("note", report["log"]["runtime_log"])
+
     def test_existing_bundle_survives_publish_failure(self) -> None:
         destination = self.work / "diagnostics.zip"
         destination.write_bytes(b"previous-complete-bundle")

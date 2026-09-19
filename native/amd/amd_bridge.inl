@@ -1334,6 +1334,22 @@ static bool AmdInit()
         Log("[amd] the runtime's hooks were NOT seen - the frames may not reach "
             "it; its own log sits next to the DLL");
 
+    // The engine's own verdict, which is NOT the line above. Our detour check
+    // answers "did the runtime install its hooks"; it reads identically whether
+    // the engine started or not, so a report could say `AMD path active` twelve
+    // times while the engine's own log carried no `engine init ok` and no
+    // `env: HIP` at all - and every later number in the report was measured
+    // against an engine that never came up. This line closes that hole.
+    if (!g_amd.runtime.EngineInitApplicable())
+        Log("[amd] engine init: not applicable for this build");
+    else if (g_amd.runtime.EngineInitSeen())
+        Log("[amd] engine init: ok (the engine wrote its own 'engine init ok')");
+    else
+        Log("[amd] engine init: THE ENGINE NEVER CAME UP - our init call returned "
+            "success but its own log carries no 'engine init ok' after this "
+            "launch. Nothing downstream of this line describes a working pass; "
+            "the cause is in that log next to the DLL, not in the picture.");
+
     // Re-assert the crash filter: the engine installs its own from DllMain and
     // replaces the process's, which is why the second Radeon report carried no
     // [crash] line while the engine's own log carried four. Its filter writes

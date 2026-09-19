@@ -619,6 +619,69 @@ def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes
     return dumps
 
 
+#: The AMD runtime writes its own log beside itself, and it is the ONLY place
+#: that says whether the engine came up: `env: HIP device ...`, `engine init ok`,
+#: `staging ready`, the network's own job timings. Our log cannot answer that -
+#: it checks OUR hooks, so `hooks are in place` reads the same whether the
+#: engine started or not. That gap cost a two-day detour: every black-picture
+#: report carried the engine's `encoded mean 0.000` while nothing said the
+#: engine had ever initialised, and the answer was sitting in a file nobody
+#: attached. Collect it so a bundle carries both halves.
+_AMD_LOG_NAMES = ("dlssnr_on_amd.log",)
+#: The runtime searches these, in this order, for the files it drives.
+_AMD_LOG_DIRS = ("native", "native/amd", "")
+
+
+def _amd_log_candidates() -> list[Path]:
+    """Where the AMD runtime's own log may sit, next to the worker."""
+    out: list[Path] = []
+    override = os.environ.get("NS_AMD_DIR")
+    if override:
+        out.append(Path(override) / _AMD_LOG_NAMES[0])
+    for name in _AMD_LOG_DIRS:
+        for log in _AMD_LOG_NAMES:
+            out.append(BASE_DIR / name / log if name else BASE_DIR / log)
+    return out
+
+
+def collect_runtime_log(max_bytes: int = MAX_LOG_BYTES) -> tuple[bytes, dict[str, Any]]:
+    """The AMD engine's own log tail, as ``(bytes, metadata)`` for the archive.
+
+    Read-only and best effort: the file is written by another process while we
+    read it, so a partial tail is normal and never an error. The metadata is
+    reported even when the file is absent, because "the engine wrote no log"
+    and "we did not look in the right place" need different follow-ups.
+
+    The tail, not the whole file: it is opened in append mode across runs, so
+    its head describes a session that ended long ago.
+    """
+    meta: dict[str, Any] = {
+        "found": False,
+        "file": None,
+        "bytes": 0,
+        "note": (
+            "the AMD runtime's own log; the only place that says whether the "
+            "engine initialised (`engine init ok`) and what its network did"
+        ),
+    }
+    for path in _amd_log_candidates():
+        try:
+            if not path.is_file():
+                continue
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                if size > max_bytes:
+                    handle.seek(size - max_bytes)
+                raw = handle.read(max_bytes)
+        except OSError:
+            continue
+        # The NAME only, never the full path: the path carries a username, and
+        # this archive is meant to be attached to a public issue.
+        meta.update({"found": True, "file": path.name, "bytes": len(raw)})
+        return raw, meta
+    return b"", meta
+
+
 def crash_dump_policy() -> dict[str, Any]:
     """Whether this machine WOULD have written one, and where to look.
 
@@ -686,6 +749,7 @@ def _atomic_zip(
     report: bytes,
     log_tail: bytes,
     crash_dumps: Sequence[tuple[str, bytes]] = (),
+    runtime_log: bytes = b"",
 ) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
@@ -697,6 +761,8 @@ def _atomic_zip(
             with zipfile.ZipFile(handle, mode="w") as archive:
                 _write_zip_entry(archive, "diagnostics.json", report)
                 _write_zip_entry(archive, "log_tail.txt", log_tail)
+                if runtime_log:
+                    _write_zip_entry(archive, "amd_runtime_log_tail.txt", runtime_log)
                 for name, data in crash_dumps:
                     _write_zip_entry(archive, name, data)
             handle.flush()
@@ -767,6 +833,22 @@ def create_diagnostic_bundle(
         "policy": crash_dump_policy(),
     }
 
+    # The engine's own log rides along too. Our log answers "what did the host
+    # do"; only that file answers "did the engine come up", and a report that
+    # carries one without the other cannot be diagnosed - which is exactly what
+    # every black-picture report so far was.
+    raw_runtime_log, runtime_log_meta = collect_runtime_log(request.max_log_bytes)
+    if raw_runtime_log:
+        safe_runtime_text = sanitize_text(
+            raw_runtime_log.decode("utf-8", errors="replace"),
+            sensitive_values=request.sensitive_values,
+        )
+        safe_runtime_log = _bounded_utf8_tail(safe_runtime_text, request.max_log_bytes)
+        runtime_log_meta["bytes"] = len(safe_runtime_log)
+    else:
+        safe_runtime_log = b""
+    log_metadata["runtime_log"] = runtime_log_meta
+
     report = _sanitize_value(
         {
             "schema": SCHEMA,
@@ -791,7 +873,7 @@ def create_diagnostic_bundle(
     # idempotent, no archive replaces the existing destination.
     _assert_report_scrubbed(report, request.sensitive_values)
     _assert_scrubbed(safe_log.decode("utf-8", errors="strict"), request.sensitive_values)
-    _atomic_zip(target, report_bytes, safe_log, crash_dumps)
+    _atomic_zip(target, report_bytes, safe_log, crash_dumps, safe_runtime_log)
     return target
 
 
@@ -801,6 +883,7 @@ __all__ = [
     "MAX_LOG_BYTES",
     "DiagnosticBundleRequest",
     "collect_crash_dumps",
+    "collect_runtime_log",
     "collect_system_snapshot",
     "crash_dump_policy",
     "create_diagnostic_bundle",
