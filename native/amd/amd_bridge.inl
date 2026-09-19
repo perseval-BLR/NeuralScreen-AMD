@@ -658,16 +658,22 @@ static bool NrReady() { return h.feature != nullptr || AmdActive(); }
 // bridge.
 static void AmdCrashCounters(char *out, size_t cap)
 {
+    // The two diagnostic counters are written as numbers only when the loaded
+    // build publishes them: reading address 0 would return the PE header, and a
+    // crash line is the last place that should carry an invented number.
+    const bool sync_known = g_amd.active && g_amd.runtime.SyncCountKnown();
+    const bool timeouts_known = g_amd.active && g_amd.runtime.TimeoutCountKnown();
     _snprintf_s(out, cap, _TRUNCATE,
                 "amd active=%d failed=%d frames=%llu timeouts=%llu refused=%llu "
-                "engine jobs=%u sync=%u engine timeouts=%u",
+                "engine jobs=%u sync=%s engine timeouts=%s",
                 g_amd.active ? 1 : 0, g_amd.failed ? 1 : 0,
                 static_cast<unsigned long long>(g_amd.frames),
                 static_cast<unsigned long long>(g_amd.timeouts),
                 static_cast<unsigned long long>(g_amd.refused),
                 g_amd.active ? g_amd.runtime.JobCount() : 0u,
-                g_amd.active ? g_amd.runtime.SyncCount() : 0u,
-                g_amd.active ? g_amd.runtime.TimeoutCount() : 0u);
+                sync_known ? std::to_string(g_amd.runtime.SyncCount()).c_str() : "n/a",
+                timeouts_known ? std::to_string(g_amd.runtime.TimeoutCount()).c_str()
+                               : "n/a");
 }
 
 // Defined below with the frame; declared here because the router above it
@@ -1149,11 +1155,23 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // Packet off: the engine's counters are the only proof it did anything at
     // all. Worth one line, because "the fence retired" is true even when the
     // engine ignored us completely.
+    //
+    // The sync counter is printed as a number only when the loaded build
+    // publishes it. v0.3.1 has no derived address for it, and printing 0 would
+    // be a claim ("nothing has completed") where the truth is "we cannot see
+    // it" - the two send a reader to different places.
     if (!g_amd.use_packet && (g_amd.frames == 0 || (g_amd.frames % 300) == 0))
     {
-        Log("[amd] engine counters after %llu frames: jobs %u, sync %u",
-            static_cast<unsigned long long>(g_amd.frames),
-            g_amd.runtime.JobCount(), g_amd.runtime.SyncCount());
+        if (g_amd.runtime.SyncCountKnown())
+            Log("[amd] engine counters after %llu frames: jobs %u, sync %u",
+                static_cast<unsigned long long>(g_amd.frames),
+                g_amd.runtime.JobCount(), g_amd.runtime.SyncCount());
+        else
+            Log("[amd] engine counters after %llu frames: jobs %u, sync n/a "
+                "(this build does not publish the completed-jobs counter; the "
+                "engine's own log is the witness here)",
+                static_cast<unsigned long long>(g_amd.frames),
+                g_amd.runtime.JobCount());
     }
 
     // Does the engine actually RECORD anything when we feed it by dispatch?
@@ -1241,16 +1259,26 @@ static void AmdFrameAccounting()
     if (g_amd.last_report_tick == 0 || now - g_amd.last_report_tick >= 30000)
     {
         g_amd.last_report_tick = now;
+        // sync/engine-timeouts are printed only when the build publishes them;
+        // "n/a" and 0 are different answers (see SyncCountKnown). Built as
+        // strings because the field is either a number or the word n/a, and a
+        // format string cannot switch between "%u" and "n/a" in place.
+        char sync_buf[32], timeout_buf[32];
+        _snprintf_s(sync_buf, sizeof(sync_buf), _TRUNCATE, "%u",
+                    g_amd.runtime.SyncCount());
+        _snprintf_s(timeout_buf, sizeof(timeout_buf), _TRUNCATE, "%u",
+                    g_amd.runtime.TimeoutCount());
         Log("[amd] %llu frames, avg %llu ms, worst %llu ms, timeouts %llu, refused %llu "
-            "(engine jobs %u, sync %u, engine timeouts %u, jobs seen %llu, %llu frames "
+            "(engine jobs %u, sync %s, engine timeouts %s, jobs seen %llu, %llu frames "
             "since one)",
             static_cast<unsigned long long>(g_amd.frames),
             static_cast<unsigned long long>(g_amd.frames ? g_amd.eval_ms_sum / g_amd.frames : 0),
             static_cast<unsigned long long>(g_amd.eval_ms_max),
             static_cast<unsigned long long>(g_amd.timeouts),
             static_cast<unsigned long long>(g_amd.refused),
-            g_amd.runtime.JobCount(), g_amd.runtime.SyncCount(),
-            g_amd.runtime.TimeoutCount(),
+            g_amd.runtime.JobCount(),
+            g_amd.runtime.SyncCountKnown() ? sync_buf : "n/a",
+            g_amd.runtime.TimeoutCountKnown() ? timeout_buf : "n/a",
             static_cast<unsigned long long>(g_amd.jobs_seen_total),
             static_cast<unsigned long long>(g_amd.frames_without_job));
         // And what the ENGINE saw, in our file: a healthy host with a black

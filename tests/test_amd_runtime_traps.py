@@ -129,6 +129,84 @@ def main() -> int:
                         + ", ".join(sorted(set(bare))) +
                         " - a hardcoded address is the v0.2.17 one and does not "
                         "follow the hash check that selects the other table")
+    # --- a 0 in the table means "not published", never an address ----------
+    # The derived tables carry 0 for what was never derived on a build (v0.3.1
+    # has no address for the two diagnostic counters, and none of the three
+    # entry points). Zero is not a harmless placeholder: `module_ + 0` is the
+    # image's PE header, whose first four bytes are "MZ\0\0" = 0x00905A4D, so a
+    # read returns 9 466 189 - a made-up number in a log whose job is to be
+    # believed - and a call executes the header as code.
+    #
+    # Checked per FUNCTION, not per field: the same field is reached from
+    # several places (WaitJobs, SyncCount), and a guard in one of them does not
+    # cover the others. A first version of this check searched the whole file
+    # and missed exactly that - removing the guard from WaitJobs still passed,
+    # because SyncCount's copy was found instead.
+    def body_of(name: str) -> str:
+        """The body of a function, up to the next top-level one."""
+        at = cpp.find(name)
+        if at < 0:
+            return ""
+        end = cpp.find("\n}", at)
+        return cpp[at:end if end > 0 else len(cpp)]
+
+    fn_guards = (
+        ("Runtime::WaitJobs", "table_->kSyncCounter == 0"),
+        ("Runtime::SyncCount", "table_->kSyncCounter == 0"),
+        ("Runtime::TimeoutCount", "table_->kTimeoutCounter == 0"),
+        ("Runtime::Shutdown", "table_->kShutdown != 0"),
+    )
+    for fn, guard in fn_guards:
+        body = body_of(fn)
+        if not body:
+            failures.append(f"{fn} not found in the runtime source - this check "
+                            f"can no longer see the zero guard it is testing")
+        elif guard not in body:
+            failures.append(f"{fn} reaches its field without a zero check - on a "
+                            f"build whose table has 0 there this reads the PE "
+                            f"header (0x00905A4D) instead of the field")
+    # The three entry points are bound once, where the module is loaded.
+    for field in ("kInit", "kRecord", "kNotify"):
+        if f"table_->{field} == 0 ? nullptr" not in cpp:
+            failures.append(f"{field} is bound without a zero check - binding "
+                            f"module + 0 hands out the PE header as a callable")
+    if "init_rva == 0" not in cpp:
+        failures.append("guarded_init calls its RVA without checking for 0 - "
+                        "module + 0 executes the PE header, and the exception "
+                        "handler then reports a wrong-build fault about a "
+                        "correctly built image")
+    # The log must not print a number it could not read. Checked by the
+    # conditional, not by the bare string "n/a": that word also appears in the
+    # comments, so searching for it passed even with the logic removed. The
+    # question is whether the print is GATED on the counter being known.
+    for name in ("SyncCountKnown", "TimeoutCountKnown"):
+        if name not in cpp or name not in bridge:
+            failures.append(f"{name} is missing - the log would print 0 where "
+                            f"the truth is 'this build does not publish it'")
+    n_gated = (bridge.count("SyncCountKnown() ?") + bridge.count("TimeoutCountKnown() ?")
+               + bridge.count("SyncCountKnown() ? ") + bridge.count("TimeoutCountKnown() ? "))
+    if n_gated < 3:
+        failures.append(f"only {n_gated} log line(s) gate on the counter being "
+                        f"known - every place that prints sync/engine-timeouts "
+                        f"must print n/a rather than a number it could not read")
+    # And a reader must be able to ask the question at all - and get a real
+    # answer. Checking the definition and not just the name: a body replaced by
+    # `return true` keeps every call site compiling and makes the log claim a
+    # counter it cannot read, which passed a name-only version of this check.
+    for name, field in (("SyncCountKnown", "kSyncCounter"),
+                        ("TimeoutCountKnown", "kTimeoutCounter")):
+        def_at = cpp.find(f"bool Runtime::{name}() const {{")
+        if def_at < 0:
+            failures.append(f"Runtime::{name} is declared but never defined - "
+                            f"the log then has no way to say n/a")
+            continue
+        body = cpp[def_at:def_at + 220]
+        if f"table_->{field} != 0" not in body:
+            failures.append(f"Runtime::{name} does not consult table_->{field} - "
+                            f"it would answer 'known' on a build whose table has "
+                            f"0 there, and the log would print that 0 as a "
+                            f"reading")
+
     # Writing the file every frame would be a file write per frame for nothing.
     if "last_intensity_" not in cpp:
         failures.append("the ini is rewritten on every frame instead of only "

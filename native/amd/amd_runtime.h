@@ -500,6 +500,13 @@ public:
     // the frame and invalidate history before the next record.
     uint32_t TimeoutCount() const;
 
+    // Whether the loaded build publishes those two counters at all. v0.3.1
+    // does not have a derived address for either (they are diagnostic only),
+    // so a reader must be able to tell "zero" from "unknown" - the log prints
+    // n/a for the second, and the numbers are never invented from address 0.
+    bool SyncCountKnown() const;
+    bool TimeoutCountKnown() const;
+
     // True when the engine latched its own failure (status flag non-zero).
     bool FailedOnEngineSide() const;
 

@@ -21,6 +21,13 @@ namespace amd_nr {
 
 namespace {
 
+//: Returned by guarded_init when the build's table carries no address for the
+//: entry point. Not an exception code - the caller distinguishes it so the log
+//: says "this build does not publish it" instead of reporting a fault that did
+//: not happen. Chosen outside the range GetExceptionCode() uses.
+constexpr int kNoInitAddress = -1000;
+
+
 // Raw access to a byte offset inside the loaded image.
 template <class T>
 T &At(void *module, uintptr_t rva) {
@@ -84,6 +91,11 @@ done:
 int guarded_init(void *module, uintptr_t init_rva, void *ctx,
                  const std::string *weights) {
     using InitFn = bool(__fastcall *)(void *, const std::string *);
+    // 0 = the table has no address for this build. Without this, module + 0 is
+    // the PE header and the call would execute it as code - the exception
+    // handler would then report a wrong-build fault about a correctly built
+    // image, which is the wrong conclusion (and the probe had the same shape).
+    if (init_rva == 0) return kNoInitAddress;
     auto fn = reinterpret_cast<InitFn>(
         reinterpret_cast<uintptr_t>(module) + init_rva);
     __try {
@@ -510,12 +522,18 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN,
                            reinterpret_cast<LPCWSTR>(module_), &pinned);
     }
-    init_ = reinterpret_cast<InitFn>(
-        reinterpret_cast<uintptr_t>(module_) + table_->kInit);
-    record_ = reinterpret_cast<RecordFn>(
-        reinterpret_cast<uintptr_t>(module_) + table_->kRecord);
-    notify_ = reinterpret_cast<NotifyFn>(
-        reinterpret_cast<uintptr_t>(module_) + table_->kNotify);
+    // Address 0 in the table means "this build does not publish it" - the
+    // derived tables carry 0 for the entry points that were never derived on
+    // v0.3.1. `module_ + 0` is NOT that address: it is the MZ header of the
+    // image, so a call through it would execute 0x00905A4D as code. Each one
+    // becomes nullptr instead, and the callers already check for nullptr.
+    const uintptr_t base = reinterpret_cast<uintptr_t>(module_);
+    init_ = table_->kInit == 0 ? nullptr
+        : reinterpret_cast<InitFn>(base + table_->kInit);
+    record_ = table_->kRecord == 0 ? nullptr
+        : reinterpret_cast<RecordFn>(base + table_->kRecord);
+    notify_ = table_->kNotify == 0 ? nullptr
+        : reinterpret_cast<NotifyFn>(base + table_->kNotify);
 
     // --- 4. the D3DCompile import ---------------------------------------
     // Best-effort: the System32 compiler is the one the runtime's embedded
@@ -676,6 +694,14 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     hip_set_(chosen);
     const std::string weights_narrow = narrow(weights_path);
     const int rc = guarded_init(module_, table_->kInit, ctx_, &weights_narrow);
+    if (rc == kNoInitAddress) {
+        // Said as what it is. Falling through to the exception branch would
+        // print "EXCEPTION 0x00000001", which reads as a crash of the engine
+        // and is not one.
+        last_error_ = "this build does not publish the init entry point "
+                      "(the offset table has no address for it)";
+        return false;
+    }
     if (rc < 0) {
         last_error_ = "the engine raised an exception on init (code " +
                       std::to_string(-rc) +
@@ -719,7 +745,10 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
 
 void Runtime::Shutdown() {
     if (module_ == nullptr) return;
-    guarded_shutdown(module_, table_->kShutdown);
+    // kShutdown is 0 on a build that does not publish it. Calling
+    // module_ + 0 would run the PE header.
+    if (table_->kShutdown != 0)
+        guarded_shutdown(module_, table_->kShutdown);
     ready_ = false;
 }
 
@@ -885,6 +914,12 @@ void Runtime::Notify(ID3D12CommandQueue *queue, ID3D12CommandList *list) {
 
 bool Runtime::WaitJobs(uint32_t wanted, uint32_t timeout_ms) const {
     if (!ready_ || module_ == nullptr) return false;
+    // A build that does not expose the completed-jobs counter cannot be waited
+    // on by it. Read at address 0 it would return the PE header ("MZ\0\0" =
+    // 0x00905A4D, 9 466 189) and the loop would return instantly, claiming the
+    // jobs finished. Saying "not waitable" is the honest answer; the caller
+    // treats it the same as a timeout.
+    if (table_->kSyncCounter == 0) return false;
     const ULONGLONG deadline = GetTickCount64() + timeout_ms;
     while (At<uint32_t>(module_, table_->kSyncCounter) < wanted) {
         if (GetTickCount64() > deadline) return false;
@@ -900,12 +935,29 @@ uint32_t Runtime::JobCount() const {
 
 uint32_t Runtime::SyncCount() const {
     if (!ready_ || module_ == nullptr) return 0;
+    // 0 = "this build does not publish it", and reading address 0 would return
+    // the PE header instead - a made-up number in a log whose whole job is to
+    // be believed. SyncKnown() is how a caller tells that from a real 0.
+    if (table_->kSyncCounter == 0) return 0;
     return At<uint32_t>(module_, table_->kSyncCounter);
 }
 
 uint32_t Runtime::TimeoutCount() const {
     if (!ready_ || module_ == nullptr) return 0;
+    if (table_->kTimeoutCounter == 0) return 0;   // see SyncCount()
     return At<uint32_t>(module_, table_->kTimeoutCounter);
+}
+
+// Whether this build publishes the two diagnostic counters at all. The log
+// prints "n/a" rather than a number when it does not, because a 0 that means
+// "unknown" and a 0 that means "nothing went wrong" read identically and are
+// not the same answer.
+bool Runtime::SyncCountKnown() const {
+    return ready_ && module_ != nullptr && table_->kSyncCounter != 0;
+}
+
+bool Runtime::TimeoutCountKnown() const {
+    return ready_ && module_ != nullptr && table_->kTimeoutCounter != 0;
 }
 
 bool Runtime::FailedOnEngineSide() const {
