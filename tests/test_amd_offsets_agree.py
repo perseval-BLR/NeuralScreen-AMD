@@ -50,6 +50,22 @@ def probe_offsets(text: str) -> dict:
             for m in re.finditer(r"constexpr\s+uintptr_t\s+(kRva\w+)\s*=\s*0x([0-9a-fA-F]+)", text)}
 
 
+def tool_offsets() -> dict:
+    """{name: value} from tools/prepare_amd_runtime.py's KNOWN_OFFSETS.
+
+    That table exists on purpose - the script a user runs to check a runtime has
+    to be able to DISAGREE with the header rather than import it, or a wrong
+    offset would be confirmed by the very file it came from. So it is a third
+    copy, and this test is what keeps it honest.
+    """
+    import importlib.util
+    path = BASE / "tools" / "prepare_amd_runtime.py"
+    spec = importlib.util.spec_from_file_location("ns_prepare_amd_runtime", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)          # main() is guarded, nothing runs
+    return dict(mod.KNOWN_OFFSETS)
+
+
 def main() -> int:
     failures = []
     header = header_offsets(HEADER.read_text(encoding="utf-8", errors="replace"))
@@ -90,7 +106,31 @@ def main() -> int:
                                 f"itself - offsets belong in amd_runtime.h, and a "
                                 f"second copy is what this test exists to prevent")
 
-    # --- 3. the probe calls what the header names -------------------------
+    # --- 3. the third copy: the tool's own table ---------------------------
+    # tools/prepare_amd_runtime.py carries KNOWN_OFFSETS so it can check a
+    # runtime without importing the header (a table that confirms itself is
+    # worthless). Every name it has must agree with the header, and it must not
+    # have invented one of its own.
+    try:
+        tool = tool_offsets()
+    except Exception as exc:                       # noqa: BLE001 - report, don't crash
+        tool = None
+        failures.append(f"cannot read the offset table in tools/prepare_amd_runtime.py "
+                        f"({type(exc).__name__}: {exc}) - if that table was renamed, "
+                        f"update this test; if it was removed, the check the user "
+                        f"runs before writing a runtime is gone")
+    if tool:
+        for name, value in sorted(tool.items()):
+            if name not in header:
+                failures.append(f"tools/prepare_amd_runtime.py names {name} "
+                                f"(0x{value:x}), which the header does not - a "
+                                f"fourth copy, or a rename that missed the header")
+            elif header[name] != value:
+                failures.append(f"tools/prepare_amd_runtime.py says {name} = "
+                                f"0x{value:x}, the header says 0x{header[name]:x} - "
+                                f"this is the drift the test exists to catch")
+
+    # --- 4. the probe calls what the header names -------------------------
     # If the probe addresses the runtime through its own constants only, the
     # check above covers it; this makes sure it has not started calling an
     # unnamed address instead.

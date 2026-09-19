@@ -181,6 +181,80 @@ def apply_patches(data: bytearray) -> None:
         data[off:off + len(before)] = bytes.fromhex(after_hex)
 
 
+#: Every offset this driver writes, taken from the table the C++ side uses.
+#: Kept as a literal here on purpose: this module is the one a user runs to
+#: CHECK a runtime, so it must be able to disagree with the header rather than
+#: import it. `tests/test_amd_offsets_agree.py` pins the relationship between
+#: the two so they cannot drift silently.
+KNOWN_OFFSETS = {
+    "kInit": 0x19240, "kRecord": 0xF600, "kNotify": 0x9170, "kShutdown": 0x12690,
+    "kDevice": 0x8CEE8, "kQueue": 0x8CEF0, "kInitCtx": 0x8CEF8,
+    "kHipDevice": 0x8DAD0, "kInlineMode": 0x8D6C0, "kInterop": 0x8D82C,
+    "kEnabled": 0x8D9BC, "kFlagAfterInit": 0x8D218, "kUseFsrInputs": 0x8D9BE,
+    "kUseDepth": 0x8D9BF, "kPerPassFlag": 0x8D9BD, "kDepthInverted": 0x8D9B0,
+    "kDepthExplicit": 0x8D9B4, "kLocalTone": 0x8D9D0, "kLocalStructure": 0x8D9D4,
+    "kSkinStructure": 0x8D9D8, "kCharMask": 0x8D9E0, "kToneChannels": 0x8D9E4,
+    "kScale": 0x8D9DC, "kHistory": 0x8D010, "kWantHistory": 0x8D018,
+    "kJobCounter": 0x8D914, "kStatusFlag": 0x8D21A, "kSyncCounter": 0x8D6F4,
+    "kTimeoutCounter": 0x8D6F8, "kPendingList": 0x8D908, "kAbortWord": 0x8D808,
+}
+
+#: The entry points: these must land in executable code, the rest in writable
+#: data. Named separately because that is the split the check is about.
+ENTRY_POINTS = ("kInit", "kRecord", "kNotify", "kShutdown")
+
+
+def sections(data: bytes):
+    """[(name, virtual address, virtual size)] per PE section."""
+    e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+        raise ValueError("not a PE file")
+    coff = e_lfanew + 4
+    num_sections = struct.unpack_from("<H", data, coff + 2)[0]
+    opt_size = struct.unpack_from("<H", data, coff + 16)[0]
+    sect = coff + 20 + opt_size
+    out = []
+    for i in range(num_sections):
+        off = sect + i * 40
+        name = data[off:off + 8].rstrip(b"\0").decode("latin1")
+        vsize, vaddr = struct.unpack_from("<II", data, off + 8)
+        out.append((name, vaddr, vsize))
+    return out
+
+
+def check_offsets(data: bytes) -> list:
+    """Every offset against the section it should live in. [] when sane.
+
+    This is the check that runs BEFORE anything is written, and it catches the
+    failure mode that costs a debugging session rather than producing an error:
+    a stale data offset that has drifted into `.rdata` is not a crash on read,
+    it is a write into read-only memory, and an entry point that drifted into
+    the middle of an unrelated function gets CALLED rather than faulted.
+
+    It cannot prove the offsets are right - only the runtime's own code can
+    (which is what the probe's hash gate and, ultimately, a Radeon are for).
+    What it proves is that they are at least shaped like the addresses they
+    claim to be, on the build they claim to belong to.
+    """
+    problems = []
+    try:
+        secs = sections(data)
+    except ValueError as exc:
+        return [f"cannot read the PE sections: {exc}"]
+    text = next((s for s in secs if s[0] == ".text"), None)
+    data_sec = next((s for s in secs if s[0] == ".data"), None)
+    if text is None or data_sec is None:
+        return ["the image has no .text or no .data section - refusing to "
+                "check an image this table was not derived from"]
+    for name, value in sorted(KNOWN_OFFSETS.items()):
+        want = text if name in ENTRY_POINTS else data_sec
+        inside = want[1] <= value < want[1] + want[2]
+        if not inside:
+            problems.append(f"{name} 0x{value:x} is not inside {want[0]} "
+                            f"[0x{want[1]:x}..0x{want[1] + want[2]:x})")
+    return problems
+
+
 def download_installer(folder: Path) -> int:
     """Fetch the author's installer into `folder`. 0 on success.
 
@@ -416,10 +490,27 @@ def main() -> int:
     else:
         print(f"this runtime is not the build the driver knows.\n"
               f"  found:    {have}\n"
-              f"  expected: {STOCK_SHA256} (v0.2.14, from the official installer)\n"
+              f"  expected: {STOCK_SHA256} (v0.2.17, from the official installer)\n"
               "Download that version's installer from the project's releases "
               "page and run it in this folder.", file=sys.stderr)
         return 4
+
+    # The offset table before anything is written. The hash above proves the
+    # image is the build this driver was written against; this proves the table
+    # still describes addresses of the right KIND in it. Cheap, and it is the
+    # check that would have turned a known crash into a message: a stale data
+    # offset is a silent write into read-only memory, and a drifted entry point
+    # gets CALLED instead of faulting.
+    problems = check_offsets(bytes(data))
+    if problems:
+        print("the offset table does not match this image:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        print("Refusing to write: the table in native/amd/amd_runtime.h belongs "
+              "to a different build than the one in this folder.", file=sys.stderr)
+        return 6
+    print(f"offsets: {len(KNOWN_OFFSETS)} checked against the image's sections, "
+          f"all in the right kind ({len(ENTRY_POINTS)} entry points in .text)")
 
     # BOTH images are written, and that is the point of this script now.
     #
