@@ -1153,8 +1153,23 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // So the counters are used on this route as a DIAGNOSTIC, never as a gate.
     const uint32_t budget = g_amd.frames < 3 ? 20000u : 2000u;
     bool engine_ok = true;
-    if (g_amd.use_packet)
+    // The wait is available only where the completed-jobs counter is published.
+    // WaitJobs returns false when it is not - correctly, because there is
+    // nothing to poll - and treating that as "the engine did not finish"
+    // skipped EVERY frame on a build whose table has no address for the
+    // counter. v0.2.17 publishes it; v0.3.1 does not (neither table maps it).
+    //
+    // Without the counter the fence below is the only completion signal, and on
+    // this route that is the right one anyway: the engine runs its network
+    // inline off the submission, so the fence retiring IS the work finishing.
+    // The counter was a second opinion, not the gate.
+    const bool counter_wait_available = g_amd.runtime.SyncCountKnown();
+    if (g_amd.use_packet && counter_wait_available)
         engine_ok = g_amd.runtime.WaitJobs(wanted, budget);
+    else if (g_amd.use_packet && g_amd.frames == 0)
+        Log("[amd] the packet is recorded, but this build does not publish the "
+            "completed-jobs counter - completion is taken from the fence, not "
+            "from the engine's own count");
     const bool engine_failed = g_amd.runtime.FailedOnEngineSide();
     if (!WaitFenceValue(h.fence, fence, 5000))
     { Log("[amd] the submission did not retire"); return false; }
@@ -1224,10 +1239,23 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         ++g_amd.timeouts;
         g_amd.runtime.InvalidateHistory();
         if (g_amd.timeouts <= 5 || (g_amd.timeouts % 60) == 0)
-            Log("[amd] frame skipped: %s (timeouts=%llu, jobs=%u/%u)",
-                engine_failed ? "the engine gave up" : "the engine did not finish in time",
-                static_cast<unsigned long long>(g_amd.timeouts),
-                g_amd.runtime.SyncCount(), wanted);
+        {
+            // Which counter is quoted follows which one the wait used: with no
+            // completed-jobs counter the reason is the fence, and printing a
+            // number from a counter this build does not publish would be a
+            // reading that was never taken.
+            if (g_amd.runtime.SyncCountKnown())
+                Log("[amd] frame skipped: %s (timeouts=%llu, jobs=%u/%u)",
+                    engine_failed ? "the engine gave up"
+                                  : "the engine did not finish in time",
+                    static_cast<unsigned long long>(g_amd.timeouts),
+                    g_amd.runtime.SyncCount(), wanted);
+            else
+                Log("[amd] frame skipped: %s (timeouts=%llu)",
+                    engine_failed ? "the engine gave up"
+                                  : "the engine did not finish in time",
+                    static_cast<unsigned long long>(g_amd.timeouts));
+        }
         // The previous frame's contents stay in v.output - the picture is
         // stale for one frame, which is exactly what the reference does.
         if (submitted) *submitted = fence;

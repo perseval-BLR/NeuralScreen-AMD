@@ -74,16 +74,45 @@ def main() -> int:
                         "learn about the submission")
 
     # --- 3. the wait matches the route ------------------------------------
-    wait_gated = "if (g_amd.use_packet)" in block[block.find("WaitJobs") - 300:
-                                              block.find("WaitJobs") + 100] \
-        if "WaitJobs" in block else False
-    if "WaitJobs" not in block:
+    # TWO conditions now, and the second one is the fix for a real regression:
+    # the gate used to be `use_packet` alone, and WaitJobs returns false when
+    # the build publishes no completed-jobs counter - so on v0.3.1 (which has
+    # no address for it) every packet frame was read as "the engine did not
+    # finish" and skipped. The counter wait now also requires the counter.
+    # Anchored on the CALL, not on the bare word: a comment above it mentions
+    # WaitJobs by name, and a first version of this check searched from that
+    # mention - which put the actual gate outside the window and read the code
+    # as ungated.
+    # Matched on the GATE LINE itself, not on a name appearing anywhere in the
+    # neighbourhood: the flag is also declared and discussed in a comment above,
+    # so a check for the bare name still passed with the gate reverted to its
+    # buggy form. The gate is one line, and it is that line that must carry both
+    # conditions.
+    call_at = block.find("g_amd.runtime.WaitJobs(")
+    window = block[max(0, call_at - 900): call_at + 100] if call_at >= 0 else ""
+    gate = ""
+    for line in window.splitlines():
+        if "if (" in line and "use_packet" in line and "WaitJobs" not in line:
+            gate = line.strip()
+            break
+    wait_gated = "use_packet" in gate
+    counter_gated = "counter_wait_available" in gate
+    if call_at < 0:
         failures.append("WaitJobs is gone - the packet route has no completion "
                         "wait at all")
     elif not wait_gated:
         failures.append("WaitJobs runs on the dispatch-only route: nothing "
                         "increments the job counter there, so every frame "
                         "would time out and be skipped")
+    elif not counter_gated:
+        failures.append("WaitJobs is gated on the packet route alone: on a "
+                        "build with no completed-jobs counter it returns false "
+                        "and every frame is skipped as if the engine had "
+                        "timed out - the wait must also require the counter")
+    if "SyncCountKnown()" not in block:
+        failures.append("the bridge never asks whether the build publishes the "
+                        "completed-jobs counter - it cannot tell 'the wait is "
+                        "unavailable' from 'the engine did not finish'")
     if "WaitFenceValue(" not in block:
         failures.append("the queue-fence wait is gone - the dispatch-only "
                         "route has no completion signal")
