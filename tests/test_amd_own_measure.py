@@ -116,6 +116,24 @@ def main() -> int:
         if "1024.0f" not in decode or "5.9604645e-8f" not in decode:
             failures.append("the half-float decode lost its normal or subnormal path")
 
+    # 4b. THE ORDER IS THE MEASUREMENT. The probe reads `fsr_in` and `net` by
+    # recording a copy and waiting for it - so if it runs while the dispatches
+    # are still only RECORDED, it reads every surface as it was before the
+    # frame. Measured: five readbacks on a live 7900 XTX all read 0.0000/0.0000
+    # while the capture read 0.334 and the engine ran 1.00 dispatch per frame.
+    # The reporter who sent them said, unprompted, that the probe should be
+    # confirmed to read the intended resource - he was right.
+    code = strip_comments(text)
+    call_at = code.find("AmdMeasureSurface(g_amd.fsr_in")
+    submit_at = code.find("const UINT64 fence = EndCommands();")
+    if call_at < 0 or submit_at < 0:
+        failures.append("the probe call or the frame submission is missing")
+    elif call_at < submit_at:
+        failures.append(
+            "the probe runs BEFORE the frame's submission - it would read the "
+            "surfaces as they were before the dispatches executed and report "
+            "zeros on a working frame (this is what happened on a 7900 XTX)")
+
     # 5. It must be CALLED, not merely defined: an unused probe is a comment.
     if "AmdMeasureSurface(g_amd.fsr_in" not in text or "AmdMeasureSurface(g_amd.net" not in text:
         failures.append(

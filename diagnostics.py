@@ -589,7 +589,7 @@ def process_start_time() -> float:
 
     Measured cost of not having this: one reporter's bundle carried the same
     three dumps in two consecutive packages, and those dumps were from an
-    older release folder entirely (`...-v0.1.17-alpha-full\`) with an older
+    older release folder entirely (`...-v0.1.17-alpha-full\\`) with an older
     runtime image (SizeOfImage 0x6df000 = v0.2.14) than the build under test.
     The faulting stack was read and believed before the paths gave it away.
     """

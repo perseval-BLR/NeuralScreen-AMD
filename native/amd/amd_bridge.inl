@@ -1224,31 +1224,7 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
             Log("[amd] FSR dispatch %llu: network at %ux%u%s",
                 static_cast<unsigned long long>(g_amd.fsr_frames), nw, nh,
                 g_amd.fsr.Upscaling() ? ", then the upscale" : " (1:1, no upscale)");
-        // The measurement itself, taken where it can still be acted on and
-        // only every 300th frame: a readback is a full GPU->CPU sync, and the
-        // point is a number in the log, not a per-frame cost. Taken AFTER the
-        // submission above, on its own list, so the frame the engine is
-        // following is not disturbed.
-        if ((g_amd.fsr_frames % 300) == 1)
-        {
-            float conv = -1.0f, netm = -1.0f;
-            const bool got_conv = AmdMeasureSurface(g_amd.fsr_in, &conv);
-            const bool got_net  = AmdMeasureSurface(g_amd.net, &netm);
-            if (got_conv) g_amd.probe_conv_mean = conv;
-            if (got_net)  g_amd.probe_net_mean = netm;
-            ++g_amd.probe_frames;
-            if (!got_conv || !got_net) ++g_amd.probe_failed;
-            if (got_conv && got_net)
-                Log("[amd] what WE hand over: converted input mean %.4f, dispatch output "
-                    "mean %.4f (colour channels only - the engine's own metric; compare "
-                    "with its 'encoded mean' above)",
-                    conv, netm);
-            else
-                Log("[amd] the surface probe did not run this pass (converted %s, "
-                    "dispatch output %s) - the engine's own number stands alone",
-                    got_conv ? "measured" : "not measured",
-                    got_net ? "measured" : "not measured");
-        }
+
     }
 
     // The engine, recorded into the same list. It is handed shader-readable
@@ -1461,6 +1437,41 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     if (ts) ProfileGpuEnd(PS_EVAL, 4);
     const UINT64 fence = EndCommands();
     if (fence == 0) return false;
+
+    // The measurement runs HERE, after the submission, and that placement is
+    // the whole point.
+    //
+    // It used to sit a hundred lines above, right after the dispatches were
+    // RECORDED and before EndCommands submitted them. The probe submits a copy
+    // of its own and waits for it - but the dispatch writes had not executed
+    // yet, so it read every surface as it was before the frame: 0.0000. Five
+    // readbacks on a live 7900 XTX came back 0.0000/0.0000 while the capture
+    // read 0.334 and the engine ran at 1.00 dispatch per frame - and a reporter
+    // had to add, in his own words, "it may still be worth confirming the probe
+    // reads the resource you intend, given how much now rests on this one
+    // number". He was right, and this is the answer.
+    //
+    // A readback is a full GPU->CPU sync, so it stays on every 300th frame.
+    if ((g_amd.fsr_frames % 300) == 1)
+    {
+        float conv = -1.0f, netm = -1.0f;
+        const bool got_conv = AmdMeasureSurface(g_amd.fsr_in, &conv);
+        const bool got_net  = AmdMeasureSurface(g_amd.net, &netm);
+        if (got_conv) g_amd.probe_conv_mean = conv;
+        if (got_net)  g_amd.probe_net_mean = netm;
+        ++g_amd.probe_frames;
+        if (!got_conv || !got_net) ++g_amd.probe_failed;
+        if (got_conv && got_net)
+            Log("[amd] what WE hand over: converted input mean %.4f, dispatch output "
+                "mean %.4f (colour channels only - the engine's own metric; compare "
+                "with its 'encoded mean' above)",
+                conv, netm);
+        else
+            Log("[amd] the surface probe did not run this pass (converted %s, "
+                "dispatch output %s) - the engine's own number stands alone",
+                got_conv ? "measured" : "not measured",
+                got_net ? "measured" : "not measured");
+    }
 
     // ---- the tick the engine needs ---------------------------------------
     //
