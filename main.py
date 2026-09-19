@@ -104,6 +104,7 @@ from pipeline import (_drain_stderr, restart_worker,  # noqa: F401
 from startup import (LOG_PATH, _apply_gpu_env,  # noqa: F401
                      _apply_nr_dll, _apply_spout_env, _init_logging,
                      _log_environment)
+from pacing import FramePacer
 from settings_io import (DEFAULT_LANG, PRESET_KEYS,  # noqa: F401
                          load_config, load_presets,
                          resolve_params)
@@ -475,6 +476,11 @@ def main() -> int:
         motion_status = MotionBackendStatus()
         # Stage timings: mean ms over PERF_LOG_INTERVAL (the [perf] log)
         st.perf = {k: [] for k in PERF_KEYS}
+
+        # Frame limiter. Unlimited by default, so this is inert until a cap
+        # is set; it lives here because the AMD pass runs inline and a slow
+        # frame otherwise becomes a catch-up burst on the next iteration.
+        frame_pacer = FramePacer()
 
         def _perf(key: str, t0: float) -> None:
             """Record the stage duration (ms) into the timings dictionary."""
@@ -1130,6 +1136,12 @@ def main() -> int:
                 if parts:
                     print("[perf] " + " | ".join(parts))
                 last_perf_log = now
+
+            # Last statement of the loop body, same place as the main line has
+            # it: the cap covers a whole iteration, so it bounds the capture,
+            # the pass and the present together rather than adding an interval
+            # on top of them.
+            frame_pacer.wait(settings_io.frame_limit_fps(st.cfg), loop_start)
 
         print("[main] exiting at the user's request")
     except KeyboardInterrupt:

@@ -75,7 +75,27 @@ PRESET_NAME_PREFIX = "Preset"
 # The global hotkeys live in hotkeys.py (RegisterHotKey). The layout and the
 # reasons behind the combinations are in that module's docstring.
 WORK_SCALE_STEP = 0.05
+# Frame limiter, brought over from the NVIDIA main line with pacing.py.
+# "unlimited" is the default, so this changes nothing until someone sets a cap;
+# it exists on the AMD path because the pass runs inline and a slow frame there
+# otherwise turns into a catch-up burst on the next iteration.
+FRAME_LIMIT_MODES = ("30", "60", "custom", "unlimited")
+FRAME_LIMIT_CUSTOM_MIN = 15
+FRAME_LIMIT_CUSTOM_MAX = 240
 
+
+def frame_limit_fps(cfg: dict) -> int:
+    """Resolve the persisted limiter mode to an FPS cap; zero is unlimited."""
+    mode = str(cfg.get("frame_limit_mode", "unlimited"))
+    if mode in ("30", "60"):
+        return int(mode)
+    if mode != "custom":
+        return 0
+    try:
+        value = int(cfg.get("frame_limit_custom", 90))
+    except (TypeError, ValueError, OverflowError):
+        value = 90
+    return min(FRAME_LIMIT_CUSTOM_MAX, max(FRAME_LIMIT_CUSTOM_MIN, value))
 
 WORK_SCALE_MAX = 1.0
 

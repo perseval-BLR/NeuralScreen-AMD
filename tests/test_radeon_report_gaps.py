@@ -160,7 +160,14 @@ def main() -> int:
     #     Inline=1: the write ORDER is part of the contract, and Inline has to
     #     be written twice (before Enabled, and again after it, right before
     #     Interop and Init). One write is not enough.
-    if runtime_src.count("rva::kInlineMode) = 1") < 2:
+    # The access goes through the per-build table now (`table_->kInlineMode`),
+    # because the host drives two releases: a bare `rva::` constant would be the
+    # v0.2.17 address on a v0.3.1 image. Both spellings are counted so this check
+    # does not depend on which one the code uses - the contract being tested is
+    # HOW MANY TIMES the field is written, not how it is addressed.
+    inline_writes = (runtime_src.count("table_->kInlineMode) = 1")
+                     + runtime_src.count("rva::kInlineMode) = 1"))
+    if inline_writes < 2:
         failures.append("Inline is written once - the reference writes it twice "
                         "around Enabled, and the engine comes up async without it")
     if "mode async" not in runtime_src:
