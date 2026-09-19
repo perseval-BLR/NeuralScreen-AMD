@@ -190,3 +190,37 @@ release: it is built to explain itself.
 - The runtime is third-party, closed-source and hash-locked. A different
   version is refused rather than guessed at - a wrong guess there does not
   return an error, it jumps into nothing.
+
+## The card is chosen by the runtime, not by this program
+
+The runtime has a device field, and it is left at **-1 (auto)**: the runtime
+matches a HIP device to the D3D12 device behind the first presented swapchain
+and records which one it took in `dlssnr_on_amd.log` (`matches the game's
+D3D12 adapter`).
+
+That is deliberate, and it is the fix rather than an omission. The field is an
+override, not a hint: with an index written into it the runtime uses that index
+and skips the match. One physical card routinely enumerates two to four times
+with different LUIDs, and on a machine with an integrated Radeon the HIP index 0
+is the iGPU - which is how "auto picked the wrong device" happens in the first
+place. v0.2.17 is the build whose release notes name this: *fixed crashes and
+black screens on multi-GPU systems*.
+
+So if a report says the wrong device was used, the useful question is what the
+runtime logged, not what this program computed. A machine where nothing matches
+is refused before the runtime is allowed to build a frame.
+
+## The offset table is checked, not trusted
+
+The runtime exports nothing, so every address this program writes into it is a
+raw offset - and a wrong one does not fail politely. A stale data offset that
+has drifted into `.rdata` is a silent write into read-only memory; a drifted
+entry point is called rather than faulted. Both survive a clean build.
+
+`tools\prepare_amd_runtime.py` therefore holds the whole table against the
+image's sections before it writes anything, and refuses to write when a value is
+in the wrong kind of section. The table is named in three places - the driver's
+header, the probe, and that script - and `tests\test_amd_offsets_agree.py` pins
+them to each other by name and by value, so a port cannot update two and forget
+the third. That failure has already cost the project this table came from a
+crash on the first frame.
