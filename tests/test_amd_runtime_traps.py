@@ -104,10 +104,31 @@ def main() -> int:
     # The field write is the fix for the dead slider, and it is the one that
     # has to be in SetOptions: the ini is parsed ONCE (call_once in the first
     # CreateSwapChain detour), so a file write after startup reaches nothing.
-    if "At<float>(module_, rva::kScale)" not in cpp:
-        failures.append("SetOptions does not write the Scale FIELD - the "
-                        "intensity would only reach the ini, which the runtime "
-                        "parsed once at startup and never reads again")
+    #
+    # The access goes through the table now (`table_->kScale`), because the host
+    # drives two builds and a bare constant would be the v0.2.17 address on a
+    # v0.3.1 image. Both the write and the fact that it reads the table are
+    # checked: a reverted access would put the wrong address on the second build.
+    if "At<float>(module_, table_->kScale)" not in cpp:
+        if "At<float>(module_, rva::kScale)" in cpp:
+            failures.append("SetOptions writes a BARE kScale - correct for "
+                            "v0.2.17 and wrong on any other build; the offset has "
+                            "to come from the loaded image's table")
+        else:
+            failures.append("SetOptions does not write the Scale FIELD - the "
+                            "intensity would only reach the ini, which the runtime "
+                            "parsed once at startup and never reads again")
+    # No runtime offset may be reached without the table: the two builds put the
+    # same field at different addresses, so a hardcoded one silently reads or
+    # writes the wrong place on the other build. `rva::kV0217` / `rva::kV0310`
+    # are the tables themselves and assigning one to table_ is how it is meant
+    # to be chosen, so only field names count here.
+    bare = re.findall(r"rva::(k(?!V0)\w+)", cpp)
+    if bare:
+        failures.append("these offsets bypass the per-build table: "
+                        + ", ".join(sorted(set(bare))) +
+                        " - a hardcoded address is the v0.2.17 one and does not "
+                        "follow the hash check that selects the other table")
     # Writing the file every frame would be a file write per frame for nothing.
     if "last_intensity_" not in cpp:
         failures.append("the ini is rewritten on every frame instead of only "

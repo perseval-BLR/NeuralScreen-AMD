@@ -78,11 +78,14 @@ done:
 }
 
 // The engine's Init call, isolated so __try does not sit in a scope holding
-// C++ objects (C2712). Raw pointers only.
-int guarded_init(void *module, void *ctx, const std::string *weights) {
+// C++ objects (C2712). Raw pointers only - which is why the offset arrives as
+// a plain uintptr_t rather than being read from the table here: this function
+// has no `this`, and the table belongs to the instance.
+int guarded_init(void *module, uintptr_t init_rva, void *ctx,
+                 const std::string *weights) {
     using InitFn = bool(__fastcall *)(void *, const std::string *);
     auto fn = reinterpret_cast<InitFn>(
-        reinterpret_cast<uintptr_t>(module) + rva::kInit);
+        reinterpret_cast<uintptr_t>(module) + init_rva);
     __try {
         return fn(ctx, weights) ? 0 : 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -90,9 +93,9 @@ int guarded_init(void *module, void *ctx, const std::string *weights) {
     }
 }
 
-int guarded_shutdown(void *module) {
+int guarded_shutdown(void *module, uintptr_t shutdown_rva) {
     using Fn = void (*)(void);
-    auto fn = reinterpret_cast<Fn>(reinterpret_cast<uintptr_t>(module) + rva::kShutdown);
+    auto fn = reinterpret_cast<Fn>(reinterpret_cast<uintptr_t>(module) + shutdown_rva);
     __try {
         fn();
         return 0;
@@ -264,18 +267,24 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         last_error_ = narrow(chosen_name) + " not found in " + narrow(runtime_dir);
         return false;
     }
+    uint64_t size = 0;
     {
         LARGE_INTEGER li{};
         li.LowPart = fad.nFileSizeLow;
         li.HighPart = static_cast<LONG>(fad.nFileSizeHigh);
-        const uint64_t size = static_cast<uint64_t>(li.QuadPart);
-        if (size != kRuntimeSize) {
-            last_error_ = narrow(chosen_name) + " is " + std::to_string(size) +
-                          " bytes, the known build is " +
-                          std::to_string(kRuntimeSize) + " (this table belongs "
-                          "to exactly one image; refusing rather than guessing)";
-            return false;
-        }
+        size = static_cast<uint64_t>(li.QuadPart);
+    }
+    // The size is checked against BOTH known builds rather than one, because
+    // the same host now drives two of them and the table is picked from the
+    // pair (size, hash) below. The check still does its original job: it catches
+    // truncation and a half-extracted file before the hash is computed.
+    if (size != kRuntimeSize && size != kRuntimeSize0310) {
+        last_error_ = narrow(chosen_name) + " is " + std::to_string(size) +
+                      " bytes, the known builds are " +
+                      std::to_string(kRuntimeSize) + " (v0.2.17) and " +
+                      std::to_string(kRuntimeSize0310) + " (v0.3.1) - this table "
+                      "belongs to exactly those images; refusing rather than guessing";
+        return false;
     }
     uint8_t actual[32] = {};
     if (!sha256_of_file(runtime_path, actual)) {
@@ -284,14 +293,29 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     }
     found_hash_ = to_hex(actual, 32);
     {
-        bool patched = true, stock = true;
-        for (int i = 0; i < 32; ++i) {
-            if (actual[i] != kRuntimeSha256Patched[i]) patched = false;
-            if (actual[i] != kRuntimeSha256Stock[i]) stock = false;
-        }
-        if (patched) kind_ = ImageKind::Patched;
-        else if (stock) kind_ = ImageKind::Stock;
-        else {
+        // The hash is what selects the table - never the size alone, and never
+        // a version string the file claims. A build whose hash is unknown is
+        // refused: its layout is different by definition, and driving it with
+        // the wrong table writes into read-only memory.
+        auto matches = [&actual](const uint8_t (&want)[32]) {
+            for (int i = 0; i < 32; ++i)
+                if (actual[i] != want[i]) return false;
+            return true;
+        };
+        if (matches(kRuntimeSha256Stock)) {
+            kind_ = ImageKind::Stock;
+            table_ = &rva::kV0217;
+        } else if (matches(kRuntimeSha256Patched)) {
+            kind_ = ImageKind::Patched;
+            table_ = &rva::kV0217;
+        } else if (matches(kRuntimeSha256Stock0310)) {
+            // v0.3.1 has one published image; the patched variant does not
+            // exist for it because the patches themselves were never carried
+            // over (see the note in prepare_amd_runtime.py).
+            kind_ = ImageKind::Stock;
+            table_ = &rva::kV0310;
+            build_ = Build::V0310;
+        } else {
             last_error_ = narrow(chosen_name) + " is not a build these offsets "
                           "belong to (found " + found_hash_ + "); refusing rather "
                           "than guessing";
@@ -468,11 +492,11 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
                            reinterpret_cast<LPCWSTR>(module_), &pinned);
     }
     init_ = reinterpret_cast<InitFn>(
-        reinterpret_cast<uintptr_t>(module_) + rva::kInit);
+        reinterpret_cast<uintptr_t>(module_) + table_->kInit);
     record_ = reinterpret_cast<RecordFn>(
-        reinterpret_cast<uintptr_t>(module_) + rva::kRecord);
+        reinterpret_cast<uintptr_t>(module_) + table_->kRecord);
     notify_ = reinterpret_cast<NotifyFn>(
-        reinterpret_cast<uintptr_t>(module_) + rva::kNotify);
+        reinterpret_cast<uintptr_t>(module_) + table_->kNotify);
 
     // --- 4. the D3DCompile import ---------------------------------------
     // Best-effort: the System32 compiler is the one the runtime's embedded
@@ -488,15 +512,15 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // The engine holds these pointers for its own threads; the host's
     // references must outlive this object and the engine's reference is taken
     // explicitly. These are process-lifetime references.
-    At<ID3D12Device *>(module_, rva::kDevice) = device;
+    At<ID3D12Device *>(module_, table_->kDevice) = device;
     if (device != nullptr) device->AddRef();
-    At<ID3D12CommandQueue *>(module_, rva::kQueue) = queue;
+    At<ID3D12CommandQueue *>(module_, table_->kQueue) = queue;
     if (queue != nullptr) queue->AddRef();
     // -1 = auto: the runtime matches a HIP device to the D3D12 device behind
     // the first presented swapchain itself, and says which one it took in
     // its own log. See the selection block above for why this is not the
     // index we just computed.
-    At<int>(module_, rva::kHipDevice) = -1;
+    At<int>(module_, table_->kHipDevice) = -1;
 
     // --- 6. mode flags, in the reference order --------------------------
     // The ORDER is load-bearing, and so is writing Inline TWICE. The
@@ -532,12 +556,12 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     //
     // UseDepth=0: depth is off until the worker has a depth source worth
     // handing over.
-    At<uint8_t>(module_, rva::kInlineMode) = 1;
-    At<uint8_t>(module_, rva::kEnabled) = 1;
-    At<uint8_t>(module_, rva::kInlineMode) = 1;   // again, after Enabled
-    At<uint8_t>(module_, rva::kInterop) = 1;
-    At<uint8_t>(module_, rva::kUseFsrInputs) = 1;
-    At<uint8_t>(module_, rva::kUseDepth) = 0;
+    At<uint8_t>(module_, table_->kInlineMode) = 1;
+    At<uint8_t>(module_, table_->kEnabled) = 1;
+    At<uint8_t>(module_, table_->kInlineMode) = 1;   // again, after Enabled
+    At<uint8_t>(module_, table_->kInterop) = 1;
+    At<uint8_t>(module_, table_->kUseFsrInputs) = 1;
+    At<uint8_t>(module_, table_->kUseDepth) = 0;
 
     // --- 6b. wait for the runtime's own hooks ---------------------------
     // The runtime installs its D3D12/DXGI detours from a thread it starts on
@@ -627,12 +651,12 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // Arg 1 is the engine's own in-image context struct, not a host object:
     // the address itself, where the device, queue and HIP index were written.
     ctx_ = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(module_) +
-                                    rva::kInitCtx);
+                                    table_->kInitCtx);
     // The device is bound on this thread once more right before init - the
     // engine selects it on its own threads from the stored index.
     hip_set_(chosen);
     const std::string weights_narrow = narrow(weights_path);
-    const int rc = guarded_init(module_, ctx_, &weights_narrow);
+    const int rc = guarded_init(module_, table_->kInit, ctx_, &weights_narrow);
     if (rc < 0) {
         last_error_ = "the engine raised an exception on init (code " +
                       std::to_string(-rc) +
@@ -645,7 +669,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     }
 
     // Only after init returns: the flag the engine expects set once ready.
-    At<uint8_t>(module_, rva::kFlagAfterInit) = 1;
+    At<uint8_t>(module_, table_->kFlagAfterInit) = 1;
 
     // Ask the ENGINE's own log whether it actually came up, because our return
     // value cannot answer that. `engine init %s` is the engine's own format
@@ -676,7 +700,7 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
 
 void Runtime::Shutdown() {
     if (module_ == nullptr) return;
-    guarded_shutdown(module_);
+    guarded_shutdown(module_, table_->kShutdown);
     ready_ = false;
 }
 
@@ -689,12 +713,12 @@ void Runtime::SetOptions(const Options &opt) {
     // writing them is not the same as writing zero, the engine simply keeps
     // whatever the last writer left there.
     auto cl01 = [](float v) { return v < 0.0f ? 0.0f : (v > 2.0f ? 2.0f : v); };
-    At<float>(module_, rva::kLocalTone) = cl01(opt.local_tone);
-    At<float>(module_, rva::kLocalStructure) = cl01(opt.local_structure);
-    At<float>(module_, rva::kSkinStructure) = cl01(opt.skin_structure);
-    At<uint32_t>(module_, rva::kCharMask) = opt.auto_mask ? 1u : 0u;
-    At<uint32_t>(module_, rva::kToneChannels) = (opt.tone_channels & ~2u) | 4u;
-    At<uint8_t>(module_, rva::kEnabled) = opt.enabled ? 1 : 0;
+    At<float>(module_, table_->kLocalTone) = cl01(opt.local_tone);
+    At<float>(module_, table_->kLocalStructure) = cl01(opt.local_structure);
+    At<float>(module_, table_->kSkinStructure) = cl01(opt.skin_structure);
+    At<uint32_t>(module_, table_->kCharMask) = opt.auto_mask ? 1u : 0u;
+    At<uint32_t>(module_, table_->kToneChannels) = (opt.tone_channels & ~2u) | 4u;
+    At<uint8_t>(module_, table_->kEnabled) = opt.enabled ? 1 : 0;
 
     // Intensity: the network's strength, and the slider that was dead.
     //
@@ -718,7 +742,7 @@ void Runtime::SetOptions(const Options &opt) {
     // this launch uses.
     const float intensity_clamped = opt.intensity < 0.0f ? 0.0f
                                   : (opt.intensity > 1.0f ? 1.0f : opt.intensity);
-    At<float>(module_, rva::kScale) = intensity_clamped * ScaleMax();
+    At<float>(module_, table_->kScale) = intensity_clamped * ScaleMax();
     if (opt.intensity != last_intensity_) {
         last_intensity_ = opt.intensity;
         WriteScale(opt.intensity);
@@ -782,9 +806,9 @@ bool Runtime::Record(ID3D12CommandList *list, ID3D12Resource *colour,
     // Per-frame state, written strictly before the record call, in the
     // reference order. The depth pair is written even though depth is unused -
     // the engine expects the fields populated with the explicit convention.
-    At<uint8_t>(module_, rva::kPerPassFlag) = 1;   // Temporal
-    At<uint32_t>(module_, rva::kDepthInverted) = 0;
-    At<uint8_t>(module_, rva::kDepthExplicit) = 1;
+    At<uint8_t>(module_, table_->kPerPassFlag) = 1;   // Temporal
+    At<uint32_t>(module_, table_->kDepthInverted) = 0;
+    At<uint8_t>(module_, table_->kDepthExplicit) = 1;
 
     Packet packet{};
     packet.list = list;
@@ -811,7 +835,7 @@ bool Runtime::Record(ID3D12CommandList *list, ID3D12Resource *colour,
     // the pending-list marker; if it is not this list, the frame was not
     // accepted and the host must not wait on it.
     const bool accepted =
-        At<ID3D12CommandList *>(module_, rva::kPendingList) == list;
+        At<ID3D12CommandList *>(module_, table_->kPendingList) == list;
     if (!accepted) {
         last_error_ = "the engine did not take the recorded list";
         return false;
@@ -843,7 +867,7 @@ void Runtime::Notify(ID3D12CommandQueue *queue, ID3D12CommandList *list) {
 bool Runtime::WaitJobs(uint32_t wanted, uint32_t timeout_ms) const {
     if (!ready_ || module_ == nullptr) return false;
     const ULONGLONG deadline = GetTickCount64() + timeout_ms;
-    while (At<uint32_t>(module_, rva::kSyncCounter) < wanted) {
+    while (At<uint32_t>(module_, table_->kSyncCounter) < wanted) {
         if (GetTickCount64() > deadline) return false;
         Sleep(1);  // yield, not spin: the worker needs the core too
     }
@@ -852,28 +876,28 @@ bool Runtime::WaitJobs(uint32_t wanted, uint32_t timeout_ms) const {
 
 uint32_t Runtime::JobCount() const {
     if (!ready_ || module_ == nullptr) return 0;
-    return At<uint32_t>(module_, rva::kJobCounter);
+    return At<uint32_t>(module_, table_->kJobCounter);
 }
 
 uint32_t Runtime::SyncCount() const {
     if (!ready_ || module_ == nullptr) return 0;
-    return At<uint32_t>(module_, rva::kSyncCounter);
+    return At<uint32_t>(module_, table_->kSyncCounter);
 }
 
 uint32_t Runtime::TimeoutCount() const {
     if (!ready_ || module_ == nullptr) return 0;
-    return At<uint32_t>(module_, rva::kTimeoutCounter);
+    return At<uint32_t>(module_, table_->kTimeoutCounter);
 }
 
 bool Runtime::FailedOnEngineSide() const {
     if (!ready_ || module_ == nullptr) return true;
-    return At<uint8_t>(module_, rva::kStatusFlag) != 0;
+    return At<uint8_t>(module_, table_->kStatusFlag) != 0;
 }
 
 void Runtime::InvalidateHistory() {
     if (!ready_ || module_ == nullptr) return;
-    At<uint8_t>(module_, rva::kWantHistory) = 0;
-    At<void *>(module_, rva::kHistory) = nullptr;
+    At<uint8_t>(module_, table_->kWantHistory) = 0;
+    At<void *>(module_, table_->kHistory) = nullptr;
 }
 
 }  // namespace amd_nr

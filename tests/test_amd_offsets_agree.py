@@ -37,11 +37,25 @@ PROBE = AMD / "probe_amd.cpp"
 
 
 def header_offsets(text: str) -> dict:
-    """{name: value} from the rva namespace of the header."""
-    ns = text[text.find("namespace rva {"):]
-    ns = ns[: ns.find("}  // namespace rva")]
+    """{name: value} from the header's pinned v0.2.17 table.
+
+    The table became a struct (`rva::kV0217`) when the host started driving two
+    builds: the same names now appear in `kV0310` with different values, so the
+    parse has to name the build it wants. The v0.2.17 one is what the probe and
+    the prepare tool still carry - they check a runtime whose offsets are the
+    pins, and a third copy that silently followed the newer build would stop
+    being able to disagree.
+
+    The values are read out of the braced initialiser by its comments, which is
+    what makes this robust against the field order changing: each entry is
+    `/* kName */ 0x...`.
+    """
+    start = text.find("inline constexpr Table kV0217")
+    if start < 0:
+        return {}
+    body = text[start:text.find("};", start)]
     return {m.group(1): int(m.group(2), 16)
-            for m in re.finditer(r"(k\w+)\s*=\s*0x([0-9a-fA-F]+)", ns)}
+            for m in re.finditer(r"/\*\s*(k\w+)\s*\*/\s*0x([0-9a-fA-F]+)", body)}
 
 
 def probe_offsets(text: str) -> dict:

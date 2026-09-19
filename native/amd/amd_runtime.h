@@ -90,6 +90,21 @@ inline constexpr const wchar_t *kHipName = L"amdhip64_7.dll";
 // alive here (it resolves the proxy), so the runtime may install its detours
 // while the host drives from outside - the MIT host runs exactly this way.
 inline constexpr uint64_t kRuntimeSize = 7248384;
+//: v0.3.1 - the maintainer's current release, and the second build this host
+//: drives. Size is a gate too: it catches a truncated or half-extracted file
+//: before the hash does any work.
+inline constexpr uint64_t kRuntimeSize0310 = 7304192;
+//: v0.3.1 as published by the maintainer on 2026-09-15. The offsets in
+//: rva::kV0310 were derived from exactly this image by
+//: tools/amd_offsets_probe.py, and every one of them is checked against the
+//: number of functions that reference it - a translated address with no
+//: references is a dead address, which is what a wrong delta produces.
+inline constexpr uint8_t kRuntimeSha256Stock0310[32] = {
+    0xb1, 0x08, 0xd6, 0x40, 0x7e, 0xb7, 0xf0, 0x94,
+    0xa4, 0xf9, 0x11, 0x1e, 0xdd, 0x77, 0x8e, 0xee,
+    0x7b, 0x97, 0x8b, 0x64, 0x8d, 0x41, 0x3a, 0x9f,
+    0xc7, 0xae, 0xed, 0xfd, 0xd9, 0x14, 0xc1, 0x54,
+};
 inline constexpr uint8_t kRuntimeSha256Patched[32] = {
     0xc8, 0xa5, 0xd3, 0xaf, 0x65, 0xf3, 0x50, 0x58, 0xa2, 0x27, 0x4f, 0xa3,
     0xfb, 0xd3, 0xaa, 0x7a, 0x71, 0x3f, 0xf8, 0x6c, 0x33, 0x75, 0xe1, 0x2d,
@@ -103,73 +118,176 @@ inline constexpr uint8_t kRuntimeSha256Stock[32] = {
 
 enum class ImageKind { Unknown, Stock, Patched };
 
+//: Which release of the runtime is loaded. The host drives two, and the offset
+//: table is picked from this - so it is set by the hash check, never guessed.
+enum class Build { V0217, V0310 };
+
 // --- offsets inside the runtime image -------------------------------------
 //
 // All RVAs, added to the module base. The table is independently verified in
 // SPEC-OPTISCALER.md (section 4): entry points against the PE function table,
 // every data RVA against the writable .data section bounds.
+//
+// TWO BUILDS ARE DRIVEN, and the table is chosen by the hash the loader already
+// computes - never by a version string the file claims. The builds differ in
+// every address, so one table cannot serve both:
+//
+//   v0.2.17  the pinned, tested build. Everything the ecosystem published was
+//            derived against it, and it is what every current report runs.
+//   v0.3.1  the maintainer's current release. Its own notes close the stalls
+//            and crashes this project kept meeting ("new wait method ... reduces
+//            the chance of stalls", "Fixed three crashes"), and a report on the
+//            same RDNA3 hardware shows a working picture on it while our v0.2.17
+//            reports show a black one. That is the reason this table exists.
+//
+// How each address was derived is recorded per field in
+// references/runtime-offset-table.md, and `tools/amd_offsets_probe.py` re-derives
+// them from a binary: the option fields from the ini reader's own store, the
+// service fields from the state initialiser's run of immediates, and every one
+// checked against the number of functions that actually reference it. The
+// derivation is what the next build needs - not this struct.
 namespace rva {
-// The callable addresses.
-inline constexpr uintptr_t kInit = 0x19240;      // bool(void *ctx, const std::string *weights)
-inline constexpr uintptr_t kRecord = 0xf600;     // void(Packet *)
-inline constexpr uintptr_t kNotify = 0x9170;     // void(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *)
-inline constexpr uintptr_t kShutdown = 0x12690;  // void(void) - stops the engine's workers
 
-// One-time bindings (written by the host before Init).
-inline constexpr uintptr_t kDevice = 0x8cee8;   // ID3D12Device * (host AddRefs)
-inline constexpr uintptr_t kQueue = 0x8cef0;    // ID3D12CommandQueue * (host AddRefs)
-inline constexpr uintptr_t kInitCtx = 0x8cef8;  // the ctx struct the Init call takes
-inline constexpr uintptr_t kHipDevice = 0x8dad0;
-inline constexpr uintptr_t kInlineMode = 0x8d6c0;  // pinned to 1
-inline constexpr uintptr_t kInterop = 0x8d82c;     // pinned to 1
-inline constexpr uintptr_t kEnabled = 0x8d9bc;
-inline constexpr uintptr_t kFlagAfterInit = 0x8d218;  // written only AFTER init returns
+struct Table {
+    // The callable addresses.
+    uintptr_t kInit;       // bool(void *ctx, const std::string *weights)
+    uintptr_t kRecord;     // void(Packet *)
+    uintptr_t kNotify;     // void(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *)
+    uintptr_t kShutdown;   // void(void) - stops the engine's workers
 
-// Per-frame knobs.
-inline constexpr uintptr_t kUseFsrInputs = 0x8d9be;
-inline constexpr uintptr_t kUseDepth = 0x8d9bf;
-inline constexpr uintptr_t kPerPassFlag = 0x8d9bd;  // Temporal / per-pass flag
-inline constexpr uintptr_t kDepthInverted = 0x8d9b0;  // UINT, 0
-inline constexpr uintptr_t kDepthExplicit = 0x8d9b4;  // uint8, 1
-inline constexpr uintptr_t kLocalTone = 0x8d9d0;
-inline constexpr uintptr_t kLocalStructure = 0x8d9d4;
-inline constexpr uintptr_t kSkinStructure = 0x8d9d8;
-inline constexpr uintptr_t kCharMask = 0x8d9e0;
-inline constexpr uintptr_t kToneChannels = 0x8d9e4;
-inline constexpr uintptr_t kScale = 0x8d9dc;        // the network's strength. The runtime
-                                                    // reads it in the job-recording function
-                                                    // (0x140a0..0x15e79), the same place it
-                                                    // reads LocalTone/LocalStructure - so a
-                                                    // per-frame write here reaches the network
-                                                    // the same way those two do.
+    // One-time bindings (written by the host before Init).
+    uintptr_t kDevice;     // ID3D12Device * (host AddRefs)
+    uintptr_t kQueue;      // ID3D12CommandQueue * (host AddRefs)
+    uintptr_t kInitCtx;    // the ctx struct the Init call takes
+    uintptr_t kHipDevice;
+    uintptr_t kInlineMode;  // pinned to 1
+    uintptr_t kInterop;     // pinned to 1
+    uintptr_t kEnabled;
+    uintptr_t kFlagAfterInit;  // written only AFTER init returns
 
-// History control.
-inline constexpr uintptr_t kHistory = 0x8d010;      // void *, nullptr invalidates
-inline constexpr uintptr_t kWantHistory = 0x8d018;  // uint8
+    // Per-frame knobs.
+    uintptr_t kUseFsrInputs;
+    uintptr_t kUseDepth;
+    uintptr_t kPerPassFlag;   // Temporal / per-pass flag
+    uintptr_t kDepthInverted;  // UINT, 0
+    uintptr_t kDepthExplicit;  // uint8, 1
+    uintptr_t kLocalTone;
+    uintptr_t kLocalStructure;
+    uintptr_t kSkinStructure;
+    uintptr_t kCharMask;
+    uintptr_t kToneChannels;
+    uintptr_t kScale;  // the network's strength. The runtime reads it in the
+                       // job-recording function, the same place it reads
+                       // LocalTone/LocalStructure - so a per-frame write here
+                       // reaches the network the same way those two do.
 
-// Status and accounting (read-only for the host).
-inline constexpr uintptr_t kJobCounter = 0x8d914;    // UINT, jobs recorded
-inline constexpr uintptr_t kStatusFlag = 0x8d21a;    // uint8, non-zero after record = engine gave up
-inline constexpr uintptr_t kSyncCounter = 0x8d6f4;   // UINT, jobs completed
-inline constexpr uintptr_t kTimeoutCounter = 0x8d6f8;  // UINT, engine-side GPU wait timeouts
+    // History control.
+    uintptr_t kHistory;      // void *, nullptr invalidates
+    uintptr_t kWantHistory;  // uint8
 
-// Frame-acceptance machinery.
-inline constexpr uintptr_t kPendingList = 0x8d908;  // ID3D12CommandList * - equals the list iff the
-                                                    // engine accepted the record; the real acceptance
-                                                    // test (record's void return says nothing)
+    // Status and accounting (read-only for the host).
+    uintptr_t kJobCounter;   // UINT, jobs recorded
+    uintptr_t kStatusFlag;   // uint8, non-zero after record = engine gave up
+    //: 0 means "this build has no address the host may read for it". The two
+    //: counters below are the only such fields: on v0.3.1 they are not
+    //: derivable (no counterpart in the published table, not written by the
+    //: state initialiser, indistinguishable by reference count), and guessing
+    //: is exactly the mistake this table exists to prevent. They are
+    //: DIAGNOSTIC ONLY - WaitJobs is called on the packet path alone, which is
+    //: off, and the rest is a log line - so reporting nothing is correct and
+    //: reading a wrong address is not.
+    uintptr_t kSyncCounter;      // UINT, jobs completed
+    uintptr_t kTimeoutCounter;   // UINT, engine-side GPU wait timeouts
+
+    // Frame-acceptance machinery.
+    uintptr_t kPendingList;  // ID3D12CommandList * - equals the list iff the
+                             // engine accepted the record; the real acceptance
+                             // test (record's void return says nothing)
+};
+
+//: The pinned v0.2.17 build. Every value here was verified against the running
+//: host before this struct existed; the refactor into a table changed no number.
+inline constexpr Table kV0217 = {
+    /* kInit */ 0x19240,
+    /* kRecord */ 0xf600,
+    /* kNotify */ 0x9170,
+    /* kShutdown */ 0x12690,
+    /* kDevice */ 0x8cee8,
+    /* kQueue */ 0x8cef0,
+    /* kInitCtx */ 0x8cef8,
+    /* kHipDevice */ 0x8dad0,
+    /* kInlineMode */ 0x8d6c0,
+    /* kInterop */ 0x8d82c,
+    /* kEnabled */ 0x8d9bc,
+    /* kFlagAfterInit */ 0x8d218,
+    /* kUseFsrInputs */ 0x8d9be,
+    /* kUseDepth */ 0x8d9bf,
+    /* kPerPassFlag */ 0x8d9bd,
+    /* kDepthInverted */ 0x8d9b0,
+    /* kDepthExplicit */ 0x8d9b4,
+    /* kLocalTone */ 0x8d9d0,
+    /* kLocalStructure */ 0x8d9d4,
+    /* kSkinStructure */ 0x8d9d8,
+    /* kCharMask */ 0x8d9e0,
+    /* kToneChannels */ 0x8d9e4,
+    /* kScale */ 0x8d9dc,
+    /* kHistory */ 0x8d010,
+    /* kWantHistory */ 0x8d018,
+    /* kJobCounter */ 0x8d914,
+    /* kStatusFlag */ 0x8d21a,
+    /* kSyncCounter */ 0x8d6f4,
+    /* kTimeoutCounter */ 0x8d6f8,
+    /* kPendingList */ 0x8d908,
+};
+
+//: v0.3.1, derived by tools/amd_offsets_probe.py and cross-checked against the
+//: published v0.3.0 table (every option field differs by exactly +0x31d8, and
+//: the service fields land where the reference profile says they should). The
+//: two counters have no derived address and are 0 - see the struct's note.
+inline constexpr Table kV0310 = {
+    /* kInit */ 0x21720,
+    /* kRecord */ 0x0,        // not derived; needed only on the packet path
+    /* kNotify */ 0x0,        // not derived; needed only for the patched image
+    /* kShutdown */ 0x0,      // not derived; called from nowhere
+    /* kDevice */ 0x9a0e8,
+    /* kQueue */ 0x9a0f0,
+    /* kInitCtx */ 0x9a0f8,
+    /* kHipDevice */ 0x9ae08,
+    /* kInlineMode */ 0x9a928,
+    /* kInterop */ 0x9ab58,
+    /* kEnabled */ 0x9acf4,
+    /* kFlagAfterInit */ 0x9a420,
+    /* kUseFsrInputs */ 0x9acf6,
+    /* kUseDepth */ 0x9acf7,
+    /* kPerPassFlag */ 0x9acf5,
+    /* kDepthInverted */ 0x9ace8,
+    /* kDepthExplicit */ 0x9acec,
+    /* kLocalTone */ 0x9ad08,
+    /* kLocalStructure */ 0x9ad0c,
+    /* kSkinStructure */ 0x9ad10,
+    /* kCharMask */ 0x9ad18,
+    /* kToneChannels */ 0x9ad1c,
+    /* kScale */ 0x9ad14,
+    /* kHistory */ 0x9a218,
+    /* kWantHistory */ 0x9a220,
+    /* kJobCounter */ 0x9a95c,
+    /* kStatusFlag */ 0x9a422,
+    /* kSyncCounter */ 0x0,
+    /* kTimeoutCounter */ 0x0,
+    /* kPendingList */ 0x9ac38,
+};
 
 // Deliberately NOT written by the host:
-//   0x8d808/0x8d80c  the engine's watchdog job pair. The watchdog function
-//            (0x16260..0x1652d) stores the job id into BOTH dwords when a
-//            timeout fires, and reads them back. Two things follow, and the
-//            second is why this note is longer than the others: it is a
-//            counter, not a handle, so a host that treats the pair as a
-//            pointer to clear crashes on the next recording; and a host that
-//            just zeroes it (which is what this driver used to do) is
-//            erasing the engine's own record of which job timed out.
-//            The engine resets its real GPU abort flag itself, through
-//            hipMemcpyAsync - it does not need help, and it is the only side
-//            that knows when the flag is stale.
+//   0x8d808/0x8d80c  the engine's watchdog job pair (v0.2.17). The watchdog
+//            function stores the job id into BOTH dwords when a timeout fires,
+//            and reads them back. Two things follow, and the second is why this
+//            note is longer than the others: it is a counter, not a handle, so a
+//            host that treats the pair as a pointer to clear crashes on the next
+//            recording; and a host that just zeroes it (which is what this
+//            driver used to do) is erasing the engine's own record of which job
+//            timed out. The engine resets its real GPU abort flag itself,
+//            through hipMemcpyAsync - it does not need help, and it is the only
+//            side that knows when the flag is stale.
 //
 //            This address was in the table as `kAbortWord` until 0.2.0. The
 //            port derived it as 0x76c68 + 0x16ba0 (the delta that fits the
@@ -178,10 +296,6 @@ inline constexpr uintptr_t kPendingList = 0x8d908;  // ID3D12CommandList * - equ
 //            on 0x8d688, and the two answers differ by 0x180. Neither could
 //            be confirmed without a card, so the write is gone rather than
 //            guessed at - nothing the driver needs depends on it.
-//   the wait allowance / iteration ceiling. The engine maintains it and
-//            shortens its own budget after each timeout; writing it fights the
-//            engine (documented in both reference implementations).
-//   0x8d9c0  Tonemap. The ini file keeps the last word; its own default is -1.
 //   the wait allowance / iteration ceiling. The engine maintains it and
 //            shortens its own budget after each timeout; writing it fights the
 //            engine (documented in both reference implementations).
@@ -424,6 +538,16 @@ private:
     //: Where the runtime's ini lives, kept for WriteScale.
     std::wstring ini_path_;
     ImageKind kind_ = ImageKind::Unknown;
+    //: Which build the loaded image is. Not the same question as `kind_`: that
+    //: one says whether the runtime installs its own hooks (Stock) or the host
+    //: drives everything by hand (Patched), and both of the v0.2.17 variants
+    //: answer it differently. This one selects the OFFSET TABLE, which is the
+    //: thing that actually differs between releases.
+    Build build_ = Build::V0217;
+    //: The offset table for the loaded build, set once by the hash check in
+    //: Load(). Never null after a successful Load; everything that reads or
+    //: writes a runtime address goes through here.
+    const rva::Table *table_ = nullptr;
     std::string last_error_;
     std::string found_hash_;
 
