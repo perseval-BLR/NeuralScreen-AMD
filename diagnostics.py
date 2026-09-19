@@ -30,6 +30,7 @@ import platform
 import sys
 import re
 import shutil
+import struct
 import subprocess
 import tempfile
 from typing import Any, Mapping, Sequence
@@ -664,8 +665,7 @@ def collect_own_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, b
     Preferred over the WER folder: ours need no configuration to exist, so they
     are present exactly when the crash we are diagnosing happened here.
     """
-    started = process_start_time()
-    cutoff = started - _CRASH_DUMP_SLACK_S if started > 0 else 0.0
+    cutoff, _why_no_cutoff = dump_freshness_cutoff()
     found: list[tuple[float, Path]] = []
     for directory in _own_worker_dirs():
         try:
@@ -714,8 +714,7 @@ def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes
     The filter is the process start time, with a slack for clock granularity
     and for a dump written immediately as the process came up.
     """
-    started = process_start_time()
-    cutoff = started - _CRASH_DUMP_SLACK_S if started > 0 else 0.0
+    cutoff, _why_no_cutoff = dump_freshness_cutoff()
 
     found: list[tuple[float, Path]] = []
     for directory in _crash_dump_dirs():
@@ -747,6 +746,173 @@ def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes
         # carry a username, and this zip is meant to be attached to an issue.
         dumps.append((f"crashdump/{len(dumps) + 1}.dmp", data))
     return dumps
+
+
+def dump_freshness_cutoff() -> tuple[float, str]:
+    """The age cutoff the collectors apply, and why they apply none when they do not.
+
+    Returned rather than recomputed, because the REPORT needs to say the same
+    thing the collectors did. It said ``only_this_run: True`` unconditionally
+    while the filter below is skipped whenever the cutoff comes out at zero -
+    the start time being unknown, or the process being younger than the slack.
+    A bundle would then carry a previous session's crash while describing it as
+    this run's, which is the failure the filter was added to end.
+    """
+    started = process_start_time()
+    if started <= 0.0:
+        return 0.0, ("the process start time is unknown, so no dump was filtered "
+                     "by age: this bundle may carry an earlier session's crash")
+    cutoff = started - _CRASH_DUMP_SLACK_S
+    if cutoff <= 0.0:
+        return 0.0, ("this process is younger than the freshness slack, so no dump "
+                     "was filtered by age")
+    return cutoff, ""
+
+
+def _minidump_identity(data: bytes) -> dict[str, Any]:
+    """What a minidump says about itself: when it was written, what faulted, and on which image.
+
+    Read rather than assumed, because a dump riding in a bundle is not proof it
+    came from the run the log describes. Measured on a real report: three dumps a
+    full day older than the log travelled with it, and the offset quoted from
+    them belonged to a DIFFERENT build of the runtime - the image that faulted
+    had SizeOfImage 0x6df000 where the one this installation ships is 0x6f5000.
+    Reading that offset against our own image produced a comparison that could
+    not hold, and the correction had to be posted publicly.
+
+    Three facts answer it without guessing: the dump's own timestamp, the module
+    that owns the faulting address, and that module's (size of image, time date
+    stamp) - which is directly comparable to the images this installation ships.
+    """
+    info: dict[str, Any] = {}
+    if len(data) < 32 or not data.startswith(b"MDMP"):
+        return info
+    try:
+        nstreams = struct.unpack_from("<I", data, 8)[0]
+        if not 0 < nstreams < 64:
+            return info
+        written = struct.unpack_from("<I", data, 20)[0]
+        if 0 < written < 0x80000000:
+            info["written"] = written
+
+        streams: dict[int, tuple[int, int]] = {}
+        for i in range(nstreams):
+            at = 32 + i * 12
+            if at + 12 > len(data):
+                break
+            kind, size, rva = struct.unpack_from("<III", data, at)
+            streams[kind] = (rva, size)
+
+        modules: list[tuple[int, int, int, str]] = []
+        if 4 in streams:
+            mr, _sz = streams[4]
+            if mr + 4 <= len(data):
+                count = struct.unpack_from("<I", data, mr)[0]
+                if 0 < count < 1024:
+                    for i in range(count):
+                        at = mr + 4 + i * 108
+                        if at + 22 > len(data):
+                            break
+                        base = struct.unpack_from("<Q", data, at)[0]
+                        size_image = struct.unpack_from("<I", data, at + 8)[0]
+                        stamp = struct.unpack_from("<I", data, at + 16)[0]
+                        name_rva = struct.unpack_from("<I", data, at + 20)[0]
+                        name = ""
+                        if 0 < name_rva < len(data) - 4:
+                            nlen = struct.unpack_from("<I", data, name_rva)[0]
+                            if 0 < nlen < 4096 and name_rva + 4 + nlen <= len(data):
+                                name = data[name_rva + 4:name_rva + 4 + nlen].decode(
+                                    "utf-16-le", errors="replace")
+                        modules.append((base, size_image, stamp, name))
+
+        # The module that owns the faulting address: the fact that, quoted
+        # against the wrong image, produced yesterday's wrong comparison.
+        if 6 in streams:
+            er, _sz = streams[6]
+            if er + 8 + 32 <= len(data):
+                code, _flags, _record, address = struct.unpack_from("<IIQQ", data, er + 8)
+                parameter = struct.unpack_from("<I", data, er + 8 + 32)[0]
+                info["exception_code"] = code
+                info["exception_parameter"] = parameter
+                owner = None
+                for base, size_image, stamp, name in modules:
+                    if base <= address < base + max(size_image, 0x1000):
+                        if owner is None or base > owner[0]:
+                            owner = (base, size_image, stamp, name)
+                if owner is not None:
+                    base, size_image, stamp, name = owner
+                    info["faulted_module"] = name.split("\\")[-1]
+                    info["faulted_module_size_of_image"] = size_image
+                    info["faulted_module_timestamp"] = stamp
+                    info["faulted_rva"] = address - base
+    except (struct.error, ValueError, IndexError):
+        return info
+    return info
+
+
+def shipped_runtime_identities() -> list[dict[str, Any]]:
+    """Size of image and time date stamp of every runtime image this install ships.
+
+    A dump whose faulting module matches none of these did not come from this
+    installation - a second copy of the tool on the same machine carries its own
+    runtime folder, and its crashes are not this build's crashes.
+    """
+    out: list[dict[str, Any]] = []
+    for name in ("dlssnr_amd_pass1.dll", "dlssnr_amd_pass1_patched.dll",
+                 "dlssnr_amd_pass1_v0310.dll"):
+        path = _own_worker_dirs()[0] / name if _own_worker_dirs() else BASE_DIR / name
+        for candidate in (path, BASE_DIR / "native" / name, BASE_DIR / name):
+            try:
+                with candidate.open("rb") as handle:
+                    head = handle.read(0x400)
+            except OSError:
+                continue
+            e_lfanew = struct.unpack_from("<I", head, 0x3C)[0] if len(head) > 0x40 else 0
+            if not 0 < e_lfanew < len(head) - 0x60:
+                continue
+            if head[e_lfanew:e_lfanew + 4] != b"PE\0\0":
+                continue
+            out.append({
+                "name": name,
+                "size_of_image": struct.unpack_from("<I", head, e_lfanew + 24 + 56)[0],
+                "timestamp": struct.unpack_from("<I", head, e_lfanew + 8)[0],
+            })
+            break
+    return out
+
+
+def describe_crash_dumps(dumps: Sequence[tuple[str, bytes]]) -> list[dict[str, Any]]:
+    """One entry per dump: when it was written, what faulted, and whether it is ours.
+
+    ``belongs_to_this_install`` is the field worth reading. False means the image
+    that faulted is not one this installation ships, so an offset read out of
+    that dump must not be compared with our own image's offsets.
+    """
+    shipped = shipped_runtime_identities()
+    described: list[dict[str, Any]] = []
+    for name, data in dumps:
+        entry: dict[str, Any] = {"name": name}
+        entry.update(_minidump_identity(data))
+        module = entry.get("faulted_module", "")
+        if module.startswith("dlssnr_amd_pass1") and shipped:
+            match = next(
+                (s for s in shipped
+                 if s["size_of_image"] == entry.get("faulted_module_size_of_image")
+                 and s["timestamp"] == entry.get("faulted_module_timestamp")),
+                None,
+            )
+            entry["belongs_to_this_install"] = match is not None
+            if match is None:
+                entry["note"] = (
+                    "the image that faulted is NOT one this installation ships "
+                    f"(size of image {entry.get('faulted_module_size_of_image', 0):#x}, "
+                    f"time date stamp {entry.get('faulted_module_timestamp', 0):#010x}); "
+                    "another copy of the tool on this machine keeps its own runtime "
+                    "folder, and an offset from that dump cannot be read against ours")
+        elif module:
+            entry["belongs_to_this_install"] = None
+        described.append(entry)
+    return described
 
 
 #: The AMD runtime writes its own log beside itself, and it is the ONLY place
@@ -1016,16 +1182,36 @@ def create_diagnostic_bundle(
     if not crash_dumps:
         crash_dumps = collect_crash_dumps()
         source = "wer" if crash_dumps else "none"
+    # The claim and the filter must agree. This used to say only_this_run: True
+    # unconditionally while the collectors silently applied NO age filter when
+    # the cutoff came out at zero (unknown start time, or a process younger than
+    # the slack) - so a bundle could carry a previous session's crash while
+    # describing it as this run's.
+    cutoff, no_cutoff_reason = dump_freshness_cutoff()
+    described = describe_crash_dumps(crash_dumps)
     log_metadata["crash_dumps"] = {
         "included": len(crash_dumps),
         "source": source,
         "policy": crash_dump_policy(),
-        # Said out loud so a reader can tell a bundle that carried this run's
-        # crash from one that carried nothing (the folder is per-machine and
-        # outlives the session).
-        "only_this_run": True,
+        "only_this_run": bool(cutoff > 0.0),
         "process_started": process_start_time(),
+        "cutoff": cutoff,
+        # When the filter could not run, this says so and says why. A reader who
+        # sees only_this_run: false must not read the dumps as this run's.
+        "freshness_note": no_cutoff_reason,
+        # What each dump says about itself, read from the minidump rather than
+        # assumed from the fact that it rode along. Measured failure: three dumps
+        # a day older than the log travelled in one bundle, and the module that
+        # faulted was a runtime image this installation does NOT ship - so the
+        # offset quoted from it could not be compared with ours at all.
+        "dumps": described,
     }
+    foreign = [d for d in described if d.get("belongs_to_this_install") is False]
+    if foreign:
+        log_metadata["crash_dumps"]["warning"] = (
+            f"{len(foreign)} of the dumps in this bundle faulted in a runtime image "
+            "this installation does not ship; they are another copy's crashes and "
+            "their offsets must not be read against this build")
 
     # The engine's own log rides along too. Our log answers "what did the host
     # do"; only that file answers "did the engine come up", and a report that
