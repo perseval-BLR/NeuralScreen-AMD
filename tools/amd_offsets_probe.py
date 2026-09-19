@@ -91,18 +91,35 @@ _ANCHOR_STRING = b"DLSSNR_NO_REPACK\0"
 
 # What this probe does NOT do, stated where a reader will hit it:
 #
-# `kRecord`, `kNotify` and `kShutdown` are NOT derived here. Their candidate
-# functions can be ranked by the fields they reference, and on v0.2.17 that
-# ranking is exact - but on v0.3.1 it returns nothing, because the ranking
-# depends on fields whose movement could not be confirmed.
+# `kRecord`, `kNotify` and `kShutdown` are NOT derived here. Ranking their
+# candidate functions by the fields they touch is exact on v0.2.17 - it returns
+# 0xf600, 0x9170 and 0x12690 with no competitors - but it does not carry over,
+# because the ranking leans on fields whose movement is itself in question. And
+# it turns out this does not matter for this host: `Record` is called only on
+# the packet path (off by default), `Notify` only for the patched image (this
+# host drives the stock one), and `Shutdown` is called from nowhere at all. The
+# only entry point the default path needs is `kInit`, and that one IS derived.
 #
-# DELTA IS NOT UNIVERSAL. Between v0.2.17 and v0.3.1 the eleven option fields
-# all move by +0xd338, which is what a relocated data block looks like. The
-# same delta does NOT hold for every other field: applied to kQueue or kHistory
-# it lands in .data yet is referenced by no function at all, while kDevice and
-# kJobCounter land on fields that the record entry really does touch. So the
-# option block may be shifted as a unit and the rest may not - which is exactly
-# why the table is re-derived rather than translated.
+# DELTA IS NOT UNIVERSAL - and this was measured, not assumed. Between v0.2.17
+# and v0.3.1 the eleven option fields all move by +0xd338, which is what a
+# relocated data block looks like. Applying that same delta to the service
+# fields produces addresses that NO function refers to: kDevice +0xd338 is
+# touched by one function, kQueue and kInitCtx by none. The correct addresses
+# for those come out of the STATE INITIALISER instead - see
+# derive_service_fields - and the check is the reference count against the
+# profile the pinned build already has (kDevice: 15 functions there, 16 by this
+# method, 1 by the delta).
+#
+# So: the option block may be translated as a unit and the service fields may
+# not, which is exactly why the table is re-derived rather than shifted.
+
+#: The initialiser's own writes, matched by value. The state initialiser is the
+#: one function that writes a long run of `mov [addr], immediate` into .data,
+#: and it writes the same distinctive constants on both builds (`0x41100000`,
+#: the ASCII pair `version`/`sion`, `0x16e360`). Aligning the two runs pairs the
+#: fields without relying on any delta - which matters because the delta is
+#: exactly what fails here.
+_SERVICE_ALIGN_ORDER = True
 
 
 def sections(data: bytes):
@@ -290,6 +307,134 @@ def derive_entry_points(path: Path):
                 out["kInit"] = start
                 return out
     return out
+
+
+def _immediate_writes(data: bytes, sects):
+    """`mov [rip+X], imm` into .data, per function, in address order.
+
+    Returns {(start, end): [(size, imm, target), ...]} for every function that
+    writes any. The state initialiser is the function with the longest run.
+    """
+    engine = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+    engine.detail = True
+    data_section = next((s for s in sects if s[0] == ".data"), None)
+    if data_section is None:
+        return {}
+    low, high = data_section[1], data_section[1] + data_section[2]
+    out = {}
+    for start, end in functions(data, sects):
+        at = rva_to_offset(sects, start)
+        if at is None:
+            continue
+        rows = []
+        for ins in engine.disasm(data[at:at + (end - start)], start):
+            if ins.mnemonic != "mov" or len(ins.operands) != 2:
+                continue
+            dst, src = ins.operands
+            if src.type != capstone.x86.X86_OP_IMM:
+                continue
+            if (dst.type != capstone.x86.X86_OP_MEM
+                    or dst.mem.base != capstone.x86.X86_REG_RIP):
+                continue
+            target = ins.address + ins.size + dst.mem.disp
+            if low <= target < high:
+                mask = (1 << (8 * dst.size)) - 1
+                rows.append((dst.size, src.imm & mask, target))
+        if rows:
+            out[(start, end)] = rows
+    return out
+
+
+def _referencing_functions(data: bytes, sects, target: int) -> set:
+    """Which functions mention a given .data address at all."""
+    out = set()
+    for start, end in functions(data, sects):
+        for _addr, _mnemonic, _ops, seen in walk(data, sects, start, end):
+            if seen == target:
+                out.add(start)
+    return out
+
+
+def derive_service_fields(path: Path, reference: Path | None = None):
+    """Service-field offsets for `path`, paired against a known-good build.
+
+    The option block can be translated by a delta; these cannot (see the note
+    above). What works instead is the state initialiser: the one function that
+    writes a long ordered run of immediates into .data. Its run has the same
+    distinctive values on both builds, so aligning the two runs pairs field to
+    field without using any delta at all.
+
+    `reference` is the build whose service fields are already known - the one
+    the host is pinned to. Without it there is nothing to pair against, and the
+    answer is an empty dict rather than a guess.
+    """
+    if reference is None:
+        return {}, {}
+    known_writes = _immediate_writes(Path(reference).read_bytes(), sections(Path(reference).read_bytes()))
+    new_writes = _immediate_writes(path.read_bytes(), sections(path.read_bytes()))
+    if not known_writes or not new_writes:
+        return {}, {}
+
+    known = max(known_writes.items(), key=lambda item: len(item[1]))[1]
+    fresh = max(new_writes.items(), key=lambda item: len(item[1]))[1]
+
+    import difflib
+
+    key_known = [(size, imm) for size, imm, _t in known]
+    key_fresh = [(size, imm) for size, imm, _t in fresh]
+    pairs = []
+    matcher = difflib.SequenceMatcher(None, key_known, key_fresh, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            pairs.extend((i1 + k, j1 + k) for k in range(i2 - i1))
+
+    paired = {}
+    for i, j in pairs:
+        paired.setdefault(known[i][2], (fresh[j][2], known[i][1]))
+
+    # Every pairing is only offered with the evidence that it is real: the
+    # number of functions that mention the address. A pairing whose target no
+    # function refers to is not a field, whatever the alignment says.
+    data = path.read_bytes()
+    sects = sections(data)
+    verified = {}
+    for old, (new, imm) in paired.items():
+        if new in verified:
+            continue
+        verified[new] = len(_referencing_functions(data, sects, new))
+    return paired, verified
+
+
+def derive_table(path: Path, reference: Path | None = None):
+    """The whole table for `path`, each field with the evidence behind it.
+
+    Two independent methods are used, and a field is only reported when the
+    method that produced it gives a value some function actually refers to:
+
+      * the OPTION fields come from the ini reader (derive): the store that
+        follows each key's load call. Exact, and it does not care where the
+        data block moved to.
+      * the SERVICE fields come from aligning the state initialiser's run of
+        immediates against the reference build's run (derive_service_fields),
+        falling back to the region deltas when the initialiser does not write
+        the field at all - a pointer or a counter is not an immediate.
+
+    `evidence` is the number of functions that mention the address. It is the
+    check that catches a wrong answer: a translated offset that lands in .data
+    with no references is a dead address, and that is exactly what a wrong
+    delta produces (see the note above).
+    """
+    option_hits, _sects, _data = derive(path)
+    service_pairs, service_refs = derive_service_fields(path, reference)
+
+    table = {}
+    for key, hits in option_hits.items():
+        if hits:
+            table[key] = (hits[0][0], "ini reader", None)
+    if reference is not None and service_pairs:
+        inverse = {old: new for old, (new, _imm) in service_pairs.items()}
+        table["_service_pairs"] = (inverse, "state initialiser", service_refs)
+    return table
 
 
 def main() -> int:
