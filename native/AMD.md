@@ -59,6 +59,35 @@ those hooks also resolves the runtime's own `d3d12.dll`/`dxgi.dll` proxy, so
 disabling it leaves those null and the first call through one lands on address
 zero. That was the previous version's patch; it is gone.
 
+### The second release: v0.3.1
+
+There is a **second release** the driver knows, not just a second variant of the
+same one - and it is the one to try when the picture stays black:
+
+```
+dlssnr_amd_pass1_v0310.dll    v0.3.1   <- set NS_AMD_V0310=1 before starting
+```
+
+Get it by running `tools\prepare_amd_runtime.py` on v0.3.1's own installer (the
+same script as for v0.2.17 - it recognises which release it was given). The file
+it writes is the build as its author made it, **unpatched**: the two corrections
+above are byte edits at v0.2.17 offsets and do not exist in this image.
+
+Why it is here: on the same Radeon architecture this release is reported working
+- `route fsr`, no timeouts, healthy self-check - while v0.2.17 shows a black
+picture in most reports this project has received. Its own notes also fix what
+this program kept meeting by hand: stalls, three crashes, a memory leak, and
+startup crashes in RE Engine games.
+
+The driver picks the offset table from each file's own SHA-256, so a mislabelled
+file is refused rather than driven with the wrong addresses, and the log names
+the build it accepted.
+
+Two things stay unproven on v0.3.1, and the log says so rather than hiding them:
+two diagnostic counters (jobs completed, engine-side timeouts) have no known
+address in that build and are reported as zero instead of being read, and there
+is no patched variant of it.
+
 `native\probe_amd.exe` names which image it found, and the worker's log opens
 with `runtime image: STOCK` or `PATCHED`.
 
