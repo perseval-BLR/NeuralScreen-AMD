@@ -474,7 +474,7 @@ public:
     //: default; we apply it only when auto failed.
     bool RetryInitWithHipIndex(int index);
     //: How many HIP devices were enumerated (for the retry).
-    int HiphDeviceCount() const { return hip_count_; }
+    int HipDeviceCount() const { return hip_count_; }
     //: The HIP index this loader resolved by adapter LUID, or -1 when no HIP
     //: device matched. Read by the bridge so the engine-init retry can hand
     //: the engine the index we already know, instead of its own auto match.
@@ -597,7 +597,9 @@ private:
     //: The engine's own log, remembered so the poll can run from the frame
     //: loop rather than inside Load().
     std::wstring engine_log_path_;
-    unsigned long waited_ms_ = 0;
+    //: When the poll first had something to wait for (0 = not yet). A clock
+    //: reading, not a call count - see PollEngineInit.
+    unsigned long long wait_started_ms_ = 0;
     //: Kept from Load() so RetryInitWithHipIndex can call init again.
     std::wstring weights_path_;
     int hip_count_ = 0;

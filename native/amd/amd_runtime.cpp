@@ -815,10 +815,15 @@ bool Runtime::PollEngineInit(unsigned long budget_ms) {
     if (!LogEndOffsetEx(engine_log_path_, &size_now)) return false;
     if (size_now <= log_from_) return false;         // nothing written yet: pending
 
-    // It wrote, and the line is not there. Give it the whole budget once
-    // before deciding - a slow HIP enumeration is not a failure.
-    waited_ms_ += 25;
-    if (waited_ms_ >= budget_ms) {
+    // It wrote, and the line is not there. Give it the whole budget before
+    // deciding - a slow HIP enumeration is not a failure.
+    //
+    // Measured against the CLOCK, not against a count of calls. A call counter
+    // would tie the budget to how fast frames are arriving: at 4 FPS the same
+    // 1.5 s of grace becomes four seconds of frames, and on a stalling capture
+    // it would never expire at all. The clock says what the comment says.
+    if (wait_started_ms_ == 0) wait_started_ms_ = GetTickCount64();
+    if (GetTickCount64() - wait_started_ms_ >= budget_ms) {
         engine_init_absent_ = true;
         return true;
     }
@@ -843,13 +848,10 @@ bool Runtime::RetryInitWithHipIndex(int index) {
     if (!ready_ || module_ == nullptr || init_ == nullptr) return false;
     if (index < 0) return false;
     At<int>(module_, table_->kHipDevice) = index;
-    for (int i = 0, n = HiphDeviceCount(); i < n; ++i) {
-        // Bind each candidate on this thread first: the engine selects from
-        // the stored index on its own threads, and both working hosts call
-        // hipSetDevice before init for exactly this reason.
-        if (hip_set_ != nullptr) hip_set_(index);
-        break;
-    }
+    // Bind it on this thread too: the engine picks the device up from the
+    // stored index on its own threads, and both working hosts call
+    // hipSetDevice before init for exactly this reason.
+    if (hip_set_ != nullptr) hip_set_(index);
     const std::string weights_narrow = narrow(weights_path_);
     const int rc = guarded_init(module_, table_->kInit, ctx_, &weights_narrow);
     if (rc < 0) {
@@ -866,7 +868,7 @@ bool Runtime::RetryInitWithHipIndex(int index) {
     // whether it came up, and it needs the swapchain first. The caller polls.
     engine_init_seen_ = false;
     engine_init_absent_ = false;
-    waited_ms_ = 0;
+    wait_started_ms_ = 0;
     return true;
 }
 

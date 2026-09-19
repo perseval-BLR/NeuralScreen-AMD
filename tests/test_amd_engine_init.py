@@ -165,9 +165,13 @@ def main() -> int:
         #
         # Not `"budget_ms" in poll`: the parameter is in the signature, so that
         # check passes with the comparison deleted - it did.
-        if not re.search(r"waited_ms_\s*\+=", poll):
-            failures.append("PollEngineInit does not advance a wait clock")
-        if not re.search(r"waited_ms_\s*>=\s*budget_ms", poll):
+        if not re.search(r"GetTickCount64\s*\(\s*\)\s*-\s*wait_started_ms_", poll):
+            failures.append(
+                "PollEngineInit does not measure its wait against the clock - a "
+                "call counter ties the grace period to the frame rate, and at "
+                "4 FPS (a reported figure) 1.5 s of grace becomes seconds of "
+                "frames; on a stalling capture it never expires at all")
+        if not re.search(r">=\s*budget_ms", poll):
             failures.append(
                 "PollEngineInit never compares its wait against the budget - it "
                 "would declare the engine absent on the very first call")
