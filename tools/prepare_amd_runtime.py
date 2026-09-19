@@ -26,9 +26,12 @@ WHAT IT EXPECTS TO FIND
       3. run this script
 
 WHAT IT DOES
-  * verifies the runtime is the build the driver knows (v0.2.14, 7,156,224
-    bytes, sha256 1062237...);
-  * applies the in-place patches every external host applies to it -
+  * verifies the runtime is a build the driver knows. Two are accepted, each by
+    its own size and sha256: **v0.2.17** (7,248,384 bytes, the build the pinned
+    offset table and the patches belong to) and **v0.3.1** (7,304,192 bytes,
+    written unpatched). An older build - v0.2.14, 7,156,224 bytes - is refused
+    by name, because every release from v0.2.15 moved the data region;
+  * applies the in-place patches every external host applies to v0.2.17 -
     without them the runtime installs its own hooks and fights the host for
     the frame ("the two cannot both hold the wheel"). The patches are
     documented in the community's own runtime-patches.json; this script
@@ -37,16 +40,18 @@ WHAT IT DOES
     (0x625ac). It bounds the wait shader below the network's real cost, so the
     inline wait would expire on every frame; both hosts that produce a picture
     refuse it, for exactly this reason. See PATCHES below.
-  * writes TWO files beside the worker, from the one you supplied:
-      dlssnr_amd_pass1.dll          the stock build. This is what runs.
+  * writes the runtime images beside the worker, from the one you supplied:
+      dlssnr_amd_pass1.dll          the v0.2.17 stock build. This is what runs.
       dlssnr_amd_pass1_patched.dll  the same build with those patches.
+    and, with --download-v0310, also
+      dlssnr_amd_pass1_v0310.dll    v0.3.1, unpatched (NS_AMD_V0310=1).
 
-  STOCK is the default because that is the shape the one host that produces a
-  picture runs: it never modifies the runtime and never drives it by hand - the
+  STOCK is the default because that is the shape the hosts that produce a
+  picture run: they never modify the runtime and never drive it by hand - the
   engine installs its own hooks and owns the frame. The patched build disables
   that hook installer (patch 0x1ffc), so the host has to drive everything itself.
-  Both are the same file with a few bytes changed, so the driver's offset table
-  belongs to either, and switching between them is one variable:
+  Those two are the same file with a few bytes changed, so the driver's offset
+  table belongs to either, and switching between them is one variable:
   NS_AMD_PATCHED=1 selects the patched one. That is what a live A/B needs - the
   same machine and session, one setting apart.
 
@@ -655,12 +660,12 @@ def main() -> int:
     # reinstall, which is what a live A/B needs: the same machine, the same
     # session, one setting apart.
     #
-    # STOCK is the default, because that is the shape the one external host that
-    # produces a picture runs: it never modifies the runtime, never writes into
-    # its image, and never notifies the engine by hand - the engine installs its
-    # own hooks and owns the frame from there. The patched build is the opposite
-    # shape (patch 0x1ffc disables that hook installer), and it stays available
-    # for the comparison.
+    # STOCK is the default, because that is the shape the hosts that produce a
+    # picture run: they never modify the runtime, never write into its image,
+    # and never notify the engine by hand - the engine installs its own hooks
+    # and owns the frame from there. The patched build is the opposite shape
+    # (patch 0x1ffc disables that hook installer), and it stays available for
+    # the comparison.
     stock_dst = folder / "dlssnr_amd_pass1.dll"
     patched_dst = folder / "dlssnr_amd_pass1_patched.dll"
     stock_dst.write_bytes(bytes(data))

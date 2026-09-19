@@ -1,8 +1,8 @@
 """The AMD path's two documented traps: the hook wait and the intensity slider.
 
-Both were found by reading the one external host that works (its own notes list
-them as things that cost it time), and both are silent when they are wrong -
-which is why they are worth a test rather than a comment.
+Both were found by reading the working hosts (their own notes list them as
+things that cost them time), and both are silent when they are wrong - which is
+why they are worth a test rather than a comment.
 
 1. THE HOOK WAIT MUST READ ONLY WHAT THIS RUN APPENDED.
 
@@ -134,6 +134,33 @@ def main() -> int:
         failures.append("the ini is rewritten on every frame instead of only "
                         "when the slider moves")
 
+    # --- the log must not misname the build that is running ---------------
+    # The driver drives three images across two releases, and the log line is
+    # how a report says which one ran. v0.3.1 was reported as "stock v0.2.17"
+    # for one release: every offset it used was right and the sentence about
+    # them was wrong, which is the harder kind of wrong to notice from a log
+    # pasted into an issue.
+    #
+    # v0.3.1 gets its own ImageKind for exactly this reason, so the check names
+    # all three: each release must be distinguishable in the output.
+    bridge_kinds = re.findall(r"case amd_nr::ImageKind::(\w+):", bridge)
+    for kind in ("Stock", "Patched", "Stock0310"):
+        if kind not in bridge_kinds:
+            failures.append(f"the log cannot name ImageKind::{kind} - a build "
+                            f"would be reported as one of the others")
+    if "ImageKind::Stock0310" not in cpp:
+        failures.append("nothing ever sets ImageKind::Stock0310 - v0.3.1 would be "
+                        "logged as the v0.2.17 stock image, which is a wrong "
+                        "statement about which release is loaded")
+    # The hand-made Notify is for the PATCHED image alone. Written as "not
+    # Patched" so a newly added unpatched image cannot silently start being
+    # notified by hand - that would announce every submission twice.
+    if "Kind() != amd_nr::ImageKind::Patched" not in bridge:
+        if "Kind() == amd_nr::ImageKind::Stock" in bridge:
+            failures.append("the Notify gate lists builds by name again "
+                            "(== Stock) - a third unpatched image would then be "
+                            "notified by hand and every submission announced twice")
+
     checks = [
         ("hook wait reads only this run's lines",
          "from_byte" in cpp and "log_from_" in cpp and 0 <= mark_at < load_at),
@@ -145,6 +172,8 @@ def main() -> int:
          bool(m) and 0.0 < float(m.group(1)) <= 0.125),
         ("the ini is written on change, not per frame",
          "last_intensity_" in cpp),
+        ("every build the driver loads has its own name in the log",
+         all(k in bridge_kinds for k in ("Stock", "Patched", "Stock0310"))),
     ]
     print("    checks:")
     for name, ok in checks:

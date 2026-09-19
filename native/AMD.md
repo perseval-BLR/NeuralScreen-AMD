@@ -39,11 +39,11 @@ the NVIDIA path uses on hybrid machines).
 
 You do not need to run an installer, and you do not need to fetch anything.
 
-### Which of the two runtime builds runs
+### Which of the runtime builds runs
 
-Both are the same **v0.2.17** build; the patched one has two byte-level
-corrections, all the same length, so no address moves and the driver's offset
-table accepts either. The difference between them is a single variable:
+Two of the three images are the same **v0.2.17** build; the patched one has two
+byte-level corrections, all the same length, so no address moves and the
+driver's offset table accepts either. The difference between them is a single variable:
 
 ```
 dlssnr_amd_pass1.dll          stock    <- runs by default
@@ -101,7 +101,8 @@ two diagnostic counters (jobs completed, engine-side timeouts) have no known
 address in that build and are reported as zero instead of being read, and there
 is no patched variant of it.
 
-`native\probe_amd.exe` names which image it found, and the worker's log opens
+`native\probe_amd.exe` names which image it found, and it checks the one the
+program would actually load - it reads the same `NS_AMD_V0310` variable, and the worker's log opens
 with `runtime image: STOCK` or `PATCHED`.
 
 ### If you supply your own copy instead
@@ -171,6 +172,7 @@ lines. Nothing has to be turned on: every line below is written always.
 | `[amd] the runtime did not come up: <reason>` | the exact reason, in words |
 | `[amd] the runtime's D3D12/DXGI hooks are in place (N ms)` | the runtime can see our frames |
 | `[amd] runtime image: STOCK` or `PATCHED` | which of the two v0.2.17 images is in play |
+| `[amd] runtime image: STOCK v0.3.1` | the newer release is loaded (`NS_AMD_V0310=1`); a different offset table applies |
 | `[amd] the runtime's hooks were NOT seen` | it cannot see them - the pass will process nothing |
 | `[amd] FidelityFX upscaler loaded` | the dispatch the engine follows is available |
 | `[amd] FSR contexts: network 1664x936 (1:1), upscale work -> display` | the two dispatches are set up |

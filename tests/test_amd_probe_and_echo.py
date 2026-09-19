@@ -68,8 +68,14 @@ def main() -> int:
                 failures.append(f"probe: {what} is not passed through "
                                 f"absolute_dir() at the entry point")
 
-    # And the call that needs it must use the resolved value.
-    at = probe.find("(dir + L\"\\\\\" + kRuntimeName)")
+    # And the call that needs it must use the resolved value. The name is
+    # `checked_name` rather than `kRuntimeName` since the probe learned to check
+    # whichever image the program would load (NS_AMD_V0310 picks the v0.3.1
+    # file), so the path is built from a variable - but from `dir`, which is the
+    # part this test exists for: a relative folder is the error-87 bug.
+    at = probe.find("(dir + L\"\\\\\" + checked_name)")
+    if at < 0:
+        at = probe.find("(dir + L\"\\\\\" + kRuntimeName)")
     if at < 0:
         failures.append("probe: the runtime load no longer builds its path from "
                         "`dir` - this test can no longer see it")

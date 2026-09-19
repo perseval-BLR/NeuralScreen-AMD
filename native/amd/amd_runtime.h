@@ -120,7 +120,7 @@ inline constexpr uint8_t kRuntimeSha256Stock[32] = {
     0x99, 0x4f, 0xcc, 0x51, 0x14, 0x45, 0xff, 0x4e,
 };
 
-enum class ImageKind { Unknown, Stock, Patched };
+enum class ImageKind { Unknown, Stock, Patched, Stock0310 };
 
 //: Which release of the runtime is loaded. The host drives two, and the offset
 //: table is picked from this - so it is set by the hash check, never guessed.

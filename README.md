@@ -147,8 +147,8 @@ Chinese, Japanese and Korean.
 ## The runtime
 
 The neural pass drives a third-party runtime that **ships in this archive**,
-together with its weights — unpacking is enough. What each file is, and which of
-the two runtime builds runs: **[native/AMD.md](native/AMD.md)**.
+together with its weights — unpacking is enough. What each file is, and which build runs
+by default and how to switch: **[native/AMD.md](native/AMD.md)**.
 
 ## Recording and screenshots
 

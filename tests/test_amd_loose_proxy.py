@@ -210,7 +210,8 @@ def main() -> int:
             print(f"  FAIL: {f}")
         print(f"\n{len(failures)} problem(s)")
         return 1
-    print("OK: the loose version.dll goes, and both images of the A/B exist")
+    print("OK: the loose version.dll goes, and every runtime image the driver "
+          "can load exists")
     return 0
 
 

@@ -58,10 +58,62 @@ def header_offsets(text: str) -> dict:
             for m in re.finditer(r"/\*\s*(k\w+)\s*\*/\s*0x([0-9a-fA-F]+)", body)}
 
 
-def probe_offsets(text: str) -> dict:
-    """{name: value} from the probe's own kRva* constants."""
+def table_offsets(text: str, table_name: str) -> dict:
+    """{name: value} from any of the header's tables, by its C++ name.
+
+    Same parse as header_offsets, which is now the v0.2.17 special case of this
+    one: the probe carries constants for both tables, so the comparison has to
+    be able to name either.
+    """
+    start = text.find(f"inline constexpr Table {table_name}")
+    if start < 0:
+        return {}
+    body = text[start:text.find("};", start)]
     return {m.group(1): int(m.group(2), 16)
-            for m in re.finditer(r"constexpr\s+uintptr_t\s+(kRva\w+)\s*=\s*0x([0-9a-fA-F]+)", text)}
+            for m in re.finditer(r"/\*\s*(k\w+)\s*\*/\s*0x([0-9a-fA-F]+)", body)}
+
+
+def probe_offsets(text: str) -> dict:
+    """{name: value} from the probe's own kRva* constants.
+
+    The probe carries TWO sets now, one per build, because it has to call into
+    whichever image the program would load - calling v0.2.17's addresses on a
+    v0.3.1 image would execute something else and report the resulting
+    exception as "wrong build or wrong device", which is the wrong conclusion
+    about the right build.
+
+    The names are normalised so the second set compares against the header's
+    second table: `kRvaInit0310` here is `kInit` in `kV0310`. Without that, a
+    copy that drifted from the header would look like an unrelated constant.
+    """
+    out = {}
+    for m in re.finditer(
+            r"constexpr\s+uintptr_t\s+(kRva\w+)\s*=\s*0x([0-9a-fA-F]+)", text):
+        name, value = m.group(1), int(m.group(2), 16)
+        out[name] = value
+    return out
+
+
+def normalise_probe(offsets: dict) -> tuple[dict, dict]:
+    """Probe constants -> header names, split by which build they belong to.
+
+    Returns ({v0.2.17 names: values}, {v0.3.1 names: values}). The split is the
+    point: each set has to be compared against its OWN table in the header, and
+    the header's two tables use the same field names (`kV0217.kInit` and
+    `kV0310.kInit` are different addresses for the same field).
+
+    kRvaInitCtx/kRvaHipDevice/kRvaInit are the header's kInitCtx/kHipDevice/
+    kInit; the `0310`-suffixed variants are those same fields of the second
+    table, so the suffix is dropped once the build is known.
+    """
+    mapping = {"kRvaInitCtx": "kInitCtx", "kRvaHipDevice": "kHipDevice",
+               "kRvaInit": "kInit"}
+    old_build, new_build = {}, {}
+    for name, value in offsets.items():
+        base, is_0310 = (name[:-4], True) if name.endswith("0310") else (name, False)
+        header_name = mapping.get(base, base)
+        (new_build if is_0310 else old_build)[header_name] = value
+    return old_build, new_build
 
 
 def tool_offsets() -> dict:
@@ -94,16 +146,26 @@ def main() -> int:
                         "addressing the runtime or the constants were renamed")
 
     # --- 1. every constant the probe carries must match the header ---------
-    # kRvaInit <-> kInit, kRvaHipDevice <-> kHipDevice, kRvaInitCtx <-> kInitCtx
-    for pname, value in sorted(probe.items()):
-        hname = "k" + pname[len("kRva"):]          # kRvaInit -> kInit
-        if hname not in header:
-            failures.append(f"probe const {pname} (0x{value:x}) has no "
-                            f"{hname} in the header's table - they have drifted apart")
-        elif header[hname] != value:
-            failures.append(f"{pname} = 0x{value:x} in the probe, but the header "
-                            f"says {hname} = 0x{header[hname]:x} - a port updated "
-                            f"one and not the other")
+    # Two sets now, and each must be compared against ITS OWN table: kRvaInit
+    # against kV0217's kInit, kRvaInit0310 against kV0310's kInit. Comparing a
+    # v0.3.1 constant against the v0.2.17 table would be a false alarm, and
+    # comparing it against nothing is how a drifted copy would hide.
+    header_0310 = table_offsets(
+        HEADER.read_text(encoding="utf-8", errors="replace"), "kV0310")
+    probe_old, probe_new = normalise_probe(probe)
+    if probe_new and not header_0310:
+        failures.append("the probe carries v0.3.1 constants but the header has "
+                        "no kV0310 table at all")
+    for label, table, probe_set in (("", header, probe_old),
+                                    (" (kV0310)", header_0310, probe_new)):
+        for pname, value in sorted(probe_set.items()):
+            if pname not in table:
+                failures.append(f"probe const {pname}{label} (0x{value:x}) has no "
+                                f"{pname} in the header's table - they have drifted apart")
+            elif table[pname] != value:
+                failures.append(f"{pname}{label} = 0x{value:x} in the probe, but the "
+                                f"header says {pname} = 0x{table[pname]:x} - a port "
+                                f"updated one and not the other")
 
     # --- 2. no third copy: a raw address written outside the header --------
     # The forms that reach the runtime. `At<T>(module_, 0x...)` is the header's
@@ -173,8 +235,11 @@ def main() -> int:
     # --- 5. the probe calls what the header names -------------------------
     # If the probe addresses the runtime through its own constants only, the
     # check above covers it; this makes sure it has not started calling an
-    # unnamed address instead.
-    if probe and "reinterpret_cast<uintptr_t>(mod) + kRvaInit" not in probe_text:
+    # unnamed address instead. Both builds' constants count: the probe picks
+    # one of the two by hash, so either name is legitimate - a bare `0x...`
+    # is not.
+    if probe and ("reinterpret_cast<uintptr_t>(mod) + rva_init" not in probe_text
+                  and "reinterpret_cast<uintptr_t>(mod) + kRvaInit" not in probe_text):
         failures.append("the probe no longer uses kRvaInit for the init call - "
                         "it may be calling an address the header does not name")
 

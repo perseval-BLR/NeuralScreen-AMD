@@ -233,13 +233,12 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
 
     // --- 0. which of the two images to drive --------------------------------
     //
-    // The STOCK build is the default. That is a change of direction, and the
-    // reason is the one host that produces a picture: it drives the runtime
-    // WITHOUT modifying it - no writes into the image at all, no hand-made
-    // Notify call - because the build it uses installs its own hooks and owns
-    // the frame from there. Our patched build is the opposite shape: patch
-    // 0x1ffc disables that hook installer so the host has to drive everything
-    // by hand.
+    // The STOCK build is the default. Both hosts that produce a picture drive
+    // the runtime WITHOUT modifying it - no writes into the image at all, no
+    // hand-made Notify call - because the build they use installs its own hooks
+    // and owns the frame from there. Our patched build is the opposite shape:
+    // patch 0x1ffc disables that hook installer so the host has to drive
+    // everything by hand.
     //
     // Both images are the same file with a few in-place patches, so the offset
     // table above belongs to either one - the patches change bytes, not layout.
@@ -327,7 +326,12 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
             // v0.3.1 has one published image; the patched variant does not
             // exist for it because the patches themselves were never carried
             // over (see the note in prepare_amd_runtime.py).
-            kind_ = ImageKind::Stock;
+            //
+            // Stock0310 and not Stock: the offset table is chosen from this, and
+            // the log prints it. Reporting v0.3.1 as "stock v0.2.17" would make
+            // a report claim the wrong release was loaded - in a log whose whole
+            // job is to say which build ran.
+            kind_ = ImageKind::Stock0310;
             table_ = &rva::kV0310;
             build_ = Build::V0310;
         } else {

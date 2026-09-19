@@ -37,6 +37,11 @@ constexpr const wchar_t *kRuntimeName = L"dlssnr_amd_pass1.dll";
 //: that reported the patched file MISSING would send the user after a file that
 //: is simply the other half of the A/B.
 constexpr const wchar_t *kRuntimePatchedName = L"dlssnr_amd_pass1_patched.dll";
+//: The runtime's next release. Named here because it ships in the archive and
+//: NS_AMD_V0310=1 selects it: a probe that did not list it would let a user run
+//: the check, see nothing about the build they had just switched to, and read
+//: "UNKNOWN build" for a file this project puts there itself.
+constexpr const wchar_t *kRuntimeV0310Name = L"dlssnr_amd_pass1_v0310.dll";
 constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
 constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
 //: The FidelityFX upscaler. Not part of the runtime, but the runtime cannot
@@ -51,9 +56,21 @@ constexpr uint8_t kExpectedSha256[32] = {
     0x4c, 0xdd, 0x7e, 0x9a, 0xe2, 0xbc, 0x1d, 0xd8,
 };
 
+// The v0.2.17 RVAs this probe calls. Selected by hash below: the same three
+// fields sit at different addresses in v0.3.1, and calling the v0.2.17 ones on
+// that image would not fail loudly - it would execute whatever is there, and
+// the exception handler would report it as "wrong build or wrong device",
+// which is the wrong conclusion about the right build.
 constexpr uintptr_t kRvaInitCtx = 0x8cef8;
 constexpr uintptr_t kRvaHipDevice = 0x8dad0;
 constexpr uintptr_t kRvaInit = 0x19240;
+
+// The same three for v0.3.1. Derived from the binary by tools/amd_offsets_probe.py
+// and identical to the driver's kV0310 table.
+constexpr uintptr_t kRvaInitCtx0310 = 0x9a0f8;
+constexpr uintptr_t kRvaHipDevice0310 = 0x9ae08;
+constexpr uintptr_t kRvaInit0310 = 0x21720;
+constexpr unsigned long long kKnownRuntimeSize0310 = 7304192;
 
 std::wstring dir_of(const std::wstring &path) {
     const size_t pos = path.find_last_of(L"\\/");
@@ -180,9 +197,10 @@ void out(const char *fmt, ...) {
 // The init call lives in its own function: __try cannot sit in a scope that
 // holds C++ objects with destructors (C2712). No std::string here - the caller
 // owns the string, this function takes the pointer.
-int guarded_init(void *mod, void *ctx, const std::string *weights) {
+int guarded_init(void *mod, void *ctx, const std::string *weights,
+                 uintptr_t rva_init) {
     auto init_fn = reinterpret_cast<bool (__fastcall *)(void *, const std::string *)>(
-        reinterpret_cast<uintptr_t>(mod) + kRvaInit);
+        reinterpret_cast<uintptr_t>(mod) + rva_init);
     __try {
         return init_fn(ctx, weights) ? 0 : 1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -220,12 +238,14 @@ int wmain(int argc, wchar_t **argv) {
     struct Item { const wchar_t *name; bool required; };
     const Item items[] = {
         {kRuntimeName, true}, {kRuntimePatchedName, false},
+        {kRuntimeV0310Name, false},
         {kWeightsName, true}, {kIniName, false},
         {kUpscalerName, true},
     };
     bool runtime_present = false;
     bool upscaler_present = false;
     unsigned long long runtime_size = 0;
+    unsigned long long v0310_size = 0;
     for (const auto &it : items) {
         unsigned long long size = 0;
         const std::wstring p = dir + L"\\" + it.name;
@@ -238,12 +258,15 @@ int wmain(int argc, wchar_t **argv) {
                 runtime_present = true;
                 runtime_size = size;
             }
+            if (wcscmp(it.name, kRuntimeV0310Name) == 0) v0310_size = size;
             if (wcscmp(it.name, kUpscalerName) == 0) upscaler_present = true;
         } else if (it.required) {
             out("   <- required");
         } else if (wcscmp(it.name, kRuntimePatchedName) == 0) {
             // Optional, and only optional: the stock file is the one that runs.
             out("   <- optional, the stock build runs by default");
+        } else if (wcscmp(it.name, kRuntimeV0310Name) == 0) {
+            out("   <- optional, NS_AMD_V0310=1 switches to it");
         }
         out("\n");
     }
@@ -296,29 +319,73 @@ int wmain(int argc, wchar_t **argv) {
     //: whole data region moved between them.
     static const char kStockHashOldBuild[] =
         "106223723fd9266c44d38dc2fb77933948ab37803f46bfcea2bae3a0a474ac84";
+    //: v0.3.1, the runtime's next release. A different build, not another
+    //: variant of the same one: the data region moved again, so the driver
+    //: keeps a second offset table for it. Named here so the file this project
+    //: ships and selects with NS_AMD_V0310=1 is recognised instead of refused.
+    static const char kStockHash0310[] =
+        "b108d6407eb7f094a4f9111edd778eee7b978b648d413a9fc7aeedfdd914c154";
     bool hash_match = false;
-    if (runtime_present) {
+    // Which image --init should call into. The driver picks by the same
+    // environment variable, so the probe and the program agree on what "the
+    // runtime" means in a given run instead of testing a file that is not the
+    // one loaded.
+    bool want_v0310 = false;
+    {
+        char v[8]{};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_V0310", v, sizeof(v));
+        want_v0310 = got > 0 && got < sizeof(v) && v[0] == '1';
+    }
+    // WHICH file gets checked. The driver picks by environment variable, so the
+    // probe does the same: checking dlssnr_amd_pass1.dll while the program runs
+    // dlssnr_amd_pass1_v0310.dll would report on a file nobody loaded, and a
+    // user who set NS_AMD_V0310=1 would read a healthy verdict about the build
+    // they are NOT running.
+    const wchar_t *checked_name = kRuntimeName;
+    unsigned long long checked_size = runtime_size;
+    if (want_v0310 && v0310_size > 0) {
+        checked_name = kRuntimeV0310Name;
+        checked_size = v0310_size;
+    }
+    if (want_v0310 && v0310_size == 0) {
+        out("NS_AMD_V0310=1 is set, but dlssnr_amd_pass1_v0310.dll is not in this\n"
+            "      folder - the program would refuse to start. Unset it or copy\n"
+            "      the file in (it ships in the release archive).\n\n");
+    }
+    if (runtime_present || v0310_size > 0) {
         // The size gate runs first: the table belongs to one exact image, and
         // a truncated or re-extracted file fails here without hashing.
-        const bool size_ok = runtime_size == kKnownRuntimeSize;
-        out("size %llu bytes (known build: %llu) %s\n", runtime_size,
-            kKnownRuntimeSize, size_ok ? "OK" : "<- differs");
+        const bool is_v0310 = wcscmp(checked_name, kRuntimeV0310Name) == 0;
+        const unsigned long long want_size =
+            is_v0310 ? kKnownRuntimeSize0310 : kKnownRuntimeSize;
+        const bool size_ok = checked_size == want_size;
+        out("checking %ls\n", checked_name);
+        out("size %llu bytes (known build: %llu) %s\n", checked_size,
+            want_size, size_ok ? "OK" : "<- differs");
         bool ok = false;
-        const std::string hex = sha256_hex(dir + L"\\" + kRuntimeName, &ok);
+        const std::string hex = sha256_hex(dir + L"\\" + checked_name, &ok);
         if (ok) {
             out("sha256 %s\n", hex.c_str());
             const bool stock = hex.rfind(kStockHash, 0) == 0;
             const bool patched = hex.rfind(kPatchedHash, 0) == 0;
+            const bool stock0310 = hex.rfind(kStockHash0310, 0) == 0;
             // Older files are matched by name so a stale folder gets an
             // instruction instead of "UNKNOWN build": the offset table moved
             // between the builds, so an old file is not "close enough".
             const bool old_patched = hex.rfind(kPatchedHashOldBuild, 0) == 0;
             const bool spin_cap = hex.rfind(kPatchedHashWithSpinCap, 0) == 0;
             const bool old_stock = hex.rfind(kStockHashOldBuild, 0) == 0;
-            hash_match = stock || patched;
-            out("expected %s (stock, default) or %s (patched)\n",
+            hash_match = stock || patched || stock0310;
+            out("expected %s (v0.2.17 stock) or %s (v0.2.17 patched)\n",
                 kStockHash, kPatchedHash);
-            if (stock)
+            out("         %s (v0.3.1, selected with NS_AMD_V0310=1)\n",
+                kStockHash0310);
+            if (stock0310)
+                out("verdict: the v0.3.1 build - the runtime's next release, "
+                    "unpatched.\n         Its own offset table applies, NOT the "
+                    "v0.2.17 one: the data\n         region moved between the "
+                    "releases.\n");
+            else if (stock)
                 out("verdict: the STOCK build (v0.2.17) - the runtime's own "
                     "setup thread is alive and installs its hooks; the host "
                     "drives it from outside alongside them\n");
@@ -404,7 +471,7 @@ int wmain(int argc, wchar_t **argv) {
         if (log) fclose(log);
         return hash_match ? 0 : 1;
     }
-    if (!runtime_present || !hash_match) {
+    if ((!runtime_present && v0310_size == 0) || !hash_match) {
         out("init: refused - the runtime is missing or is not the known build\n");
         if (log) fclose(log);
         return 1;
@@ -425,7 +492,12 @@ int wmain(int argc, wchar_t **argv) {
     // 126 fix landed. `dir` is resolved with GetFullPathNameW at the entry
     // point for this reason - the flags and the absolute path are one
     // requirement, not two.
-    HMODULE mod = LoadLibraryExW((dir + L"\\" + kRuntimeName).c_str(), nullptr,
+    // The same choice as above: --init must call into the image the program
+    // would load. Calling v0.2.17's kInit on a v0.3.1 image would execute
+    // whatever sits at that offset and report an exception as "wrong build or
+    // wrong device" - the wrong conclusion about the right build.
+    const bool init_v0310 = wcscmp(checked_name, kRuntimeV0310Name) == 0;
+    HMODULE mod = LoadLibraryExW((dir + L"\\" + checked_name).c_str(), nullptr,
                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                                      LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!mod) {
@@ -458,15 +530,19 @@ int wmain(int argc, wchar_t **argv) {
             out("init: HIP could not open device 0 (hipSetDevice failed) - the "
                 "engine will most likely fail to start\n");
     }
-    *reinterpret_cast<int *>(reinterpret_cast<uintptr_t>(mod) + kRvaHipDevice) = -1;
+    const uintptr_t rva_hip_device =
+        init_v0310 ? kRvaHipDevice0310 : kRvaHipDevice;
+    const uintptr_t rva_init_ctx = init_v0310 ? kRvaInitCtx0310 : kRvaInitCtx;
+    const uintptr_t rva_init = init_v0310 ? kRvaInit0310 : kRvaInit;
+    *reinterpret_cast<int *>(reinterpret_cast<uintptr_t>(mod) + rva_hip_device) = -1;
     std::wstring wpath = dir + L"\\" + kWeightsName;
     // The runtime takes std::string, so convert once (the runtime itself is a
     // narrow-path API - a non-ASCII install path is out of scope for now).
     std::string narrow_weights;
     narrow_weights.reserve(wpath.size());
     for (wchar_t c : wpath) narrow_weights.push_back(static_cast<char>(c & 0x7F));
-    void *ctx = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mod) + kRvaInitCtx);
-    const int rc = guarded_init(mod, ctx, &narrow_weights);
+    void *ctx = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mod) + rva_init_ctx);
+    const int rc = guarded_init(mod, ctx, &narrow_weights, rva_init);
     if (rc < 0) {
         out("init: EXCEPTION 0x%08X - wrong build or wrong device, the offsets\n"
             "      do not match this image\n", -rc);

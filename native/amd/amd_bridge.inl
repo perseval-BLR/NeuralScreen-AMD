@@ -63,19 +63,20 @@ struct AmdState
     uint64_t fsr_frames = 0, fsr_failures = 0;
     //: Whether the frame is ALSO handed to the engine through its packet call.
     //:
-    //: Default OFF, and that is the change: the one external host that produces
-    //: a picture never uses the packet path at all. It feeds the engine from
-    //: the FSR dispatch alone, and its own notes are why - the runtime takes
-    //: its colour from the OUTPUT of the dispatch it follows. Handing it a
-    //: second, separately-recorded frame gives it two different ideas of which
-    //: frame is current, and the live logs show exactly that: every job is
-    //: `job 1 ... history off`, so the engine never sees a sequence and starts
-    //: over every frame.
+    //: Default OFF, and that is the change: the hosts that produce a picture
+    //: feed the engine through its packet call, NOT through the FSR dispatch -
+    //: they hook Record (r + 0xf600) themselves. That was measured on their
+    //: own sources, and it is the opposite of what this comment used to claim.
     //:
-    //: Kept as a switch rather than deleted outright: the packet path is the
-    //: only route that works when no upscaler is loaded (DispatchNet would
-    //: have nothing to call), and an A/B is how the next report gets a
-    //: yes/no answer instead of a rewrite. NS_AMD_PACKET=1 restores it.
+    //: What the logs show is the consequence, not the cause: every job is
+    //: `job 1 ... history off`, so the engine never sees a sequence and starts
+    //: over every frame. THIS route (dispatch-alone) is the untested one.
+    //:
+    //: Kept as a switch rather than deleted outright: the dispatch route is the
+    //: only one this host has measured end to end, and the packet route needs
+    //: Record, Notify and Shutdown derived for the loaded build - which is what
+    //: tools/amd_offsets_probe.py does not yet do for every release.
+    //: NS_AMD_PACKET=1 turns it on for the A/B.
     bool use_packet = false;
     //: Last frame's wall time, handed to the FSR dispatch (it uses it for its
     //: temporal accumulation). 16.6 ms until a second frame has been timed.
@@ -137,6 +138,8 @@ static const char *AmdImageKindName(amd_nr::ImageKind k)
     case amd_nr::ImageKind::Patched: return "patched v0.2.17 (the tested build)";
     case amd_nr::ImageKind::Stock:   return "stock v0.2.17 (both images are driven by the host; "
                                             "the runtime's own setup thread stays alive in each)";
+    case amd_nr::ImageKind::Stock0310: return "stock v0.3.1 (the runtime's next release, "
+                                              "unpatched - the offset table belongs to THIS one)";
     default:                          return "unknown";
     }
 }
@@ -1107,7 +1110,14 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // nothing announces the submission and this call is the only thing that
     // keeps the dispatch route alive. The host supplies what the patch took
     // out.
-    const bool engine_owns_submission = g_amd.runtime.Kind() == amd_nr::ImageKind::Stock;
+    // "Unpatched" is the question, not "the stock one": v0.3.1 ships with one
+    // published image and it is unpatched, so its own detour announces the
+    // submission exactly as v0.2.17's stock image does. Written as "not
+    // Patched" rather than listing builds, so a third unpatched image cannot
+    // be added and silently start receiving hand-made Notify calls - which
+    // would announce every submission twice.
+    const bool engine_owns_submission =
+        g_amd.runtime.Kind() != amd_nr::ImageKind::Patched;
     if (!engine_owns_submission)
         g_amd.runtime.Notify(h.queue, h.list);
 
@@ -1358,13 +1368,17 @@ static bool AmdInit()
     // report, so ours is re-installed once the engine has had its turn.
     SetUnhandledExceptionFilter(CrashFilter);
 
-    // Which image is in play, said out loud. The two are a deliberate A/B and
-    // the log line is how a report says which side of it ran: the stock build
-    // keeps the runtime's own hooks (the shape the one host that produces a
-    // picture runs), the patched one has them disabled and is driven by hand.
+    // Which image is in play, said out loud. The images are a deliberate A/B and
+    // the log line is how a report says which one ran: the unpatched builds keep
+    // the runtime's own hooks (the shape both working hosts run), the patched
+    // one has them disabled and is driven by hand.
     if (g_amd.runtime.Kind() == amd_nr::ImageKind::Stock)
         Log("[amd] runtime image: STOCK - the engine installs its own hooks and "
             "owns the submission; this host does not notify it by hand");
+    else if (g_amd.runtime.Kind() == amd_nr::ImageKind::Stock0310)
+        Log("[amd] runtime image: STOCK v0.3.1 - the engine installs its own "
+            "hooks and owns the submission; this host does not notify it by hand "
+            "(the offset table is the one for this release)");
     else if (g_amd.runtime.Kind() == amd_nr::ImageKind::Patched)
         Log("[amd] runtime image: PATCHED - the hook installer is disabled, so "
             "this host notifies the engine by hand (NS_AMD_PATCHED=1)");
