@@ -107,6 +107,14 @@ INSTALLER_URL = ("https://github.com/danielblnc/DLSS-NR-on-AMD/releases/download
 INSTALLER_NAME = "dlssnr_on_amd_setup.exe"
 INSTALLER_SIZE = 7_538_418
 
+#: The same thing for the second release. A release is immutable, so the size is
+#: pinned here too: a download of a different size is not the image the v0.3.1
+#: offset table was derived against, and the script refuses it.
+INSTALLER_V0310_URL = ("https://github.com/danielblnc/DLSS-NR-on-AMD/releases/"
+                       "download/v0.3.1/dlssnr_on_amd_setup.exe")
+INSTALLER_V0310_NAME = "dlssnr_on_amd_setup_v0310.exe"
+INSTALLER_V0310_SIZE = 7_598_347
+
 # The patches applied to the runtime, with the expected bytes asserted before
 # anything is written so a different build cannot be silently corrupted.
 #
@@ -275,7 +283,51 @@ def check_offsets(data: bytes) -> list:
     return problems
 
 
-def download_installer(folder: Path) -> int:
+def extract_installer_payload(installer: Path, destination: Path,
+                              size: int, sha256: str, label: str) -> int:
+    """Write the runtime image carried inside `installer`. 0 on success.
+
+    The installer appends its payload to the end of its own PE, so the image is
+    found by scanning for the byte range whose SHA-256 is the one expected. The
+    scan starts at the PE's payload offset, which keeps it to the appended
+    region instead of the whole 7.5 MB file - measured at ~0.1 s that way
+    against a 70 s full scan in the same interpreter.
+
+    The hash is what identifies it: a different release, a truncated download or
+    a corrupted file all fail the same way, and nothing is written when they do.
+    """
+    if destination.is_file() and sha256_of(destination) == sha256:
+        print(f"{destination.name} is already here ({size} bytes)")
+        return 0
+    data = installer.read_bytes()
+    if len(data) < size:
+        print(f"{installer.name} is smaller than the payload it should carry",
+              file=sys.stderr)
+        return 3
+    import hashlib as _hashlib
+
+    try:
+        start = pe_payload_offset(data)
+    except ValueError as exc:
+        print(f"cannot read {installer.name}: {exc}", file=sys.stderr)
+        return 3
+    for candidate in range(start, len(data) - size + 1):
+        if _hashlib.sha256(data[candidate:candidate + size]).hexdigest() == sha256:
+            destination.write_bytes(data[candidate:candidate + size])
+            print(f"written: {destination}  <- the {label} build, unmodified "
+                  f"(payload at {candidate:#x})")
+            print("note: this is NOT what runs by default. Set NS_AMD_V0310=1 "
+                  "before starting the program to use it; the driver accepts "
+                  "both and picks the offset table from each file's own hash.")
+            return 0
+    print(f"no {label} payload found inside {installer.name} - the download is "
+          f"not the release this was written for", file=sys.stderr)
+    return 3
+
+
+def download_installer(folder: Path, url: str = INSTALLER_URL,
+                       name: str = INSTALLER_NAME,
+                       size: int = INSTALLER_SIZE) -> int:
     """Fetch the author's installer into `folder`. 0 on success.
 
     The runtime cannot be shipped here (its licence forbids redistribution and
@@ -283,19 +335,22 @@ def download_installer(folder: Path) -> int:
     and back with the file. Nothing of it passes through this project, and the
     size is checked against the pinned one: a release is immutable, so any
     other size is not the build the offsets and patches belong to.
+
+    `url`/`name`/`size` come from the caller because there are two releases now,
+    and each installer is a different length.
     """
     import urllib.error
     import urllib.request
 
-    dst = folder / INSTALLER_NAME
-    if dst.is_file() and dst.stat().st_size == INSTALLER_SIZE:
-        print(f"{dst.name} is already here ({INSTALLER_SIZE} bytes)")
+    dst = folder / name
+    if dst.is_file() and dst.stat().st_size == size:
+        print(f"{dst.name} is already here ({size} bytes)")
         return 0
-    print(f"downloading {INSTALLER_NAME} from the author's release page...")
-    print(f"  {INSTALLER_URL}")
+    print(f"downloading {name} from the author's release page...")
+    print(f"  {url}")
     tmp = dst.with_suffix(".part")
     try:
-        with urllib.request.urlopen(INSTALLER_URL, timeout=120) as resp, \
+        with urllib.request.urlopen(url, timeout=120) as resp, \
                 open(tmp, "wb") as fh:
             while True:
                 chunk = resp.read(1 << 20)
@@ -306,14 +361,15 @@ def download_installer(folder: Path) -> int:
         tmp.unlink(missing_ok=True)
         print(f"download failed: {exc}\n"
               "Download it by hand from https://github.com/danielblnc/"
-              "DLSS-NR-on-AMD/releases (v0.2.14) and put it in this folder.",
+              "DLSS-NR-on-AMD/releases and put it in this folder.",
               file=sys.stderr)
         return 6
     got = tmp.stat().st_size
-    if got != INSTALLER_SIZE:
+    if got != size:
         tmp.unlink(missing_ok=True)
-        print(f"the downloaded file is {got} bytes, expected {INSTALLER_SIZE} - "
-              "this is not v0.2.14. Nothing was written.", file=sys.stderr)
+        print(f"the downloaded file is {got} bytes, expected {size} - "
+              "this is not the release it was asked for. Nothing was written.",
+              file=sys.stderr)
         return 6
     tmp.replace(dst)
     print(f"downloaded: {dst} ({got} bytes)")
@@ -421,6 +477,10 @@ def main() -> int:
     ap.add_argument("--download", action="store_true",
                     help="fetch the installer from the author's release page "
                          "instead of copying it in by hand")
+    ap.add_argument("--download-v0310", action="store_true",
+                    help="fetch v0.3.1's installer as well, and write its "
+                         "runtime as dlssnr_amd_pass1_v0310.dll (selected at run "
+                         "time with NS_AMD_V0310=1)")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
@@ -436,6 +496,26 @@ def main() -> int:
         print("next: run the installer in that folder and answer y to "
               '"Use this folder?", then run this script again without '
               "--download.")
+
+    # v0.3.1, when asked for. The payload is taken straight out of the
+    # installer's own bytes rather than by running it: the installer is a GUI
+    # that writes version.dll into a folder, and asking a user to run a second
+    # one and then pick which file to keep is a step that can go wrong silently.
+    # The image is located by its hash, so a wrong release cannot be mistaken
+    # for the right one.
+    if args.download_v0310:
+        rc = download_installer(folder, INSTALLER_V0310_URL,
+                                INSTALLER_V0310_NAME, INSTALLER_V0310_SIZE)
+        if rc != 0:
+            return rc
+        rc = extract_installer_payload(
+            folder / INSTALLER_V0310_NAME,
+            folder / "dlssnr_amd_pass1_v0310.dll",
+            V0310_SIZE, V0310_SHA256, "v0.3.1")
+        if rc != 0:
+            return rc
+        drop_loose_proxy(folder, folder / "dlssnr_amd_pass1_v0310.dll")
+        return 0
 
     src = folder / "version.dll"
     dst = folder / "dlssnr_amd_pass1.dll"
@@ -480,20 +560,40 @@ def main() -> int:
     # The installer writes the runtime as version.dll. If the file is bigger
     # than the payload, the payload is extracted from the end of the PE
     # (some distributions ship it appended rather than as a loose DLL).
-    if len(data) != STOCK_SIZE:
-        try:
-            off = pe_payload_offset(data)
-            payload = data[off:off + STOCK_SIZE]
-            if len(payload) != STOCK_SIZE:
-                print(f"the payload extracted from {src.name} is "
-                      f"{len(payload)} bytes, expected {STOCK_SIZE}",
-                      file=sys.stderr)
+    #
+    # The search is done for BOTH known payload sizes, because the driver now
+    # knows two builds and the installer that carries each one has a different
+    # length. Trying one fixed size first (the original shape) would reject a
+    # v0.3.1 installer with "expected 7248384" and send the user after the wrong
+    # release - measured on the real v0.3.1 installer, whose payload sits at
+    # 0x47c00 and is 7304192 bytes.
+    wanted_sizes = [(STOCK_SIZE, STOCK_SHA256), (V0310_SIZE, V0310_SHA256)]
+    if len(data) not in [size for size, _ in wanted_sizes]:
+        extracted = None
+        for size, want in wanted_sizes:
+            if len(data) <= size:
+                continue
+            try:
+                off = pe_payload_offset(data)
+            except ValueError as exc:
+                print(f"cannot use {src.name}: {exc}", file=sys.stderr)
                 return 3
-            data = bytearray(payload)
-            print(f"extracted a {STOCK_SIZE}-byte payload from {src.name}")
-        except ValueError as exc:
-            print(f"cannot use {src.name}: {exc}", file=sys.stderr)
+            # The payload may sit anywhere before the end; the installer appends
+            # it, so the honest search is forward from the PE offset.
+            for candidate in range(off, len(data) - size + 1):
+                if hashlib.sha256(bytes(data[candidate:candidate + size])).hexdigest() == want:
+                    extracted = bytearray(data[candidate:candidate + size])
+                    print(f"extracted a {size}-byte payload from {src.name} "
+                          f"(offset {candidate:#x})")
+                    break
+            if extracted is not None:
+                break
+        if extracted is None:
+            print(f"no known runtime payload found inside {src.name}; expected "
+                  f"{STOCK_SIZE} bytes (v0.2.17) or {V0310_SIZE} bytes (v0.3.1) "
+                  f"with a matching hash", file=sys.stderr)
             return 3
+        data = extracted
 
     have = hashlib.sha256(data).hexdigest()
     if have == V0310_SHA256:

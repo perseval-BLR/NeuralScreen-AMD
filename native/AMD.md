@@ -68,9 +68,18 @@ same one - and it is the one to try when the picture stays black:
 dlssnr_amd_pass1_v0310.dll    v0.3.1   <- set NS_AMD_V0310=1 before starting
 ```
 
-Get it by running `tools\prepare_amd_runtime.py` on v0.3.1's own installer (the
-same script as for v0.2.17 - it recognises which release it was given). The file
-it writes is the build as its author made it, **unpatched**: the two corrections
+Get it in one command:
+
+```
+runtime\python.exe tools\prepare_amd_runtime.py --download-v0310
+```
+
+That fetches v0.3.1's installer from the author's release page, takes the runtime
+out of it and writes `native\dlssnr_amd_pass1_v0310.dll`. Nothing is installed
+and no second GUI is run: the image is located by its own SHA-256 inside the
+installer, so a wrong or truncated download is refused rather than written.
+
+The file is the build as its author made it, **unpatched**: the two corrections
 above are byte edits at v0.2.17 offsets and do not exist in this image.
 
 Why it is here: on the same Radeon architecture this release is reported working
