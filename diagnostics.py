@@ -812,6 +812,60 @@ def collect_runtime_log(max_bytes: int = MAX_LOG_BYTES) -> tuple[bytes, dict[str
     return b"", meta
 
 
+def _local_dumps_config(winreg_module=None) -> tuple[bool, list[str], str]:
+    """What LocalDumps says, as ``(machine_wide, per_app_names, folder)``.
+
+    Separated from the report so it can be tested without this machine's
+    registry: the three answers it distinguishes are the point, and a check
+    that can only run against whatever the developer's PC happens to have
+    cannot tell a working enumeration from a removed one. Both were holes found
+    by breaking the code on purpose.
+
+    The per-application names matter on their own: Windows lets LocalDumps be
+    configured for ONE executable, and a machine set up that way has no
+    DumpFolder on the shared key - so the old single-value check called it
+    unconfigured while it was plainly writing dumps.
+    """
+    configured = False
+    per_app: list[str] = []
+    dump_folder = ""
+    if os.name != "nt" and winreg_module is None:
+        return configured, per_app, dump_folder
+    try:
+        winreg = winreg_module if winreg_module is not None else __import__("winreg")
+    except ImportError:
+        return configured, per_app, dump_folder
+
+    for hive, label in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"),
+                        (winreg.HKEY_CURRENT_USER, "HKCU")):
+        try:
+            key = winreg.OpenKey(
+                hive,
+                r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",
+            )
+        except OSError:
+            continue
+        try:
+            try:
+                folder, _ = winreg.QueryValueEx(key, "DumpFolder")
+                configured = True
+                if not dump_folder:
+                    dump_folder = str(folder)
+            except OSError:
+                pass
+            index = 0
+            while True:
+                try:
+                    sub = winreg.EnumKey(key, index)
+                except OSError:
+                    break
+                index += 1
+                per_app.append(f"{label}\\{sub}")
+        finally:
+            winreg.CloseKey(key)
+    return configured, per_app, dump_folder
+
+
 def crash_dump_policy() -> dict[str, Any]:
     """Whether this machine WOULD have written one, and where to look.
 
@@ -820,35 +874,34 @@ def crash_dump_policy() -> dict[str, Any]:
     dumps at all" need different follow-ups, and a report that says only
     "no dump" sends the reader after the wrong one.
     """
-    configured = False
-    if os.name == "nt":
-        try:
-            import winreg
-
-            key = winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                r"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps",
-            )
-            try:
-                winreg.QueryValueEx(key, "DumpFolder")
-                configured = True
-            except OSError:
-                # The parent key exists, but only per-application subkeys do -
-                # which does NOT catch a process we did not name.
-                configured = False
-            finally:
-                winreg.CloseKey(key)
-        except OSError:
-            configured = False
-        except ImportError:
-            configured = False
+    # THREE answers, not two, and the middle one is why this was rewritten.
+    #
+    # The old check asked whether the HKLM LocalDumps key carried a DumpFolder
+    # value directly, and answered False when it did not. Measured on a real
+    # report: the policy said `false` while the bundle carried three dumps -
+    # because the machine configures LocalDumps PER APPLICATION, one subkey per
+    # executable, and the parent has no DumpFolder of its own. A reader would
+    # have concluded "this machine does not write dumps" while looking at one.
+    #
+    #   machine_wide  - a DumpFolder on the shared key: catches every process
+    #   per_app_names - subkeys that name executables (ours may or may not be
+    #                   among them; the names are reported, not judged)
+    #   any           - either of the above
+    configured, per_app, dump_folder = _local_dumps_config()
     return {
         "local_dumps_configured": configured,
+        "per_app_subkeys": per_app,
+        "any_configured": configured or bool(per_app),
+        "dump_folder": dump_folder,
         "searched": [str(p) for p in _crash_dump_dirs()],
         "note": (
-            "a fast fail (0xC0000409) bypasses SetUnhandledExceptionFilter, so "
-            "the worker's own crash line cannot exist; the dump is the only "
-            "record of the faulting stack"
+            "Windows writes a WER dump only where LocalDumps is configured - "
+            "machine-wide, or per application by executable name. Our worker "
+            "writes its OWN dump next to its log, which needs neither, so a "
+            "missing dump here means it failed rather than that this machine "
+            "cannot write one. A fast fail (0xC0000409) bypasses "
+            "SetUnhandledExceptionFilter, so for that class even our own filter "
+            "does not run."
         ),
     }
 

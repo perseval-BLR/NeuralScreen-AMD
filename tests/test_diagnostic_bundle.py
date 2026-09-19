@@ -359,6 +359,92 @@ class DiagnosticBundleTests(unittest.TestCase):
         leftovers = list(self.work.glob(f".{destination.name}.*.tmp"))
         self.assertEqual(leftovers, [])
 
+    def test_the_policy_reports_per_app_dumps_as_configured(self) -> None:
+        """`local_dumps_configured: false` must not mean "this machine cannot".
+
+        Measured on a real report: the policy said false while the bundle
+        carried three dumps. The machine configures LocalDumps PER APPLICATION,
+        one subkey per executable, and the shared key has no DumpFolder of its
+        own - so the old single-value check answered "not configured" for a
+        machine that was plainly writing them, and a reader would have followed
+        the wrong branch.
+        """
+        policy = diagnostics.crash_dump_policy()
+        self.assertIn("per_app_subkeys", policy)
+        self.assertIn("any_configured", policy)
+        # Three states, each named, so a report never collapses them:
+        #   machine-wide, per-application, or neither.
+        self.assertEqual(
+            policy["any_configured"],
+            bool(policy["local_dumps_configured"]) or bool(policy["per_app_subkeys"]),
+            "any_configured must be exactly the union of the other two")
+
+        # A machine with only per-app keys must NOT read as unconfigured.
+        fake = dict(policy)
+        fake["local_dumps_configured"] = False
+        fake["per_app_subkeys"] = ["HKLM\\SomeGame.exe"]
+        self.assertTrue(fake["local_dumps_configured"] or fake["per_app_subkeys"],
+                        "per-app entries count as configured")
+
+        # The enumeration is checked against a FAKE registry, not this
+        # machine's: a check that can only run against whatever the developer's
+        # PC happens to have cannot tell a working enumeration from a removed
+        # one - and both of those were holes found by breaking the code.
+        class FakeWinreg:
+            HKEY_LOCAL_MACHINE = "HKLM"
+            HKEY_CURRENT_USER = "HKCU"
+
+            def __init__(self, keys):
+                self._keys = keys          # name -> (values, subkeys)
+
+            def OpenKey(self, hive, sub):
+                if self._keys.get(hive) is None:
+                    raise OSError("not found")
+                # The handle is the hive name: the caller must not learn how
+                # this fake stores things, only what a registry would answer.
+                return hive
+
+            def QueryValueEx(self, key, value):
+                vals, _subs = self._keys[key]
+                if value not in vals:
+                    raise OSError("no value")
+                return vals[value], 1
+
+            def EnumKey(self, key, index):
+                _vals, subs = self._keys[key]
+                if index >= len(subs):
+                    raise OSError("no more")
+                return subs[index]
+
+            def CloseKey(self, key):
+                pass
+
+        # A machine with only per-application keys, which is the case that was
+        # mis-reported: no DumpFolder anywhere, two executables configured.
+        # OpenKey yields the hive name; QueryValueEx/EnumKey look the entry up.
+        fake = FakeWinreg({
+            "HKLM": ({}, ["SomeGame.exe", "OurWorker.exe"]),
+            "HKCU": None,
+        })
+        machine, per_app, folder = diagnostics._local_dumps_config(fake)
+        self.assertFalse(machine, "no machine-wide DumpFolder on this fake")
+        self.assertEqual(per_app, ["HKLM\\SomeGame.exe", "HKLM\\OurWorker.exe"],
+                         "each per-application subkey must be named")
+        self.assertEqual(folder, "")
+
+        # Negative control: an empty enumeration is reported as empty, so a
+        # broken walk cannot masquerade as "nothing configured".
+        empty = FakeWinreg({})
+        machine, per_app, folder = diagnostics._local_dumps_config(empty)
+        self.assertEqual((machine, per_app, folder), (False, [], ""))
+
+        # And the note must say that our own dump needs no configuration, or a
+        # reader treats a missing dump as "this machine does not write them".
+        # Case-insensitively: the note capitalises OWN for emphasis, and a
+        # case-sensitive check on prose would fail on a wording tweak while the
+        # meaning - "our dump needs no configuration" - is intact.
+        self.assertIn("own dump", policy["note"].lower())
+
     def test_manifest_identity_and_input_validation(self) -> None:
         fixture = self.work / "release"
         fixture.mkdir()

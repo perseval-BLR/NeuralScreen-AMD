@@ -188,6 +188,18 @@ static void AmdCrashCounters(char *out, size_t cap);
 // with no symbols, the stack is the only way to see WHICH of its code paths
 // was running.
 //
+// WHAT IT DOES NOT COVER, measured here rather than assumed: a fast fail
+// (0xC0000409, the engine's own abort()) bypasses SetUnhandledExceptionFilter
+// entirely, so this filter never runs for that class and no dump is written.
+// Verified with a process that calls __fastfail(7): the filter is not entered.
+// For that class the dump has to come from outside the process - a parent
+// running it under DEBUG_ONLY_THIS_PROCESS catches the exception at
+// first-chance and can dump it while the process is still alive. That is not
+// built yet; the report says so rather than implying coverage.
+//
+// Covered here: access violations and the rest of the SEH class, which is what
+// one reporter's D3D12Core crash was.
+//
 // Best effort and silent on failure: a process on its way out must not turn a
 // diagnosable crash into a different one.
 static void WriteCrashDump(EXCEPTION_POINTERS *info)
