@@ -132,6 +132,78 @@ def tool_offsets() -> dict:
     return dict(mod.KNOWN_OFFSETS)
 
 
+
+# --- the cross-check that found a real bug --------------------------------
+# A second, independently published layout (OptiScaler's dlssnr AMD backend)
+# corrected a wrong address in this project: our v0.3.1 init context had been
+# derived by carrying the v0.2.17 relation "context = kDevice + 0x10" into a
+# build where it is kDevice + 0x18.
+#
+# What makes that source usable is that it is CALIBRATED: its v0.2.17 entry has
+# to reproduce our own v0.2.17 values, which a live Radeon run confirmed. If it
+# ever stops agreeing on the build we can check, it must not be used to correct
+# the build we cannot.
+#
+# The expected values are written out here rather than fetched, so the check
+# still works offline; they are the published table's v0.2.17 entry.
+CALIBRATION_0217 = {
+    "init": 0x19240, "record": 0xf600, "notify": 0x9170, "shutdown": 0x12690,
+    "device": 0x8cee8, "queue": 0x8cef0, "engine": 0x8cef8, "hipOrdinal": 0x8dad0,
+    "configuredInline": 0x8d6c0, "interop": 0x8d82c, "enabled": 0x8d9bc,
+    "initDone": 0x8d218, "nativeFailure": 0x8d21a, "fsrInputs": 0x8d9be,
+    "depthPresent": 0x8d9bf, "temporal": 0x8d9bd, "depthInverted": 0x8d9b0,
+    "explicitDepth": 0x8d9b4, "tone": 0x8d9d0, "structure": 0x8d9d4,
+    "skin": 0x8d9d8, "charMask": 0x8d9e0, "toneChannels": 0x8d9e4,
+    "historyView": 0x8d010, "historyValid": 0x8d018, "jobId": 0x8d914,
+    "jobDone": 0x8d6f4, "timeoutCount": 0x8d6f8, "pendingList": 0x8d908,
+}
+
+# Our own confirmed v0.2.17 values, by the same names.
+OURS_0217 = {
+    "init": "kInit", "record": "kRecord", "notify": "kNotify", "shutdown": "kShutdown",
+    "device": "kDevice", "queue": "kQueue", "engine": "kInitCtx", "hipOrdinal": "kHipDevice",
+    "configuredInline": "kInlineMode", "interop": "kInterop", "enabled": "kEnabled",
+    "initDone": "kFlagAfterInit", "nativeFailure": "kStatusFlag", "fsrInputs": "kUseFsrInputs",
+    "depthPresent": "kUseDepth", "temporal": "kPerPassFlag", "depthInverted": "kDepthInverted",
+    "explicitDepth": "kDepthExplicit", "tone": "kLocalTone", "structure": "kLocalStructure",
+    "skin": "kSkinStructure", "charMask": "kCharMask", "toneChannels": "kToneChannels",
+    "historyView": "kHistory", "historyValid": "kWantHistory", "jobId": "kJobCounter",
+    "jobDone": "kSyncCounter", "timeoutCount": "kTimeoutCounter", "pendingList": "kPendingList",
+}
+
+
+def calibration_is_sound(header_text: str) -> tuple[bool, list[str]]:
+    """Does the published table agree with ours on the build we confirmed?
+
+    Returns (ok, mismatches). Called on the v0.2.17 half only: that is the build
+    a live run has validated, so a disagreement there means the other table is
+    describing something else and must not be used to correct v0.3.1.
+    """
+    ours = table_offsets(header_text, "kV0217")
+    bad = []
+    for their_name, our_name in OURS_0217.items():
+        want = CALIBRATION_0217[their_name]
+        have = ours.get(our_name)
+        if have is None:
+            bad.append(f"{our_name} missing from kV0217")
+        elif have != want:
+            bad.append(f"{our_name}: ours 0x{have:x}, published 0x{want:x}")
+    return (not bad), bad
+
+
+def check_calibration() -> int:
+    ok, bad = calibration_is_sound(HEADER.read_text(encoding="utf-8", errors="replace"))
+    if not ok:
+        print("FAIL: the published layout no longer agrees with our confirmed "
+              "v0.2.17 values, so it cannot be trusted to correct v0.3.1:")
+        for b in bad:
+            print(f"  - {b}")
+        return 1
+    print(f"PASS: the published layout reproduces all {len(CALIBRATION_0217)} of "
+          f"our confirmed v0.2.17 values - it is a calibrated second opinion")
+    return 0
+
+
 def main() -> int:
     failures = []
     header = header_offsets(HEADER.read_text(encoding="utf-8", errors="replace"))
@@ -242,6 +314,13 @@ def main() -> int:
                   and "reinterpret_cast<uintptr_t>(mod) + kRvaInit" not in probe_text):
         failures.append("the probe no longer uses kRvaInit for the init call - "
                         "it may be calling an address the header does not name")
+
+    # The cross-check's own premise: a second layout is only evidence if it
+    # agrees on the build we have validated.
+    _cal_ok, _cal_bad = calibration_is_sound(
+        HEADER.read_text(encoding="utf-8", errors="replace"))
+    for b in _cal_bad:
+        failures.append("published-layout calibration broken: " + b)
 
     if failures:
         print("FAIL: the runtime offset table is not in one place:")

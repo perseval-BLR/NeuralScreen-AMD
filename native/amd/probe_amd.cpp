@@ -65,9 +65,16 @@ constexpr uintptr_t kRvaInitCtx = 0x8cef8;
 constexpr uintptr_t kRvaHipDevice = 0x8dad0;
 constexpr uintptr_t kRvaInit = 0x19240;
 
-// The same three for v0.3.1. Derived from the binary by tools/amd_offsets_probe.py
-// and identical to the driver's kV0310 table.
-constexpr uintptr_t kRvaInitCtx0310 = 0x9a0f8;
+// The same three for v0.3.1, identical to the driver's kV0310 table.
+//
+// kRvaInitCtx0310 was 0x9a0f8 and is 0x9a100: the earlier value carried the
+// v0.2.17 relation "the init context sits at kDevice + 0x10" into a build where
+// the context is at kDevice + 0x18, landing two qwords early on unrelated data.
+// Confirmed by the call site's own `lea rcx,[rip+...]` - and the same
+// disassembly yields our known-correct 0x8cef8 on v0.2.17, which is what makes
+// the method trustworthy here. Cross-checked against OptiScaler's published
+// layout, whose v0.2.17 entry reproduces all 29 of our confirmed values.
+constexpr uintptr_t kRvaInitCtx0310 = 0x9a100;
 constexpr uintptr_t kRvaHipDevice0310 = 0x9ae08;
 constexpr uintptr_t kRvaInit0310 = 0x21720;
 constexpr unsigned long long kKnownRuntimeSize0310 = 7304192;

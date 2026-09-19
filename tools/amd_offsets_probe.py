@@ -94,11 +94,28 @@ _ANCHOR_STRING = b"DLSSNR_NO_REPACK\0"
 # `kRecord`, `kNotify` and `kShutdown` are NOT derived here. Ranking their
 # candidate functions by the fields they touch is exact on v0.2.17 - it returns
 # 0xf600, 0x9170 and 0x12690 with no competitors - but it does not carry over,
-# because the ranking leans on fields whose movement is itself in question. And
-# it turns out this does not matter for this host: `Record` is called only on
-# the packet path (off by default), `Notify` only for the patched image (this
-# host drives the stock one), and `Shutdown` is called from nowhere at all. The
-# only entry point the default path needs is `kInit`, and that one IS derived.
+# because the ranking leans on fields whose movement is itself in question. The
+# only entry point this probe places is `kInit`.
+#
+# Those three are not lost, though: an independent published layout (OptiScaler's
+# dlssnr AMD backend, OptiScaler/dlssnr/amd/AmdLayout.h) maps them per runtime,
+# bound to each image's SHA-256, and its v0.2.17 entry reproduces all 29 of our
+# confirmed values. Use that as a CALIBRATED second source - never as a first
+# one, and never without checking the calibration on the build we can verify.
+#
+# WHICH VALUES THIS PROBE GOT WRONG, because it is the reason the rule above
+# exists. `derive_service_fields` pairs our known-good build against a new one by
+# aligning their state initialisers. That is sound for a field whose position
+# within the initialiser does not change - and it silently assumed that of
+# `kInitCtx`, which sits at kDevice + 0x10 on v0.2.17 and at kDevice + 0x18 on
+# v0.3.1. The probe emitted 0x9a0f8; the truth is 0x9a100; a driver using the
+# wrong value hands the engine a context pointing at unrelated data, and the
+# failure looks like every other failure on this path.
+#
+# The lesson is not "the alignment method is bad" - it placed 24 of 30 fields
+# correctly. It is that a derived address needs a second, independent witness
+# before anything is driven with it, and the witness has to be checked on a build
+# where the answer is already known.
 #
 # DELTA IS NOT UNIVERSAL - and this was measured, not assumed. Between v0.2.17
 # and v0.3.1 the eleven option fields all move by +0xd338, which is what a

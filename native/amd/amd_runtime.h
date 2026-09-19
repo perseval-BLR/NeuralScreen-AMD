@@ -244,18 +244,54 @@ inline constexpr Table kV0217 = {
     /* kPendingList */ 0x8d908,
 };
 
-//: v0.3.1, derived by tools/amd_offsets_probe.py and cross-checked against the
-//: published v0.3.0 table (every option field differs by exactly +0x31d8, and
-//: the service fields land where the reference profile says they should). The
-//: two counters have no derived address and are 0 - see the struct's note.
+//: v0.3.1, derived by tools/amd_offsets_probe.py and CROSS-CHECKED against an
+//: independent published table: OptiScaler's dlssnr AMD backend
+//: (OptiScaler/dlssnr/amd/AmdLayout.h) carries a layout per runtime, bound to
+//: each image's own SHA-256. Its v0.2.17 entry reproduces all 29 of our
+//: v0.2.17 values exactly - the build our live Radeon run confirmed - so it is a
+//: calibrated second opinion, not a guess.
+//:
+//: It corrected five values here. Four were 0 ("not derived") and are known
+//: addresses:
+//:
+//:   kRecord    0x13540   a function head in .pdata with 6 references - this
+//:                        opens the packet path on v0.3.1, the route both
+//:                        working hosts feed the engine through and the one this
+//:                        driver left off for want of these addresses
+//:   kNotify    0x9720    function head, reached by lea rdx
+//:   kShutdown  0x17150   function head, two call sites
+//:   kTimeoutCounter 0x9a960   sits between kJobCounter (0x9a95c) and the
+//:                        watchdog; the completed-jobs counter is left at 0
+//:                        because neither table maps it
+//:
+//: And one was WRONG, which is why the cross-check mattered:
+//:
+//:   kInitCtx   was 0x9a0f8, is 0x9a100
+//:
+//: The probe had carried forward the v0.2.17 relation "the init context sits at
+//: kDevice + 0x10". In v0.3.1 that relation no longer holds - the context is at
+//: kDevice + 0x18 - so the derived address landed two qwords early, on data the
+//: engine does not treat as its context. Independently confirmed by
+//: disassembling the call site: both images use the same
+//: `lea rcx,[rip+...]; lea rdx,[rbp-0x20]; call init` shape, and in v0.2.17 that
+//: gives exactly our confirmed 0x8cef8, while in v0.3.1 it gives 0x9a100.
+//:
+//: The consequence of the old value is worth stating plainly: v0.3.1 could not
+//: have worked on any card. It would have been handed a context pointing at
+//: unrelated data, and the failure would have looked like everything else.
+//:
+//: kScale has no entry in the published table and keeps the value carried by the
+//: +0xd338 option-block delta from the confirmed v0.2.17 address. It has no
+//: code reference in either build, so "no references" is not evidence against it
+//: (the slider demonstrably works on v0.2.17 through that same address).
 inline constexpr Table kV0310 = {
     /* kInit */ 0x21720,
-    /* kRecord */ 0x0,        // not derived; needed only on the packet path
-    /* kNotify */ 0x0,        // not derived; needed only for the patched image
-    /* kShutdown */ 0x0,      // not derived; called from nowhere
+    /* kRecord */ 0x13540,    // packet path; function head, 6 refs
+    /* kNotify */ 0x9720,     // function head, reached by lea rdx
+    /* kShutdown */ 0x17150,  // function head, 2 call sites
     /* kDevice */ 0x9a0e8,
     /* kQueue */ 0x9a0f0,
-    /* kInitCtx */ 0x9a0f8,
+    /* kInitCtx */ 0x9a100,   // was 0x9a0f8 - the context is kDevice + 0x18 here
     /* kHipDevice */ 0x9ae08,
     /* kInlineMode */ 0x9a928,
     /* kInterop */ 0x9ab58,
@@ -276,8 +312,8 @@ inline constexpr Table kV0310 = {
     /* kWantHistory */ 0x9a220,
     /* kJobCounter */ 0x9a95c,
     /* kStatusFlag */ 0x9a422,
-    /* kSyncCounter */ 0x0,
-    /* kTimeoutCounter */ 0x0,
+    /* kSyncCounter */ 0x0,    // still unmapped in both tables
+    /* kTimeoutCounter */ 0x9a960,
     /* kPendingList */ 0x9ac38,
 };
 

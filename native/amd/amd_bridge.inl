@@ -897,16 +897,23 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     const float mv_scale_y = v.hgt != 0 ? static_cast<float>(nh) / static_cast<float>(v.hgt) : 1.0f;
 
     // ---- the packet, only when asked for --------------------------------
-    // Default: NOT recorded. The engine takes its colour from the output of the
-    // dispatch it follows, and that dispatch is already in this list - so the
-    // packet is a SECOND, differently-shaped statement about which frame is
-    // current, and the live logs show what that costs: every job comes back
-    // `job 1 ... history off`, meaning the engine never sees a sequence and
-    // re-initialises on each frame. The one external host that produces a
-    // picture does not use this call at all.
+    // Default: NOT recorded, and the reason recorded here for a long time was
+    // wrong. It said the host that produces a picture does not use this call.
+    // The opposite is true: BOTH hosts that produce a picture feed the engine
+    // through the packet and hook Record themselves, and neither of them uses
+    // the dispatch route this driver defaults to.
     //
-    // NS_AMD_PACKET=1 restores it, and that is deliberate: this is a live A/B,
-    // and the packet path is the only route left when no upscaler is loaded.
+    // What the logs show is real - every job comes back `job 1 ... history off`,
+    // so the engine never sees a sequence and starts over each frame - but that
+    // is the consequence of the route, not evidence for it. The dispatch-alone
+    // path is the untested one; the packet path is the one with working
+    // installations behind it. The default is unchanged on purpose (flipping it
+    // would change what every existing report is a report about), and until
+    // v0.3.1 it could not even be tried there: kRecord had no address.
+    //
+    // NS_AMD_PACKET=1 turns it on. On v0.3.1 that is now a real option - the
+    // packet entry points were resolved from an independent published layout,
+    // calibrated against our confirmed v0.2.17 values.
     uint32_t wanted = 0;
     if (g_amd.use_packet)
     {
