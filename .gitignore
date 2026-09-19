@@ -37,6 +37,7 @@ amd_fidelityfx_loader_dx12.dll
 # in its `extra` payload and lets them past the native/ filter by name.
 dlssnr_amd_pass1.dll
 dlssnr_amd_pass1_patched.dll
+dlssnr_amd_pass1_v0310.dll
 dlssnr_on_amd_weights.bin
 dlssnr_on_amd.ini
 dlssnr_on_amd.log

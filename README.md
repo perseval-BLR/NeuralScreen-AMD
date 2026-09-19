@@ -53,10 +53,10 @@ screen down the middle to show what the effect does.*
 - **AMD Adrenalin 26.1.1 or newer, and Windows up to date.** The pass needs
   the HIP 7 runtime that ships with the driver; whether an older driver can
   work at all is one of the open questions.
-- **The neural runtime ships in the archive** — the runtime, its weights and the
-  FidelityFX upscaler are all in `native\`, so unpacking is enough. What each
-  file is, and which of the two runtime builds runs, is in
-  **[native/AMD.md](native/AMD.md)**.
+- **The neural runtime ships in the archive** — the runtime in both of its
+  releases, its weights and the FidelityFX upscaler are all in `native\`, so
+  unpacking is enough. What each file is, which build runs by default and how to
+  switch to the newer one is in **[native/AMD.md](native/AMD.md)**.
 - **Nothing else installed.** The release archive brings its own Python, and
   the FidelityFX upscaler the pass dispatches (AMD's own DLL, redistributed
   under AMD's licence — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).

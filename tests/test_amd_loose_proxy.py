@@ -171,13 +171,20 @@ def main() -> int:
                         "this check is looking at the wrong path")
 
     # --- 9. the runtime ships in the archive (unpack and it works) --------
-    # The four files the installer would have produced must be in the payload,
-    # or the archive is not self-contained and the user is back to a manual
-    # step before the first run - which the logs show is the step that gets
-    # skipped ("dlssnr_amd_pass1.dll not found", and no picture).
+    # Every runtime image must be in the payload, or the archive is not
+    # self-contained and the user is back to a manual step before the first run
+    # - which the logs show is the step that gets skipped ("dlssnr_amd_pass1.dll
+    # not found", and no picture).
+    #
+    # All THREE, including v0.3.1: it is the build to try when the picture stays
+    # black, and it spent one release as a file the user had to fetch with a
+    # command. That is the same shape of mistake this check exists for, so the
+    # check names it too - a runtime that is only reachable by hand is a runtime
+    # most users will not reach.
     shipped_list = shipped  # build_release_zip.py source, read above
     for f in ("native/dlssnr_amd_pass1.dll",
               "native/dlssnr_amd_pass1_patched.dll",
+              "native/dlssnr_amd_pass1_v0310.dll",
               "native/dlssnr_on_amd_weights.bin",
               "native/dlssnr_on_amd.ini"):
         if f'"{f}"' not in shipped_list:

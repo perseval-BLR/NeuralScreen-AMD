@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
@@ -72,12 +72,26 @@ extra = [
     #   dlssnr_amd_pass1_patched.dll  the same build with the four patches
     #                                 (55 bytes, four places)
     #                                 (NS_AMD_PATCHED=1 selects it - the A/B)
+    #   dlssnr_amd_pass1_v0310.dll    the runtime's NEXT release, v0.3.1
+    #                                 (NS_AMD_V0310=1 selects it)
     #   dlssnr_on_amd_weights.bin     the network weights, 153 tensors
     #   dlssnr_on_amd.ini             the keys the runtime reads in its DllMain
     #
+    # v0.3.1 ships too, and that is deliberate: it is the build to try when the
+    # picture stays black, and its own release notes name fixes for what this
+    # program kept meeting by hand - a wait method that reduces stalls, three
+    # crashes, a memory leak, RE Engine startup crashes. Leaving it as a file the
+    # user had to fetch with a command repeated the exact mistake the paragraph
+    # above describes: `--download-v0310` existed, and a step that has to be
+    # performed is a step that gets skipped. The user asked for every runtime to
+    # be in the archive (19.09), and the archive is 7.3 MB heavier for it.
+    #
+    # It is NOT the default. v0.2.17 runs unless the user asks otherwise, because
+    # a swap changes what every existing report is a report about.
+    #
     # The weights were produced from `nvngx_dlssnr.dll`, which this archive has
     # always carried - verified byte-identical (sha256 dcc0dc24...) to the copy
-    # that producing install used. The two runtime images are one build with five
+    # that producing install used. The two v0.2.17 images are one build with five
     # bytes changed, which is why the driver's offset table accepts either.
     #
     # NOT here, on purpose: anything named `version.dll`. That name is how the
@@ -87,6 +101,7 @@ extra = [
     # one if it finds it; the archive must not put one back.
     "native/dlssnr_amd_pass1.dll",
     "native/dlssnr_amd_pass1_patched.dll",
+    "native/dlssnr_amd_pass1_v0310.dll",
     "native/dlssnr_on_amd_weights.bin",
     "native/dlssnr_on_amd.ini",
 ]
