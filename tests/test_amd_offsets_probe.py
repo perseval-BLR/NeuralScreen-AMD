@@ -20,6 +20,7 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -53,6 +54,68 @@ class ReadingTests(unittest.TestCase):
         for key in probe.OPTION_KEYS:
             self.assertNotIn(key, results,
                              f"{key} was mapped although no code reads it")
+
+    def test_entry_points_are_not_guessed(self) -> None:
+        """Only the structurally identified entry point is offered.
+
+        Three of the four entry points cannot be placed by this probe: ranking
+        their candidate functions needs every field, and the fields do not all
+        move together between builds. Offering a guess for them would be worse
+        than offering nothing - a wrong entry point is a jump into the middle of
+        an unrelated function, which does not fail politely.
+        """
+        entries = probe.derive_entry_points(Path(self._image_path({})))
+        self.assertEqual(entries, {},
+                         "an entry point was reported for an image that has no "
+                         "anchor string")
+        self.assertEqual(set(probe.ENTRY_ANCHOR_V0217), {"kInit"},
+                         "the control anchor set grew without a way to verify it")
+
+    def test_anchor_string_identifies_the_init_function(self) -> None:
+        """The one entry point the probe does place, placed by its own evidence."""
+        path = Path(self._image_path_with_anchor())
+        entries = probe.derive_entry_points(path)
+        self.assertEqual(set(entries), {"kInit"})
+        self.assertEqual(entries["kInit"], 0x1000,
+                         "the anchor's referencing function is not the one reported")
+
+    def test_control_actually_compares_the_entry_point(self) -> None:
+        """`--expect` must fail when the entry point is wrong.
+
+        The control is the only thing standing between this probe and a wrong
+        offset written into someone else's image, so it is tested the way the
+        probe is: by making the answer wrong and requiring a failure. A control
+        that silently compares nothing is worse than no control, because it
+        reads as a pass.
+        """
+        import contextlib
+        import io
+
+        path = self._image_path_with_anchor()
+        # The real v0.2.17 init RVA is not where the synthetic image puts it, so
+        # a control run over this image with --expect must report a mismatch.
+        captured = io.StringIO()
+        argv = ["amd_offsets_probe.py", str(path), "--expect"]
+        with mock.patch.object(sys, "argv", argv), \
+             contextlib.redirect_stdout(captured):
+            code = probe.main()
+        self.assertEqual(code, 1, "control passed an image with the wrong kInit")
+        self.assertIn("MISMATCH", captured.getvalue())
+        self.assertIn("kInit", captured.getvalue())
+
+    def _image_path_with_anchor(self) -> str:
+        """A synthetic image whose .text refers to the anchor string."""
+        raw = bytearray(self._synthetic({}))
+        # `.text` starts at raw 0x400; put `lea rcx,[rip+disp]` at its head and
+        # the anchor string into .rdata.
+        anchor_rva = 0x5000
+        disp = anchor_rva - (0x1000 + 7)
+        raw[0x400:0x407] = b"\x48\x8d\x0d" + struct.pack("<i", disp)
+        raw[0x400 + 0x1000:0x400 + 0x1000 + len(probe._ANCHOR_STRING)] = \
+            probe._ANCHOR_STRING
+        path = Path(self._temporary.name) / "anchored.dll"
+        path.write_bytes(bytes(raw))
+        return str(path)
 
     def _image(self, keys: dict[str, int]) -> dict:
         path = self._image_path(keys)
@@ -89,10 +152,15 @@ class ReadingTests(unittest.TestCase):
         Layout: for every key, `lea rdx,[rip+name]` (4+4 bytes), `call
         [rip+slot]` (6 bytes), `mov [rip+field], eax` (6 bytes) - the same three
         instructions the real reader uses, so the same reader code path runs.
+
+        A `.pdata` is included, because the probe reads code bounds from it: an
+        image without one has no functions as far as this reader is concerned,
+        and that is a property of the reader worth keeping rather than relaxing.
         """
         text_rva, text_size = 0x1000, 0x1000
         data_rva, data_size = 0x3000, 0x1000
         rdata_rva, rdata_size = 0x5000, 0x1000
+        pdata_rva, pdata_size = 0x7000, 0x1000
 
         names = b""
         name_rvas = {}
@@ -101,9 +169,8 @@ class ReadingTests(unittest.TestCase):
             names += key.encode("ascii") + b"\0"
 
         code = b""
-        field_rvas = []
         for key, field_rva in keys.items():
-            name_here = 0x1000 + len(code)
+            name_here = text_rva + len(code)
             # lea rdx, [rip + disp]
             disp = name_rvas[key] - (name_here + 7)
             code += b"\x48\x8d\x15" + struct.pack("<i", disp)
@@ -111,18 +178,23 @@ class ReadingTests(unittest.TestCase):
             # imported profile API; the reader only needs a call to stop at.
             code += b"\xff\x15" + struct.pack("<i", 0)
             # mov dword ptr [rip + disp], eax
-            here = 0x1000 + len(code)
+            here = text_rva + len(code)
             disp2 = field_rva - (here + 6)
             code += b"\x89\x05" + struct.pack("<i", disp2)
-            field_rvas.append(field_rva)
+
+        # One .pdata entry covering the whole of .text, so the code above is a
+        # function with bounds the reader will honour.
+        pdata = struct.pack("<III", text_rva, text_rva + text_size, 0)
 
         sections = [
             (b".text", text_rva, text_size, 0x400, text_size),
             (b".rdata", rdata_rva, rdata_size, 0x400 + text_size, rdata_size),
             (b".data", data_rva, data_size, 0x400 + text_size + rdata_size, data_size),
+            (b".pdata", pdata_rva, pdata_size, 0x400 + text_size + rdata_size + data_size,
+             pdata_size),
         ]
         headers = 0x400
-        raw = bytearray(headers + text_size + rdata_size + data_size)
+        raw = bytearray(headers + text_size + rdata_size + data_size + pdata_size)
         pe = 0x80
         raw[0:2] = b"MZ"
         struct.pack_into("<I", raw, 0x3C, pe)
@@ -136,6 +208,8 @@ class ReadingTests(unittest.TestCase):
             struct.pack_into("<IIII", raw, at + 8, vsize, vaddr, rawsize, rawptr)
         raw[0x400:0x400 + len(code)] = code
         raw[0x400 + text_size:0x400 + text_size + len(names)] = names
+        pdata_at = 0x400 + text_size + rdata_size + data_size
+        raw[pdata_at:pdata_at + len(pdata)] = pdata
         return bytes(raw)
 
 

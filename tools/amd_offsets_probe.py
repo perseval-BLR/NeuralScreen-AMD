@@ -81,6 +81,29 @@ EXPECTED_V0217 = {
     "ToneChannels": 0x8D9E4,
 }
 
+#: The init entry point, identified by a string only that function references.
+#: It is the one entry point this probe can place structurally: its neighbours
+#: are found by which fields they touch, which is reliable only once every field
+#: is known - and the fields do NOT all move together (see DELTA IS NOT
+#: UNIVERSAL below).
+ENTRY_ANCHOR_V0217 = {"kInit": 0x19240}
+_ANCHOR_STRING = b"DLSSNR_NO_REPACK\0"
+
+# What this probe does NOT do, stated where a reader will hit it:
+#
+# `kRecord`, `kNotify` and `kShutdown` are NOT derived here. Their candidate
+# functions can be ranked by the fields they reference, and on v0.2.17 that
+# ranking is exact - but on v0.3.1 it returns nothing, because the ranking
+# depends on fields whose movement could not be confirmed.
+#
+# DELTA IS NOT UNIVERSAL. Between v0.2.17 and v0.3.1 the eleven option fields
+# all move by +0xd338, which is what a relocated data block looks like. The
+# same delta does NOT hold for every other field: applied to kQueue or kHistory
+# it lands in .data yet is referenced by no function at all, while kDevice and
+# kJobCounter land on fields that the record entry really does touch. So the
+# option block may be shifted as a unit and the rest may not - which is exactly
+# why the table is re-derived rather than translated.
+
 
 def sections(data: bytes):
     """(name, virtual address, virtual size, raw pointer, raw size) per section."""
@@ -244,6 +267,31 @@ def derive(path: Path):
     return results, sects, data
 
 
+def derive_entry_points(path: Path):
+    """Entry points this probe can place, keyed by name.
+
+    Only `kInit` is derived, and it is derived structurally rather than by
+    ranking: a string that only that function refers to identifies it exactly,
+    on both builds this has been run against. The others are deliberately not
+    guessed - see the note above EXPECTED_V0217 for why the field-based ranking
+    is not good enough to trust on a new build.
+    """
+    data = path.read_bytes()
+    sects = sections(data)
+    funcs = functions(data, sects)
+    at = data.find(_ANCHOR_STRING)
+    out = {}
+    if at < 0:
+        return out
+    anchor = offset_to_rva(sects, at)
+    for start, end in funcs:
+        for _addr, _mnemonic, _ops, target in walk(data, sects, start, end):
+            if target == anchor:
+                out["kInit"] = start
+                return out
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -287,6 +335,26 @@ def main() -> int:
             if rva != want:
                 failures.append(key)
                 print(f"{'':16} {'':>11}  EXPECTED {want:#x} - MISMATCH")
+
+    # The entry points, and only the one this probe can place structurally.
+    entries = derive_entry_points(args.dll)
+    print()
+    print(f"{'entry point':16} {'function RVA':>13}")
+    print("-" * 58)
+    for name in ("kInit", "kRecord", "kNotify", "kShutdown"):
+        rva = entries.get(name)
+        if rva is None:
+            print(f"{name:16} {'not derived':>13}  (this probe places only kInit; "
+                  f"see the note in the source)")
+            continue
+        print(f"{name:16} {rva:#13x}")
+        if args.expect:
+            want = ENTRY_ANCHOR_V0217.get(name)
+            if want is None:
+                continue
+            if rva != want:
+                failures.append(name)
+                print(f"{'':16} {'':>13}  EXPECTED {want:#x} - MISMATCH")
 
     if args.expect:
         print()
