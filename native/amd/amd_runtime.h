@@ -456,6 +456,30 @@ public:
     //: "not seen" - the same three-answer discipline as HooksApplicable().
     bool EngineInitApplicable() const { return engine_init_applicable_; }
 
+    //: Ask again whether the engine came up. Returns true once the question is
+    //: settled (seen or conclusively absent), false while it is still pending.
+    //:
+    //: This lives outside Load() on purpose and the reason is a measured one:
+    //: the engine initialises only after the host's swapchain is created,
+    //: which happens after Load() returns. Waiting inside Load() therefore
+    //: waited for something that could not have occurred yet, and reported
+    //: "never came up" for a healthy engine on 4 launches out of 4.
+    bool PollEngineInit(unsigned long budget_ms);
+    //: True once PollEngineInit has concluded the engine is NOT up.
+    bool EngineInitAbsent() const { return engine_init_absent_; }
+    //: True once either verdict is in.
+    bool EngineInitSettled() const { return engine_init_seen_ || engine_init_absent_; }
+    //: One more init, this time with an explicit HIP index instead of the
+    //: engine's own auto match. The repair both working hosts apply by
+    //: default; we apply it only when auto failed.
+    bool RetryInitWithHipIndex(int index);
+    //: How many HIP devices were enumerated (for the retry).
+    int HiphDeviceCount() const { return hip_count_; }
+    //: The HIP index this loader resolved by adapter LUID, or -1 when no HIP
+    //: device matched. Read by the bridge so the engine-init retry can hand
+    //: the engine the index we already know, instead of its own auto match.
+    int ResolvedHipIndex() const { return hip_device_; }
+
     // Which of the two known images was found (Stock when the host and the
     // runtime would both try to drive the frame; Patched when the runtime's
     // own hook installer is off and only the host drives).
@@ -567,6 +591,16 @@ private:
     //: started. `hooks_seen_` answers a different question (our detours) and
     //: reads identically whether the engine came up or not.
     bool engine_init_seen_ = false;
+    //: The other verdict, kept separate from "not seen yet": the engine wrote
+    //: to its log for this run and none of it was the init line.
+    bool engine_init_absent_ = false;
+    //: The engine's own log, remembered so the poll can run from the frame
+    //: loop rather than inside Load().
+    std::wstring engine_log_path_;
+    unsigned long waited_ms_ = 0;
+    //: Kept from Load() so RetryInitWithHipIndex can call init again.
+    std::wstring weights_path_;
+    int hip_count_ = 0;
     //: False when this build cannot print such a line at all, so the log says
     //: "not applicable" instead of sending a reader after a fault that is not
     //: there.

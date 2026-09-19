@@ -180,6 +180,19 @@ unsigned long long LogEndOffset(const std::wstring &path) {
            static_cast<unsigned long long>(info.nFileSizeLow);
 }
 
+// The same size read, but it says whether the file could be read at all.
+// LogEndOffset above returns 0 for "no file" and 0 for "empty file", and the
+// engine-init poll needs to tell "nothing written yet" from "I cannot look".
+bool LogEndOffsetEx(const std::wstring &path, unsigned long long *out) {
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info))
+        return false;
+    if (out != nullptr)
+        *out = (static_cast<unsigned long long>(info.nFileSizeHigh) << 32) |
+               static_cast<unsigned long long>(info.nFileSizeLow);
+    return true;
+}
+
 std::string narrow(const std::wstring &wide) {
     std::string out;
     out.reserve(wide.size());
@@ -495,6 +508,10 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     if (chosen < 0) chosen = 0;  // no device to compare against; single-GPU case
     hip_device_ = chosen;
     hip_set_(chosen);
+    // Kept for the retry: both are needed to call init a second time and one
+    // of them (the weights path) is otherwise local to this function.
+    weights_path_ = weights_path;
+    hip_count_ = count;
     // But the runtime is NOT told this index, and that is deliberate.
     //
     // The ini key `HipDevice` is an OVERRIDE: with an index written there the
@@ -740,23 +757,116 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     // which is how twelve consecutive launches read as healthy while the engine
     // had not started.
     //
-    // Read only what THIS run appended (log_from_): the file is appended to
-    // across runs, so a whole-file search is answered by a previous launch.
-    {
-        const std::wstring engine_log = runtime_dir + L"\\dlssnr_on_amd.log";
-        const DWORD budget_ms = 3000;
-        DWORD waited = 0;
-        while (waited < budget_ms) {
-            if (LogContains(engine_log, "engine init ok", log_from_, nullptr)) {
-                engine_init_seen_ = true;
-                break;
-            }
-            Sleep(25);
-            waited += 25;
-        }
-    }
+    // NOT read here.
+    //
+    // The engine does not initialise inside this call. Its own order is: the
+    // host's swapchain is created -> `env: HIP` -> `using HIP device N` ->
+    // `engine init ok`. Creating that swapchain happens well AFTER Load()
+    // returns, so a wait here is a wait for something that cannot have
+    // happened yet - and it always expires.
+    //
+    // That is exactly what it did. A reporter sent four launches of one run:
+    // all four had `engine init ok` in the engine's log, and all four got
+    // "THE ENGINE NEVER CAME UP" from us. Four false negatives out of four,
+    // on a host whose engine was healthy. A verdict that is wrong every time
+    // is worse than no verdict: it sends the reader to the wrong half of the
+    // problem.
+    //
+    // So the question is asked later, from the frame loop (see
+    // AmdEngineInitSettled), where the swapchain exists and the engine has had
+    // its chance. The wait budget moves there with it.
+    engine_log_path_ = runtime_dir + L"\\dlssnr_on_amd.log";
 
     ready_ = true;
+    return true;
+}
+
+// Whether the engine came up, asked at a point where the answer can exist.
+//
+// Called from the frame loop rather than from Load(), because the engine
+// initialises only after the host's swapchain appears and Load() runs before
+// that. Returns true once the question is settled, so the caller asks once.
+//
+// Three answers, never two:
+//   seen      - the engine wrote its own line: it is up
+//   absent    - the engine's log gained bytes for this run and none of them is
+//               the line: it really did not come up
+//   pending   - nothing conclusive yet (no swapchain yet, or the log has not
+//               been written to): ask again, say nothing
+//
+// The middle answer is the one that must not be guessed. Our previous single
+// attempt reported "never came up" for the third case, which is how it managed
+// to be wrong on every launch of a healthy host.
+bool Runtime::PollEngineInit(unsigned long budget_ms) {
+    if (engine_init_seen_) return true;              // settled: up
+    if (engine_init_absent_) return true;            // settled: not up
+    if (engine_log_path_.empty()) return true;       // nothing to read
+
+    if (LogContains(engine_log_path_, "engine init ok", log_from_, nullptr)) {
+        engine_init_seen_ = true;
+        return true;
+    }
+
+    // Not seen. Is that "not yet" or "not ever"? The difference is whether the
+    // engine's log GREW for this run at all: the engine writes its banner,
+    // its hooks and its swapchain line before it inits, so bytes that are not
+    // the line mean it got as far as writing and did not reach init.
+    unsigned long long size_now = 0;
+    if (!LogEndOffsetEx(engine_log_path_, &size_now)) return false;
+    if (size_now <= log_from_) return false;         // nothing written yet: pending
+
+    // It wrote, and the line is not there. Give it the whole budget once
+    // before deciding - a slow HIP enumeration is not a failure.
+    waited_ms_ += 25;
+    if (waited_ms_ >= budget_ms) {
+        engine_init_absent_ = true;
+        return true;
+    }
+    return false;
+}
+
+// One repair attempt: init again, with the HIP index this host resolved.
+//
+// The engine's auto path (`HipDevice = -1`) matches a HIP device to the D3D12
+// device behind the first presented swapchain by itself, and that is the
+// upstream fix for multi-GPU machines - it is why we leave it alone by
+// default. A machine where it never gets that far has no witness of its own
+// choice in the log (`matches the game's D3D12 adapter` absent), and this is
+// the alternative both working hosts use: they write the index they resolved
+// and skip the auto match entirely.
+//
+// Safe to call after a failed auto attempt: the engine's own init is
+// idempotent enough to be called twice in every log we have (the reference
+// calls it once per load, and a second load is an ordinary event in a
+// session), and this is bounded to ONE extra attempt per run by the caller.
+bool Runtime::RetryInitWithHipIndex(int index) {
+    if (!ready_ || module_ == nullptr || init_ == nullptr) return false;
+    if (index < 0) return false;
+    At<int>(module_, table_->kHipDevice) = index;
+    for (int i = 0, n = HiphDeviceCount(); i < n; ++i) {
+        // Bind each candidate on this thread first: the engine selects from
+        // the stored index on its own threads, and both working hosts call
+        // hipSetDevice before init for exactly this reason.
+        if (hip_set_ != nullptr) hip_set_(index);
+        break;
+    }
+    const std::string weights_narrow = narrow(weights_path_);
+    const int rc = guarded_init(module_, table_->kInit, ctx_, &weights_narrow);
+    if (rc < 0) {
+        last_error_ = "the retry raised an exception (code " +
+                      std::to_string(-rc) + ")";
+        return false;
+    }
+    if (rc != 0) {
+        last_error_ = "the engine refused the retry";
+        return false;
+    }
+    At<uint8_t>(module_, table_->kFlagAfterInit) = 1;
+    // The verdict is NOT concluded here: only the engine's own log can say
+    // whether it came up, and it needs the swapchain first. The caller polls.
+    engine_init_seen_ = false;
+    engine_init_absent_ = false;
+    waited_ms_ = 0;
     return true;
 }
 

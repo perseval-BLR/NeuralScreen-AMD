@@ -78,6 +78,19 @@ struct AmdState
     //: tools/amd_offsets_probe.py does not yet do for every release.
     //: NS_AMD_PACKET=1 turns it on for the A/B.
     bool use_packet = false;
+    //: The HIP index this host resolved by adapter LUID, or -1 if none matched.
+    //: Kept (not thrown away) because the engine-init retry needs it: both
+    //: hosts that produce a picture write this index themselves, and a machine
+    //: where the engine's own auto match never lands is the case it exists for.
+    int hip_index_resolved = -1;
+    //: Whether the one repair attempt has been made. Bounded to one per run:
+    //: an engine that refuses both the auto match and an explicit index is not
+    //: going to accept a third call, and repeating it would only fill the log.
+    bool engine_retry_done = false;
+    //: Whether the "the engine never came up, so it is not fed" line has been
+    //: printed. Once: the fallback is taken every frame and repeating it would
+    //: bury the rest of the log.
+    bool engine_dead_announced = false;
     //: Last frame's wall time, handed to the FSR dispatch (it uses it for its
     //: temporal accumulation). 16.6 ms until a second frame has been timed.
     float last_frame_ms = 16.6f;
@@ -489,11 +502,25 @@ static void AmdEngineHealth()
     const std::string mean = last_with("encoded mean");
     if (!mean.empty())
     {
-        // Said plainly, because this is the line a report is missing: the
-        // engine measured the frame it was handed, and 0.000 means black.
-        const bool black = mean.find("encoded mean 0.000") != std::string::npos;
+        // NOT called black on its own, and this correction cost a wrong
+        // diagnosis to learn.
+        //
+        // `encoded mean 0.000` is present in EVERY log we have ever collected,
+        // including runs on v0.2.14 that were known to produce a picture, and
+        // including runs whose `self-check: pre-block zero bytes` reads the
+        // healthy 0.13%. The number describes the ENCODE stage of the engine's
+        // OWN chain, not the frame this host handed it, so on its own it says
+        // nothing about whether the input was black.
+        //
+        // What separates the two cases is the exposure the engine settles on:
+        // 4.0000 is its ordinary value on real content, while 9999.9980 is what
+        // it runs away to when the input really is zero.
+        const bool runaway = mean.find("9999.9980") != std::string::npos ||
+                             mean.find("9999.99") != std::string::npos;
         Log("[amd] the engine's own measure: %s%s", mean.c_str(),
-            black ? "  <- it was handed a BLACK frame (our side produced it)" : "");
+            runaway ? "  <- the exposure ran away to its ceiling: the input to "
+                      "the network was zero (compare with the capture line below)"
+                    : "");
     }
     // ...and OURS, on the capture, in the same breath.
     //
@@ -721,6 +748,83 @@ static void AmdNetExtent(const VideoState &v, UINT cw, UINT ch, UINT &nw, UINT &
     nw = cw; nh = ch;
 }
 
+// The engine's verdict, asked where it can be answered, with the one repair
+// we know how to make.
+//
+// WHAT IT REPLACES. Load() used to wait 3 s for the engine's own
+// `engine init ok` and report "never came up" when it did not appear. The
+// engine writes that line only after the host's swapchain exists, and Load()
+// runs before the swapchain is created, so the wait always expired - on a
+// healthy engine too. Measured: 4 launches, engine up in all 4, 4 false
+// negatives.
+//
+// WHAT IT DOES NOW, once per run:
+//   1. polls until the engine has had its chance (from the frame path, so the
+//      swapchain is already there);
+//   2. if the engine is up, says so and stops asking;
+//   3. if it is NOT up, retries init ONCE with the HIP index WE resolved,
+//      written into the engine's own field.
+//
+// WHY THE RETRY. Both hosts that produce a picture write the resolved index
+// into `HipDevice` themselves (zmodelerlover, Magpie: `At<int>(runtime,
+// kRvaHipDevice) = hipDevice`). We resolve the same index by adapter LUID at
+// +272 and then deliberately keep it to ourselves, leaving the engine's field
+// at -1 (auto). In every dead-engine log we have, the engine's own
+// `matches the game's D3D12 adapter` line is absent - it never reaches its own
+// device selection. Handing it our index is the cheap, reversible thing to
+// try, and it is tried SECOND, only when auto failed: the auto path is the
+// upstream fix for multi-GPU/iGPU reports and most machines are healthy on it.
+//
+// Never gated on: it is a repair attempt plus a line in the log. A run where
+// the engine is up is untouched.
+static void AmdEngineInitSettled()
+{
+    if (!g_amd.runtime.EngineInitApplicable()) return;
+    if (g_amd.runtime.EngineInitSeen()) return;
+    if (!g_amd.runtime.PollEngineInit(1500)) return;     // still pending
+
+    if (g_amd.runtime.EngineInitSeen())
+    {
+        Log("[amd] engine init: ok (the engine wrote its own 'engine init ok')");
+        return;
+    }
+
+    // Settled and absent.
+    if (g_amd.engine_retry_done)
+    {
+        Log("[amd] engine init: THE ENGINE NEVER CAME UP, and the retry with our "
+            "own HIP index (%d) did not change it. Nothing downstream of this "
+            "line describes a working pass; the cause is in the engine's own "
+            "log next to the DLL, not in the picture.",
+            g_amd.hip_index_resolved);
+        return;
+    }
+
+    if (g_amd.hip_index_resolved < 0)
+    {
+        Log("[amd] engine init: THE ENGINE NEVER CAME UP - our init call returned "
+            "success but its own log carries no 'engine init ok' after this "
+            "launch. No HIP index was resolved either, so the retry that usually "
+            "follows is not available on this machine.");
+        g_amd.engine_retry_done = true;
+        return;
+    }
+
+    g_amd.engine_retry_done = true;
+    Log("[amd] engine init: THE ENGINE NEVER CAME UP - retrying once with the HIP "
+        "index this host resolved (%d) instead of the engine's own auto match; "
+        "both hosts that produce a picture write that index themselves",
+        g_amd.hip_index_resolved);
+    if (g_amd.runtime.RetryInitWithHipIndex(g_amd.hip_index_resolved))
+    {
+        // Give the engine the same chance again, but do not block the picture
+        // for it: the next frames poll and the verdict lands when it lands.
+        Log("[amd] the retry returned success; the engine's own line decides");
+        return;
+    }
+    Log("[amd] the retry could not be made (the engine refused the init call)");
+}
+
 static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
 {
     if (submitted) *submitted = 0;
@@ -728,6 +832,44 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     const UINT ch = v.upscale ? v.full_h : v.hgt;
     UINT nw = 0, nh = 0;
     AmdNetExtent(v, cw, ch, nw, nh);
+
+    // The engine's verdict, asked from here because only here can it be
+    // answered (the swapchain exists by now). Once per run, then it is inert.
+    if (!g_amd.runtime.EngineInitSettled()) AmdEngineInitSettled();
+
+    // THE GATE. An engine that has conclusively not come up is not fed.
+    //
+    // Measured reason: a reporter's worker died on frame 0 with
+    // ACCESS_VIOLATION at D3D12Core.dll + 0x12ACCC (faulting read 0x18C) on
+    // every launch, on two different builds, with `engine init ok` absent from
+    // its log each time. We were driving a full frame - surfaces, FSR
+    // contexts, the dispatch, the submission - at an engine that had never
+    // initialised, and the crash landed inside D3D12 rather than anywhere that
+    // named the engine.
+    //
+    // The retry above is tried first, so a machine that the engine accepts
+    // after an explicit HIP index still gets its pass. Only a settled ABSENT
+    // verdict, after the retry, reaches this line.
+    //
+    // Falling back rather than failing: the worker stays alive, the capture,
+    // the overlay and the menu keep working, and the picture is the raw frame
+    // - which is what the "card not supported" path already does, and it is
+    // strictly more useful to the user than a crash loop.
+    if (g_amd.runtime.EngineInitApplicable() && g_amd.runtime.EngineInitSettled() &&
+        !g_amd.runtime.EngineInitSeen())
+    {
+        if (!g_amd.engine_dead_announced)
+        {
+            g_amd.engine_dead_announced = true;
+            Log("[amd] the engine did not come up on this machine, so it is not "
+                "fed any more - the raw frame passes through. The program stays "
+                "alive (capture, overlay, menu); the picture is unprocessed. "
+                "Its own log next to the DLL is the file that explains why.");
+            Log("[amd] ===== AMD path off - the engine never initialised =====");
+        }
+        g_amd.failed = true;
+        return false;
+    }
 
     if (!AmdEnsurePipeline() || !AmdEnsureResources(nw, nh, cw, ch))
     {
@@ -1433,15 +1575,20 @@ static bool AmdInit()
     // times while the engine's own log carried no `engine init ok` and no
     // `env: HIP` at all - and every later number in the report was measured
     // against an engine that never came up. This line closes that hole.
+    // The engine's verdict is NOT printed here any more.
+    //
+    // It was, and it was wrong every time it was tested. The engine
+    // initialises only after the host's swapchain exists - its own order is
+    // `swapchain created` -> `env: HIP` -> `using HIP device` ->
+    // `engine init ok` - and the swapchain is created well after this
+    // function. Asking here meant asking too early: one reporter sent four
+    // launches, all four had `engine init ok` in the engine's log, and all
+    // four were told "THE ENGINE NEVER CAME UP".
+    //
+    // It is asked from the frame loop instead, where the answer can exist.
+    // See AmdEngineInitSettled below.
     if (!g_amd.runtime.EngineInitApplicable())
         Log("[amd] engine init: not applicable for this build");
-    else if (g_amd.runtime.EngineInitSeen())
-        Log("[amd] engine init: ok (the engine wrote its own 'engine init ok')");
-    else
-        Log("[amd] engine init: THE ENGINE NEVER CAME UP - our init call returned "
-            "success but its own log carries no 'engine init ok' after this "
-            "launch. Nothing downstream of this line describes a working pass; "
-            "the cause is in that log next to the DLL, not in the picture.");
 
     // Re-assert the crash filter: the engine installs its own from DllMain and
     // replaces the process's, which is why the second Radeon report carried no
@@ -1484,6 +1631,11 @@ static bool AmdInit()
         }
         Log("[amd] FidelityFX upscaler loaded (the dispatch the engine follows)");
     }
+
+    // The index the loader resolved, kept for the engine-init retry. Both
+    // hosts that produce a picture write this into the engine themselves; we
+    // only use it when the engine's own auto match did not land.
+    g_amd.hip_index_resolved = g_amd.runtime.ResolvedHipIndex();
 
     g_amd.active = true;
     Log("[amd] ===== AMD path active =====");
