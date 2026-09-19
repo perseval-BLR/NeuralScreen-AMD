@@ -210,6 +210,52 @@ So if a report says the wrong device was used, the useful question is what the
 runtime logged, not what this program computed. A machine where nothing matches
 is refused before the runtime is allowed to build a frame.
 
+## Two fields that were read wrong, and what the disassembly showed
+
+Both of these were found by taking the runtime apart rather than by a report,
+and both have the same shape: a value this program wrote with confidence into
+a place the engine does not read.
+
+### The engine's watchdog counter is not an abort token
+
+The driver wrote `InterlockedExchange(..., 0)` into `0x8d808` after every
+accepted frame, to clear what its table called a stale abort token. It is not
+one. The engine's watchdog function (`0x16260..0x1652d`) stores the job id into
+`0x8d808` and `0x8d80c` when a timeout fires and reads them back, so the clear
+was erasing the engine's own record of which job timed out - and the note right
+below the constant in the same header already said so. The write is gone; the
+engine resets its real abort flag itself through `hipMemcpyAsync`.
+
+The address came from arithmetic, not from a measurement: the port applied the
+delta that fits the fields around it (`0x76c68 + 0x16ba0`), while the reference
+that documents the field computes `0x76c68 + 0x16a20` and lands on `0x8d688`.
+The two answers differ by `0x180`, neither could be confirmed without a card,
+and so the honest move was to stop writing rather than pick one. Nothing the
+driver needs depends on either.
+
+### Intensity reached the file, not the network
+
+The menu's Intensity was written to `Scale` in the runtime's ini, on the
+reading that this is where the runtime takes its strength from. For this build
+it is not. The ini is parsed by one function (`0x7af0..0x801a`) that is reached
+through a `call_once` guard inside the first `CreateSwapChain` detour
+(`0x97c0`), immediately before the engine's `Init` - and it runs **once**. A
+value written to the file after that is read by nothing.
+
+The field is read per frame: `0x140a0..0x15e79` is the recording function, the
+same one that reads Local Tone, Local Structure and Skin Structure, all of
+which this driver has always written directly. Intensity is written there now,
+every frame, and the ini is still updated on change so the next launch starts
+from the slider.
+
+### Why this survived
+
+Both writes compiled, both were logged, and both looked right in a log. The
+only thing that catches this class is reading what the engine does with the
+field afterwards - which is what `tests/test_amd_offsets_agree.py` now forces
+for the first one: an offset that appears both in the table and in the note
+that says the host must not write it fails the suite.
+
 ## The offset table is checked, not trusted
 
 The runtime exports nothing, so every address this program writes into it is a

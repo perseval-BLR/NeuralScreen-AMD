@@ -130,7 +130,33 @@ def main() -> int:
                                 f"0x{value:x}, the header says 0x{header[name]:x} - "
                                 f"this is the drift the test exists to catch")
 
-    # --- 4. the probe calls what the header names -------------------------
+    # --- 4. the header must not contradict itself --------------------------
+    # The table above and the "deliberately NOT written" note below it are two
+    # statements about the same image, and an address in both is an address the
+    # driver both declares and forbids. 0x8d808 lived in both for a release:
+    # listed as `kAbortWord` and named in the note as the engine's watchdog
+    # counter. The write won, because the note is a comment.
+    #
+    # The check is textual and deliberately narrow - it looks for the note, then
+    # for each declared offset inside it - because the two halves are written in
+    # different styles and only a human reading both would notice.
+    header_text = HEADER.read_text(encoding="utf-8", errors="replace")
+    marker = "Deliberately NOT written by the host"
+    if marker not in header_text:
+        failures.append(f"the header has no '{marker}' note any more - either it "
+                        f"was renamed (update this test) or the guard against "
+                        f"writing engine-owned fields was dropped")
+    else:
+        note = header_text[header_text.find(marker):]
+        note = note[:note.find("}  // namespace rva")]
+        for name, value in sorted(header.items()):
+            if f"0x{value:x}" in note.lower():
+                failures.append(f"{name} (0x{value:x}) is in the offset table AND "
+                                f"named in the note that says the host must not "
+                                f"write it - one of the two is wrong, and the "
+                                f"table wins at runtime")
+
+    # --- 5. the probe calls what the header names -------------------------
     # If the probe addresses the runtime through its own constants only, the
     # check above covers it; this makes sure it has not started calling an
     # unnamed address instead.

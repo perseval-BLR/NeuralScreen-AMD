@@ -86,7 +86,11 @@ def main() -> int:
                         "the runtime options")
     # ...and the value has to be the CALIBRATED one, not raw: the runtime's own
     # ceiling is 0.125 and 1.0 on that number turns an image into halos.
-    m = re.search(r"float scale_max = ([0-9.]+)f", cpp)
+    #
+    # The calibration moved from WriteScale into ScaleMax() so the per-frame
+    # field write and the ini write share one number, so the search follows it
+    # there. The lambda body is what makes the old pattern miss.
+    m = re.search(r"float v = ([0-9.]+)f", cpp) or re.search(r"float scale_max = ([0-9.]+)f", cpp)
     if not m:
         failures.append("the scale ceiling is gone - the slider's 1.0 has no "
                         "meaning")
@@ -97,6 +101,13 @@ def main() -> int:
                 f"the slider's 1.0 maps to Scale={top}, which is above the "
                 "runtime's ceiling of 0.125 - that is the halo end of the "
                 "range, not the working end")
+    # The field write is the fix for the dead slider, and it is the one that
+    # has to be in SetOptions: the ini is parsed ONCE (call_once in the first
+    # CreateSwapChain detour), so a file write after startup reaches nothing.
+    if "At<float>(module_, rva::kScale)" not in cpp:
+        failures.append("SetOptions does not write the Scale FIELD - the "
+                        "intensity would only reach the ini, which the runtime "
+                        "parsed once at startup and never reads again")
     # Writing the file every frame would be a file write per frame for nothing.
     if "last_intensity_" not in cpp:
         failures.append("the ini is rewritten on every frame instead of only "

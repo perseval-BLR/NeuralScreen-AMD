@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.1.18-alpha"
+VERSION = "0.2.0"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the

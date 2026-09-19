@@ -196,7 +196,7 @@ KNOWN_OFFSETS = {
     "kSkinStructure": 0x8D9D8, "kCharMask": 0x8D9E0, "kToneChannels": 0x8D9E4,
     "kScale": 0x8D9DC, "kHistory": 0x8D010, "kWantHistory": 0x8D018,
     "kJobCounter": 0x8D914, "kStatusFlag": 0x8D21A, "kSyncCounter": 0x8D6F4,
-    "kTimeoutCounter": 0x8D6F8, "kPendingList": 0x8D908, "kAbortWord": 0x8D808,
+    "kTimeoutCounter": 0x8D6F8, "kPendingList": 0x8D908,
 }
 
 #: The entry points: these must land in executable code, the rest in writable

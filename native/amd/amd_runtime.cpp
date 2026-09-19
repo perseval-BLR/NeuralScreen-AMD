@@ -673,23 +673,36 @@ void Runtime::SetOptions(const Options &opt) {
     At<uint32_t>(module_, rva::kToneChannels) = (opt.tone_channels & ~2u) | 4u;
     At<uint8_t>(module_, rva::kEnabled) = opt.enabled ? 1 : 0;
 
-    // Intensity is the exception: it is NOT in that block. The runtime reads
-    // its strength from `Scale` in its own ini, so the slider has to be
-    // written to the file - and only when it changes, because rewriting the
-    // ini per frame would be a file write per frame for nothing.
+    // Intensity: the network's strength, and the slider that was dead.
     //
-    // This was dead: the slider moved the host's own composite and nothing
-    // else, so the network's strength never changed on the AMD path while the
-    // NVIDIA path's did.
+    // It used to be written to the ini file and nowhere else, on the reading
+    // that the runtime takes this one from `Scale` in its own file. That
+    // reading is wrong for this build, and the disassembly says why: the ini
+    // is parsed by one function (0x7af0..0x801a) reached through a call_once
+    // guard inside the first CreateSwapChain detour (0x97c0), immediately
+    // before the engine's Init. It runs ONCE. A value written to the file
+    // after that is never read by anything - so the slider moved the host's
+    // own composite while the network's strength stayed at whatever the file
+    // held when the guard ran.
+    //
+    // The field itself is read per frame: 0x140a0..0x15e79 is the recording
+    // function, the same one that reads LocalTone and LocalStructure, and this
+    // driver has always written those directly. Intensity belongs there with
+    // them.
+    //
+    // The file is still written, on change, because it answers a different
+    // question: it is what the next launch starts from. The field is what
+    // this launch uses.
+    const float intensity_clamped = opt.intensity < 0.0f ? 0.0f
+                                  : (opt.intensity > 1.0f ? 1.0f : opt.intensity);
+    At<float>(module_, rva::kScale) = intensity_clamped * ScaleMax();
     if (opt.intensity != last_intensity_) {
         last_intensity_ = opt.intensity;
         WriteScale(opt.intensity);
     }
 }
 
-void Runtime::WriteScale(float intensity) {
-    if (ini_path_.empty()) return;
-
+float Runtime::ScaleMax() {
     // Intensity 1.0 means this much network strength, and the number is
     // calibrated on real content rather than guessed - it is the one value the
     // reference measured and published:
@@ -698,19 +711,30 @@ void Runtime::WriteScale(float intensity) {
     //   0.03   detail appears - skin, hair, fabric (6.1/255)
     //   0.125  the runtime's own ceiling: halos, crunch, fringing (55/255)
     //
-    // So the slider spans [0, kScaleMax] and its top is deliberately NOT the
+    // So the slider spans [0, this] and its top is deliberately NOT the
     // runtime's ceiling: 1.0 has to mean "the setting that looks right", not
     // "the most the runtime will accept". NS_AMD_NR_SCALE_MAX moves it for
     // taste without a rebuild.
-    float scale_max = 0.03f;
-    char env[32] = {};
-    if (GetEnvironmentVariableA("NS_AMD_NR_SCALE_MAX", env, sizeof(env))) {
-        const float v = static_cast<float>(atof(env));
-        if (v > 0.0f && v <= 4.0f) scale_max = v;
-    }
+    // Read once: this is called per frame (SetOptions), and the answer cannot
+    // change inside a run.
+    static const float scale_max = [] {
+        float v = 0.03f;
+        char env[32] = {};
+        if (GetEnvironmentVariableA("NS_AMD_NR_SCALE_MAX", env, sizeof(env))) {
+            const float parsed = static_cast<float>(atof(env));
+            if (parsed > 0.0f && parsed <= 4.0f) v = parsed;
+        }
+        return v;
+    }();
+    return scale_max;
+}
+
+void Runtime::WriteScale(float intensity) {
+    if (ini_path_.empty()) return;
+
     const float clamped = intensity < 0.0f ? 0.0f
                         : (intensity > 1.0f ? 1.0f : intensity);
-    const float scale = clamped * scale_max;
+    const float scale = clamped * ScaleMax();
 
     char value[32] = {};
     _snprintf_s(value, sizeof(value), _TRUNCATE, "%.5f", scale);
@@ -769,11 +793,15 @@ bool Runtime::Record(ID3D12CommandList *list, ID3D12Resource *colour,
         last_error_ = "the engine did not take the recorded list";
         return false;
     }
-    // A stale watchdog abort token from an earlier timeout would poison this
-    // frame's wait; clear it now that the record is confirmed.
-    InterlockedExchange(reinterpret_cast<volatile LONG *>(
-                            reinterpret_cast<uintptr_t>(module_) + rva::kAbortWord),
-                        0);
+    // Nothing else is written on acceptance.
+    //
+    // What used to be here: a `InterlockedExchange(..., 0)` on 0x8d808, to
+    // clear what the driver believed was a stale abort token. That address is
+    // the engine's watchdog job counter - the watchdog function stores the job
+    // id into 0x8d808 and 0x8d80c when a timeout fires and reads them back -
+    // so the "clear" was erasing the engine's own record of which job timed
+    // out, on every accepted frame. The engine resets its real abort flag
+    // itself, through hipMemcpyAsync.
     return true;
 }
 

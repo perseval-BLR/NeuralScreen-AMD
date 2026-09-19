@@ -136,7 +136,12 @@ inline constexpr uintptr_t kLocalStructure = 0x8d9d4;
 inline constexpr uintptr_t kSkinStructure = 0x8d9d8;
 inline constexpr uintptr_t kCharMask = 0x8d9e0;
 inline constexpr uintptr_t kToneChannels = 0x8d9e4;
-inline constexpr uintptr_t kScale = 0x8d9dc;        // ini `Scale` - the network's strength
+inline constexpr uintptr_t kScale = 0x8d9dc;        // the network's strength. The runtime
+                                                    // reads it in the job-recording function
+                                                    // (0x140a0..0x15e79), the same place it
+                                                    // reads LocalTone/LocalStructure - so a
+                                                    // per-frame write here reaches the network
+                                                    // the same way those two do.
 
 // History control.
 inline constexpr uintptr_t kHistory = 0x8d010;      // void *, nullptr invalidates
@@ -152,13 +157,31 @@ inline constexpr uintptr_t kTimeoutCounter = 0x8d6f8;  // UINT, engine-side GPU 
 inline constexpr uintptr_t kPendingList = 0x8d908;  // ID3D12CommandList * - equals the list iff the
                                                     // engine accepted the record; the real acceptance
                                                     // test (record's void return says nothing)
-inline constexpr uintptr_t kAbortWord = 0x8d808;    // volatile LONG - stale watchdog abort token,
-                                                    // cleared by the host after each accepted record
 
 // Deliberately NOT written by the host:
-//   0x8d808/0x8d80c  the engine's watchdog job pair. NOT a pointer - writing
-//            through it crashes. (kAbortWord above is the abort token, which is
-//            a different field.)
+//   0x8d808/0x8d80c  the engine's watchdog job pair. The watchdog function
+//            (0x16260..0x1652d) stores the job id into BOTH dwords when a
+//            timeout fires, and reads them back. Two things follow, and the
+//            second is why this note is longer than the others: it is a
+//            counter, not a handle, so a host that treats the pair as a
+//            pointer to clear crashes on the next recording; and a host that
+//            just zeroes it (which is what this driver used to do) is
+//            erasing the engine's own record of which job timed out.
+//            The engine resets its real GPU abort flag itself, through
+//            hipMemcpyAsync - it does not need help, and it is the only side
+//            that knows when the flag is stale.
+//
+//            This address was in the table as `kAbortWord` until 0.2.0. The
+//            port derived it as 0x76c68 + 0x16ba0 (the delta that fits the
+//            fields around it), but 0x76c68 is not in that region: the
+//            reference that documents it computes 0x76c68 + 0x16a20 and lands
+//            on 0x8d688, and the two answers differ by 0x180. Neither could
+//            be confirmed without a card, so the write is gone rather than
+//            guessed at - nothing the driver needs depends on it.
+//   the wait allowance / iteration ceiling. The engine maintains it and
+//            shortens its own budget after each timeout; writing it fights the
+//            engine (documented in both reference implementations).
+//   0x8d9c0  Tonemap. The ini file keeps the last word; its own default is -1.
 //   the wait allowance / iteration ceiling. The engine maintains it and
 //            shortens its own budget after each timeout; writing it fights the
 //            engine (documented in both reference implementations).
@@ -284,9 +307,13 @@ public:
     // Applies the host's parameters. Cheap - three stores.
     void SetOptions(const Options &opt);
 
-    //: Writes the menu's Intensity into the runtime's ini as `Scale`, which is
-    //: where the runtime actually reads its strength from. Called from
-    //: SetOptions when the value changes; public only so a test can drive it.
+
+    // The network's strength. Intensity is the menu's 0..1 control; this turns
+    // it into the runtime's own number. BOTH the per-frame field write and the
+    // ini write go through it, so the two cannot disagree.
+    static float ScaleMax();
+    // The ini file's `Scale`, written on change so the next launch starts from
+    // the slider rather than from whatever the file held.
     void WriteScale(float intensity);
 
     //: The last `Scale` written into the ini, or -1 when nothing has been
