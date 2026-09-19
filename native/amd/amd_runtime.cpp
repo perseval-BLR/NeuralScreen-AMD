@@ -1093,6 +1093,25 @@ bool Runtime::FailedOnEngineSide() const {
     if (!ready_ || module_ == nullptr) return true;
     return At<uint8_t>(module_, table_->kStatusFlag) != 0;
 }
+// What the ENGINE says about its own staging, rather than what we assume.
+//
+// Its own layout carries this as a sticky byte: set when the runtime detects a
+// resize, a re-created upscaler context or an INI change; cleared only after it
+// has drained the game's queue and joined its workers. Its Record tests the
+// byte as its FIRST act - verified here by disassembling the pinned image: at
+// Record + 0xb2 the very first thing after the null checks is
+// `cmp byte ptr [rip + 0x7e3ef], 1`, and that disp resolves to this RVA.
+//
+// Before this, a resize or an RNSZ tore our surfaces down while the engine
+// might still be mid-rebuild, and nothing said which. That is a class we have
+// been guessing at.
+bool Runtime::EngineRecreating() const
+{
+    if (module_ == nullptr || table_ == nullptr || table_->kRecreate == 0)
+        return true;                     // unknown layout: assume the worst
+    return At<volatile uint8_t>(module_, table_->kRecreate) != 0;
+}
+
 
 void Runtime::InvalidateHistory() {
     if (!ready_ || module_ == nullptr) return;

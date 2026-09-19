@@ -207,6 +207,21 @@ struct Table {
     uintptr_t kPendingList;  // ID3D12CommandList * - equals the list iff the
                              // engine accepted the record; the real acceptance
                              // test (record's void return says nothing)
+
+    //: Sticky staging-rebuild flag, and the reason it is worth reading.
+    //:
+    //: The engine sets it when IT notices a resize, a re-created upscaler
+    //: context, or an INI change, and clears it only after it has drained the
+    //: game's queue and joined its workers. Record tests it as its FIRST act.
+    //:
+    //: So "0" means this Record will not rebuild the staging - which is the
+    //: fact we have never had while tearing our own surfaces down for a resize
+    //: or an RNSZ. Cross-checked against an independent published layout
+    //: (OptiScaler's dlssnr backend, bound to this build's SHA256), and then
+    //: verified here on the image itself: the byte at this RVA is addressed by
+    //: `cmp byte ptr [rip + ...], 1` inside Record at +0xb2, which is the
+    //: engine's own first-act test.
+    uintptr_t kRecreate;
 };
 
 //: The pinned v0.2.17 build. Every value here was verified against the running
@@ -242,6 +257,7 @@ inline constexpr Table kV0217 = {
     /* kSyncCounter */ 0x8d6f4,
     /* kTimeoutCounter */ 0x8d6f8,
     /* kPendingList */ 0x8d908,
+    /* kRecreate */ 0x8daa8,
 };
 
 //: v0.3.1, derived by tools/amd_offsets_probe.py and CROSS-CHECKED against an
@@ -569,6 +585,16 @@ public:
 
     // True when the engine latched its own failure (status flag non-zero).
     bool FailedOnEngineSide() const;
+    //: True while the ENGINE says its staging must be re-created.
+    //:
+    //: Sticky on the engine's side: it sets the flag when it notices a resize,
+    //: a re-created upscaler context or an INI change, and clears it only after
+    //: draining the game's queue and joining its workers. Reading it before we
+    //: tear our own surfaces down turns "are you busy?" from a guess into a fact.
+    //:
+    //: Unknown layout answers TRUE - assume the worst, the same discipline as
+    //: every other gate on this path.
+    bool EngineRecreating() const;
 
     // History control: a loading screen or a >250 ms gap leaves history
     // describing a scene that is no longer there; invalidate before the next

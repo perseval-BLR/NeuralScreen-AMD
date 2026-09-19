@@ -738,6 +738,11 @@ static void AmdEngineHealth()
                 verdict);
         }
     }
+    // The engine's own rebuild flag, reported with everything else.
+    if (g_amd.runtime.EngineRecreating())
+        Log("[amd] the engine's staging-rebuild flag is UP (it is re-creating "
+            "staging: a resize, a new upscaler context or an INI change; it "
+            "clears the flag after draining the queue and joining its workers)");
     // The pair that names the side: ours first, the engine's right below.
     if (g_amd.probe_conv_mean >= 0.0f)
         Log("[amd] our own measure, last taken: converted input mean %.4f, dispatch "
@@ -825,6 +830,23 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
 {
     if (g_amd.resources_ready && g_amd.net_w == net_w && g_amd.net_h == net_h &&
         g_amd.out_w == out_w && g_amd.out_h == out_h) return true;
+
+    // Before tearing anything down, ask the ENGINE whether it is rebuilding.
+    //
+    // Our rebuild (a resize, an RNSZ, a mode switch) frees the surfaces the
+    // engine holds pointers to - and until now nothing said whether it was
+    // mid-rebuild of its own staging at that moment. The engine publishes that
+    // fact: a sticky byte it sets on a detected resize / re-created context /
+    // INI change, and clears only after draining the game's queue and joining
+    // its workers. Its Record tests the byte as its first act.
+    //
+    // Reported, not gated. A wrong read here must not stop frames: the value is
+    // a fact in the log for the next report, and refusing to rebuild would
+    // freeze the picture on any machine where the layout is not mapped.
+    if (g_amd.runtime.EngineRecreating())
+        Log("[amd] the engine says its staging is being re-created right now "
+            "(sticky flag set) - we are rebuilding our surfaces while its own "
+            "queue drain and worker join may still be running");
     AmdReleaseResources();
     if (net_w < 32 || net_h < 32) { Log("[amd] implausible network extent %ux%u", net_w, net_h); return false; }
 

@@ -108,6 +108,7 @@ ABOUT = {
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_engine_init.py": "the engine-init verdict is asked after the swapchain exists, the retry is bounded, a dead engine is not fed, and the mean is not called black",
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",
+    "test_amd_recreate_flag.py": "the engine's staging-rebuild flag is mapped, verified against the image, and reported rather than gated",
     "test_diagnostic_bundle.py": "the bundle carries both logs, our own dump in preference to WER's, and never a previous session's crash",
     "test_amd_install_verdict.py": "a missing runtime file is not read as a bad graphics card",
     "test_amd_worker_survives.py": "a Radeon keeps its worker when the pass is off, and the magenta fill cannot reach an unkeyed layer",
