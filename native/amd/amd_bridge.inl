@@ -137,6 +137,27 @@ struct AmdState
     uint64_t frames_without_job = 0;
     uint64_t jobs_seen_total = 0;
 
+    //: WHERE the frame is lost, measured instead of argued.
+    //:
+    //: Two machines with provably correct feeding (609 dispatches over 600
+    //: frames, history on, engine init ok, self-check ~0.12%) still produce a
+    //: black picture. The engine reports `encoded mean 0.000` about what it
+    //: RECEIVED, and we had no matching number about what we SENT - so
+    //: "the network gets zero" could not be split into its two very different
+    //: causes: our dispatch wrote nothing into `net`, or `net` was written and
+    //: the engine read somewhere else.
+    //:
+    //: This reads back OUR OWN surface, with the engine's own metric: the mean
+    //: over the three COLOUR channels (alpha is not what it averages; the
+    //: probe had to learn that too). Paired with the engine's line, the two
+    //: numbers name the side.
+    ID3D12Resource *probe_rb = nullptr;   // readback staging, size of `net`
+    UINT64 probe_pitch = 0;
+    uint64_t probe_frames = 0;
+    uint64_t probe_failed = 0;
+    float probe_conv_mean = -1.0f;   // `fsr_in` - what we hand the dispatch
+    float probe_net_mean = -1.0f;    // `net`     - what the engine reads
+
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
     uint64_t frame_t0 = 0;
@@ -392,10 +413,146 @@ static ID3D12Resource *AmdMakeTex(UINT w, UINT h_, DXGI_FORMAT fmt,
     return t;
 }
 
+// What OUR OWN surfaces hold, measured with the engine's own metric.
+//
+// The engine says `auto-exposure: encoded mean %.3f` about the frame it was
+// handed. We had no matching number about what we sent, and that gap is why
+// four black-screen reports in a row could not be split into their two very
+// different causes:
+//
+//   our dispatch wrote nothing into `net`      -> the loss is on OUR side
+//   `net` holds a real frame, engine reads zero -> the loss is in what the
+//                                                  engine reads, not in what
+//                                                  we wrote
+//
+// Both numbers have to come out of ONE definition or they cannot be compared,
+// so this copies the engine's: the mean over the three COLOUR channels only.
+// Alpha is deliberately excluded - the probe this was lifted from counted it
+// at first, and a frame of pure black RGB with alpha 1 passed as "not black".
+//
+// Half-float surfaces are decoded by hand (the CPU has no native f16 for this
+// and the surface is RGBA16F by contract for `net`).
+static float AmdMeanFromHalf(uint16_t hv)
+{
+    const uint32_t sign = (uint32_t)(hv >> 15) & 0x1u;
+    const uint32_t expo = (uint32_t)(hv >> 10) & 0x1Fu;
+    const uint32_t mant = (uint32_t)hv & 0x3FFu;
+    float v;
+    if (expo == 0) v = (float)mant * 5.9604645e-8f;                  // subnormal
+    else if (expo == 0x1F) v = mant ? 0.0f : 1.0f;                    // inf/nan -> 0
+    else v = (1.0f + (float)mant / 1024.0f) * powf(2.0f, (float)expo - 15.0f);
+    return sign ? -v : v;
+}
+
+// One surface, one readback, two numbers. Returns false and leaves the means
+// untouched when anything in the chain fails - a diagnostic that invents a
+// value on failure is worse than one that stays silent.
+static bool AmdMeasureSurface(ID3D12Resource *src, float *out_mean)
+{
+    if (src == nullptr || g_amd.net_w < 8 || g_amd.net_h < 8) return false;
+    const UINT mw = g_amd.net_w, mh = g_amd.net_h;
+    const UINT pitch = ((mw * 8u) + 255u) & ~255u;  // RGBA16F, D3D12 rows are 256-aligned
+    const UINT64 bytes = (UINT64)pitch * mh;
+
+    if (g_amd.probe_rb == nullptr || g_amd.probe_pitch != pitch)
+    {
+        if (g_amd.probe_rb != nullptr) { g_amd.probe_rb->Release(); g_amd.probe_rb = nullptr; }
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = bytes; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
+        bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        if (FAILED(h.dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, __uuidof(ID3D12Resource),
+                reinterpret_cast<void **>(&g_amd.probe_rb))))
+        {
+            g_amd.probe_rb = nullptr;
+            return false;
+        }
+        g_amd.probe_pitch = pitch;
+    }
+
+    // Its own list: this runs after the frame's submission has been handed
+    // over, so it must not disturb the recording the engine is following.
+    ID3D12GraphicsCommandList *cl = nullptr;
+    ID3D12CommandAllocator *al = nullptr;
+    if (FAILED(h.dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             __uuidof(ID3D12CommandAllocator),
+                                             reinterpret_cast<void **>(&al))))
+        return false;
+    if (FAILED(h.dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, al, nullptr,
+                                        __uuidof(ID3D12GraphicsCommandList),
+                                        reinterpret_cast<void **>(&cl))))
+    { al->Release(); return false; }
+
+    D3D12_RESOURCE_BARRIER b1 = Transition(src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                           D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cl->ResourceBarrier(1, &b1);
+    D3D12_TEXTURE_COPY_LOCATION dstl = {}, srcl = {};
+    dstl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dstl.pResource = g_amd.probe_rb;
+    dstl.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    dstl.PlacedFootprint.Footprint.Width = mw;
+    dstl.PlacedFootprint.Footprint.Height = mh;
+    dstl.PlacedFootprint.Footprint.Depth = 1;
+    dstl.PlacedFootprint.Footprint.RowPitch = pitch;
+    srcl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    srcl.pResource = src; srcl.SubresourceIndex = 0;
+    cl->CopyTextureRegion(&dstl, 0, 0, 0, &srcl, nullptr);
+    D3D12_RESOURCE_BARRIER b2 = Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    cl->ResourceBarrier(1, &b2);
+    cl->Close();
+    // NOT EndCommands(): that one closes and submits `h.list`, the FRAME's own
+    // list - so the copy recorded here would never be executed and the readback
+    // would stay as it was allocated (zeros), reporting a perfectly black
+    // surface that was never sampled. Measured on this machine: it submits
+    // h.list, and there is no parameter to point it anywhere else.
+    //
+    // So this submits its own list and signals its own fence value on the same
+    // queue. `h.fence_value` is monotonic and shared, so the wait below cannot
+    // be satisfied by an older signal.
+    ID3D12CommandList *lists[1] = { cl };
+    h.queue->ExecuteCommandLists(1, lists);
+    const UINT64 fence = ++h.fence_value;
+    if (FAILED(h.queue->Signal(h.fence, fence))) { cl->Release(); al->Release(); return false; }
+    const bool retired = WaitFenceValue(h.fence, fence, 5000);
+    cl->Release(); al->Release();
+    if (!retired) return false;
+
+    bool ok = false;
+    uint8_t *p = nullptr;
+    D3D12_RANGE all{ 0, (SIZE_T)bytes };
+    if (SUCCEEDED(g_amd.probe_rb->Map(0, &all, reinterpret_cast<void **>(&p))) && p != nullptr)
+    {
+        double sum = 0.0;
+        uint64_t n = 0;
+        for (UINT y = 0; y < mh; ++y)
+        {
+            const uint16_t *row = reinterpret_cast<const uint16_t *>(p + (size_t)y * pitch);
+            for (UINT x = 0; x < mw; ++x)
+            {
+                const uint16_t *px = row + (size_t)x * 4;
+                for (UINT c = 0; c < 3; ++c)          // colour only, like the engine
+                    sum += AmdMeanFromHalf(px[c]);
+                n += 3;
+            }
+        }
+        D3D12_RANGE none{ 0, 0 };
+        g_amd.probe_rb->Unmap(0, &none);
+        *out_mean = n ? (float)(sum / (double)n) : 0.0f;
+        ok = true;
+    }
+    return ok;
+}
+
 static void AmdReleaseResources()
 {
     auto drop = [](ID3D12Resource *&r) { if (r != nullptr) { r->Release(); r = nullptr; } };
     drop(g_amd.net); drop(g_amd.fsr_in); drop(g_amd.up_out);
+    drop(g_amd.probe_rb); g_amd.probe_pitch = 0;
     drop(g_amd.motion); drop(g_amd.depth); drop(g_amd.exposure);
     // The FSR contexts are sized to the extents that just went away, so they
     // go with them; the next frame rebuilds both together.
@@ -581,6 +738,10 @@ static void AmdEngineHealth()
                 verdict);
         }
     }
+    // The pair that names the side: ours first, the engine's right below.
+    if (g_amd.probe_conv_mean >= 0.0f)
+        Log("[amd] our own measure, last taken: converted input mean %.4f, dispatch "
+            "output mean %.4f", g_amd.probe_conv_mean, g_amd.probe_net_mean);
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
     const std::string frames = last_with("frames ");
@@ -1063,6 +1224,31 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
             Log("[amd] FSR dispatch %llu: network at %ux%u%s",
                 static_cast<unsigned long long>(g_amd.fsr_frames), nw, nh,
                 g_amd.fsr.Upscaling() ? ", then the upscale" : " (1:1, no upscale)");
+        // The measurement itself, taken where it can still be acted on and
+        // only every 300th frame: a readback is a full GPU->CPU sync, and the
+        // point is a number in the log, not a per-frame cost. Taken AFTER the
+        // submission above, on its own list, so the frame the engine is
+        // following is not disturbed.
+        if ((g_amd.fsr_frames % 300) == 1)
+        {
+            float conv = -1.0f, netm = -1.0f;
+            const bool got_conv = AmdMeasureSurface(g_amd.fsr_in, &conv);
+            const bool got_net  = AmdMeasureSurface(g_amd.net, &netm);
+            if (got_conv) g_amd.probe_conv_mean = conv;
+            if (got_net)  g_amd.probe_net_mean = netm;
+            ++g_amd.probe_frames;
+            if (!got_conv || !got_net) ++g_amd.probe_failed;
+            if (got_conv && got_net)
+                Log("[amd] what WE hand over: converted input mean %.4f, dispatch output "
+                    "mean %.4f (colour channels only - the engine's own metric; compare "
+                    "with its 'encoded mean' above)",
+                    conv, netm);
+            else
+                Log("[amd] the surface probe did not run this pass (converted %s, "
+                    "dispatch output %s) - the engine's own number stands alone",
+                    got_conv ? "measured" : "not measured",
+                    got_net ? "measured" : "not measured");
+        }
     }
 
     // The engine, recorded into the same list. It is handed shader-readable

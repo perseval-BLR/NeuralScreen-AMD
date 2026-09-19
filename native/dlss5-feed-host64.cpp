@@ -2542,6 +2542,21 @@ static void ClosePresent()
 
 static bool OpenPresent(UINT width, UINT height, uint32_t flags)
 {
+    // COUNTED, because the engine's own log says it takes its device "from the
+    // first presented swapchain" - and a mode switch tears that swapchain down
+    // and builds another. That is the shape of the reported crash: window mode
+    // on, then 0xC0000409 inside the engine.
+    //
+    // Not a fix: the line exists so the next report can show whether the crash
+    // follows the recreation. A hypothesis this cheap to check does not need a
+    // Radeon to test - it needs the number in the log next to the crash.
+    static uint32_t s_present_generation = 0;
+    ++s_present_generation;
+    if (s_present_generation > 1)
+        Log("[present] swapchain generation %u: the engine binds its device from the "
+            "FIRST presented swapchain, so a recreation is where it can be left "
+            "holding one that no longer exists",
+            s_present_generation);
     ClosePresent();
     if (width < 64 || height < 64 || width > 7680 || height > 4320)
     {
