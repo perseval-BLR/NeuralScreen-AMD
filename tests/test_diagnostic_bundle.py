@@ -11,6 +11,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import os
+import time
 import zipfile
 
 
@@ -183,6 +185,48 @@ class DiagnosticBundleTests(unittest.TestCase):
                 report = json.loads(archive.read("diagnostics.json"))
             self.assertEqual(report["log"]["crash_dumps"]["included"], 2)
             self.assertIn("policy", report["log"]["crash_dumps"])
+
+        # A dump from a PREVIOUS session must not ride along. Windows keeps
+        # the folder across runs, so without this the same crash is reported as
+        # this run's - measured on a real report where two consecutive bundles
+        # carried identical dumps from an older release folder, and the stack
+        # was read and believed before the paths gave it away.
+        # Two stale names, one of which looks plausible: a filter keyed on the
+        # file name rather than the time would let the second one through.
+        stale = dumps / "nvngx.dll.4321.dmp"
+        stale.write_bytes(b"OLD-SESSION")
+        old_time = time.time() - 3600.0
+        os.utime(stale, (old_time, old_time))
+        stale2 = dumps / "nvngx.dll.1.2.3.dmp"
+        stale2.write_bytes(b"OLD-SESSION-2")
+        os.utime(stale2, (old_time, old_time))
+        with mock.patch.object(diagnostics, "_crash_dump_dirs", return_value=[dumps]):
+            with mock.patch.object(diagnostics, "process_start_time",
+                                   return_value=time.time()):
+                collected = diagnostics.collect_crash_dumps()
+                self.assertEqual({data for _, data in collected},
+                                 {b"OUR-DUMP", b"SECOND"})
+                self.assertNotIn(b"OLD-SESSION", {data for _, data in collected})
+                self.assertNotIn(b"OLD-SESSION-2", {data for _, data in collected})
+
+                # ...and the same file IS shipped when it belongs to this run:
+                # the filter must be about time, not about the file name.
+                fresh = dumps / "nvngx.dll.9999.dmp"
+                fresh.write_bytes(b"THIS-SESSION")
+                os.utime(fresh, (time.time(), time.time()))
+                collected = diagnostics.collect_crash_dumps()
+                self.assertIn(b"THIS-SESSION", {data for _, data in collected})
+
+        # The clock itself is checked WITHOUT a mock, because a mocked
+        # process_start_time cannot see the function being broken: returning
+        # 0.0 from it, or a wrong epoch conversion, would leave the filter
+        # inert and every test above would still pass. Both were holes found by
+        # breaking the code on purpose.
+        real_start = diagnostics.process_start_time()
+        self.assertGreater(real_start, 1_600_000_000.0,
+                           "process start must be a real epoch time, not 0")
+        self.assertLess(abs(real_start - time.time()), 24 * 3600,
+                        "process start must be near now, not a mis-scaled FILETIME")
 
         # Negative control: a machine with no dumps says so, and still reports
         # whether it is configured to write them at all.

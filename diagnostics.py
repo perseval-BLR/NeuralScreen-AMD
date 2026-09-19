@@ -570,6 +570,60 @@ _CRASH_DUMP_LIMIT = 3
 #: Only our own process's dumps, by executable name. A bundle must never ship
 #: some other program's crash (the same machine is a workstation).
 _CRASH_DUMP_EXES = ("nvngx.dll", "dlss5-feed-host64.exe")
+#: Slack when comparing a dump's mtime against this process's start: FILETIME
+#: granularity plus the moment between the process starting and the folder
+#: entry being stamped. Two seconds is far below the gap between sessions and
+#: far above any scheduling jitter.
+_CRASH_DUMP_SLACK_S = 2.0
+
+
+def process_start_time() -> float:
+    """When THIS process started, as a POSIX timestamp (0.0 if unknown).
+
+    Used to decide whether a dump belongs to this run at all. Windows keeps
+    dumps in a folder ACROSS sessions, so a collector that only sorts by
+    modification time happily ships the previous session's crash as if it were
+    this one's - and a reader then diagnoses a build that is not in front of
+    them.
+
+    Measured cost of not having this: one reporter's bundle carried the same
+    three dumps in two consecutive packages, and those dumps were from an
+    older release folder entirely (`...-v0.1.17-alpha-full\`) with an older
+    runtime image (SizeOfImage 0x6df000 = v0.2.14) than the build under test.
+    The faulting stack was read and believed before the paths gave it away.
+    """
+    if os.name != "nt":
+        return 0.0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not kernel32.GetProcessTimes(
+            kernel32.GetCurrentProcess(),
+            ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel), ctypes.byref(user),
+        ):
+            return 0.0
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        if ticks == 0:
+            return 0.0
+        # FILETIME is 100 ns intervals since 1601-01-01.
+        return ticks / 10_000_000.0 - 11_644_473_600.0
+    except Exception:
+        return 0.0
 
 
 def _crash_dump_dirs() -> list[Path]:
@@ -589,7 +643,21 @@ def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes
 
     Read-only and best effort: a missing folder, a dump another process still
     holds, anything at all - the bundle is built without it rather than fail.
+
+    ONLY DUMPS FROM THIS RUN. A dump written before this process started is a
+    previous session's crash, and shipping it as this run's is worse than
+    shipping nothing: the faulting stack looks authoritative, names real
+    modules, and describes a build that is not the one under test. Measured on
+    a report where the same three dumps appeared in two consecutive packages,
+    both from an older release folder - so the reader was sent after a crash
+    three builds old.
+
+    The filter is the process start time, with a slack for clock granularity
+    and for a dump written immediately as the process came up.
     """
+    started = process_start_time()
+    cutoff = started - _CRASH_DUMP_SLACK_S if started > 0 else 0.0
+
     found: list[tuple[float, Path]] = []
     for directory in _crash_dump_dirs():
         try:
@@ -598,9 +666,12 @@ def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes
                 if not any(exe.casefold() in name for exe in _CRASH_DUMP_EXES):
                     continue
                 try:
-                    found.append((entry.stat().st_mtime, entry))
+                    mtime = entry.stat().st_mtime
                 except OSError:
                     continue
+                if cutoff > 0.0 and mtime < cutoff:
+                    continue          # a previous session's crash
+                found.append((mtime, entry))
         except OSError:
             continue
     found.sort(key=lambda item: item[0], reverse=True)
@@ -831,6 +902,11 @@ def create_diagnostic_bundle(
     log_metadata["crash_dumps"] = {
         "included": len(crash_dumps),
         "policy": crash_dump_policy(),
+        # Said out loud so a reader can tell a bundle that carried this run's
+        # crash from one that carried nothing (the folder is per-machine and
+        # outlives the session).
+        "only_this_run": True,
+        "process_started": process_start_time(),
     }
 
     # The engine's own log rides along too. Our log answers "what did the host
