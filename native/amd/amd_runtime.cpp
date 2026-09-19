@@ -402,6 +402,23 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
             { L"Scale",         L"0.03000" },
             { L"UseAutoMask",   L"1" },
             { L"ToneChannels",  L"0" },
+            // PreUpscale decides WHICH SURFACE the network reads, and it is the
+            // one key whose default we cannot leave to the engine.
+            //
+            // It first appeared in v0.3.0, where it defaults ON: the network runs
+            // on the render-resolution colour that FSR is about to upscale, and
+            // "FSR receives the corrected copy" (the runtime's own line). The
+            // host then reads the corrected copy back out of the upscaler's
+            // chain. Our whole design assumes the opposite - the engine writes
+            // the dispatch's OUTPUT, which is the v0.2.x contract stated in
+            // amd_runtime.h.
+            //
+            // Left unset, we get the engine's choice and our assumption silently
+            // becomes false: the surface we read back is one nothing wrote.
+            // Written explicitly so the choice is ours and visible in the file:
+            // 1 = the mode the working RDNA3 configurations run in
+            // (README_RDNA3_REPORT: "PreUpscale=1 (network on 640x360)").
+            { L"PreUpscale",    L"1" },
         };
         for (const auto &kv : keys) {
             wchar_t have[64] = {};

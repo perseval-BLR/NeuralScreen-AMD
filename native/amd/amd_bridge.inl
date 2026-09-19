@@ -466,6 +466,26 @@ static void AmdEngineHealth()
         return line;
     };
 
+    // WHICH MODE the engine is in, and which surface that means it reads.
+    //
+    // This is the one line that was missing from every report we have. From
+    // v0.3.0 the runtime can run the network on the render-resolution colour
+    // FSR is about to upscale ("pre-upscale"), where the corrected copy comes
+    // back through the upscaler - not out of the dispatch's output, which is
+    // what this host assumes. The two modes read DIFFERENT surfaces, so a
+    // reader cannot judge a black frame without knowing which one ran.
+    {
+        const std::string mode = last_with("pre-upscale mode");
+        const std::string staging = last_with("staging ready");
+        if (!mode.empty())
+            Log("[amd] engine mode: %s", mode.c_str());
+        else if (!staging.empty())
+            Log("[amd] engine mode: post-upscale (no pre-upscale line; the "
+                "engine reads the output of the dispatch it follows)");
+        if (!staging.empty())
+            Log("[amd] %s", staging.c_str());
+    }
+
     const std::string mean = last_with("encoded mean");
     if (!mean.empty())
     {

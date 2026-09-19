@@ -117,6 +117,25 @@ def main() -> int:
         failures.append("the queue-fence wait is gone - the dispatch-only "
                         "route has no completion signal")
 
+    # --- 3b. the engine's MODE is ours to choose, not the engine's default --
+    # PreUpscale decides which surface the network reads, and it only exists
+    # from v0.3.0, where it defaults ON. Left unset, the engine picks a mode
+    # this host's assumption is wrong about: we read back the dispatch's OUTPUT
+    # while a pre-upscale engine never writes it. That is a black picture with
+    # every counter healthy.
+    runtime_src = (BASE / "native" / "amd" / "amd_runtime.cpp").read_text(
+        encoding="utf-8", errors="replace")
+    if '"PreUpscale"' not in runtime_src:
+        failures.append("the ini writer does not set PreUpscale - on v0.3.x the "
+                        "engine then runs its OWN default, which changes which "
+                        "surface the network reads")
+    # Searched in the whole bridge, not in the small window around the wait:
+    # the health report that prints the mode lives in a different function.
+    if 'last_with("pre-upscale mode")' not in src:
+        failures.append("the log never reports the engine's mode - a black "
+                        "frame cannot be judged without knowing which surface "
+                        "the engine read")
+
     # --- 4. the switch is reported ----------------------------------------
     if "NS_AMD_PACKET" not in src:
         failures.append("NS_AMD_PACKET is never read - the switch cannot be "
