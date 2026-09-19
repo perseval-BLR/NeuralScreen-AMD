@@ -122,10 +122,19 @@ def main() -> int:
     if 'dlssnr_amd_pass1_patched.dll' not in header:
         failures.append("the patched image has no file name - the two copies "
                         "would collide")
-    # The default must be the STOCK image: that is the whole direction change.
-    if "want_patched ? kRuntimeNamePatched : kRuntimeName" not in driver:
-        failures.append("the default image is not the stock build - the driver "
-                        "must pick kRuntimeNamePatched only when asked")
+    # The default must be the STOCK image, whatever else is selectable. The
+    # expression became a three-way choice when the driver gained a second
+    # RELEASE (v0.3.1) as well as the second variant, so the check is now on the
+    # shape rather than one exact string: the fall-through branch is the stock
+    # name, and each other image is reachable only through its own flag.
+    if "kRuntimeName);" not in driver and "kRuntimeName;" not in driver:
+        failures.append("no branch falls through to the stock image name - the "
+                        "driver must pick a non-default image only when asked")
+    for flag, name in (("NS_AMD_PATCHED", "kRuntimeNamePatched"),
+                       ("NS_AMD_V0310", "kRuntimeNameV0310")):
+        if flag not in driver or name not in driver:
+            failures.append(f"{name} is not selectable through {flag} - a build "
+                            f"that cannot be chosen is a build nobody can test")
     # ...and both files must actually be produced.
     if "dlssnr_amd_pass1_patched.dll" not in src:
         failures.append("the prepare script never writes the patched copy")

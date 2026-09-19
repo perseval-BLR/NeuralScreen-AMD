@@ -253,7 +253,22 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         const DWORD got = GetEnvironmentVariableA("NS_AMD_PATCHED", v, sizeof(v));
         want_patched = got > 0 && got < sizeof(v) && v[0] == '1';
     }
-    const std::wstring chosen_name = want_patched ? kRuntimeNamePatched : kRuntimeName;
+    // NS_AMD_V0310=1 selects the v0.3.1 image, which the user gets by running
+    // prepare_amd_runtime.py on that release's own installer. It is a separate
+    // FILE rather than a replacement for the same reason the patched variant is:
+    // switching builds becomes one variable and no reinstall, and both stay
+    // available for a direct comparison on the same machine. The offset table is
+    // chosen from the file's hash, not from this flag - the flag only says which
+    // file to open.
+    bool want_v0310 = false;
+    {
+        char v[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_V0310", v, sizeof(v));
+        want_v0310 = got > 0 && got < sizeof(v) && v[0] == '1';
+    }
+    const std::wstring chosen_name = want_v0310 ? kRuntimeNameV0310
+                                                : (want_patched ? kRuntimeNamePatched
+                                                                : kRuntimeName);
     const std::wstring runtime_path = runtime_dir + L"\\" + chosen_name;
     const std::wstring weights_path = runtime_dir + L"\\" + kWeightsName;
     const std::wstring ini_path = runtime_dir + L"\\" + kIniName;

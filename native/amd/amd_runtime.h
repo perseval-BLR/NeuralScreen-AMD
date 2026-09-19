@@ -73,6 +73,10 @@ inline constexpr const wchar_t *kRuntimeName = L"dlssnr_amd_pass1.dll";
 //: FILE rather than a replacement, so switching between the two is one
 //: environment variable instead of a reinstall (see RuntimeImageName).
 inline constexpr const wchar_t *kRuntimeNamePatched = L"dlssnr_amd_pass1_patched.dll";
+//: v0.3.1, the second build the driver knows, written by prepare_amd_runtime.py
+//: under this name. Selected with NS_AMD_V0310=1 - see the table's note for why
+//: the host drives two builds at once.
+inline constexpr const wchar_t *kRuntimeNameV0310 = L"dlssnr_amd_pass1_v0310.dll";
 inline constexpr const wchar_t *kWeightsName = L"dlssnr_on_amd_weights.bin";
 inline constexpr const wchar_t *kIniName = L"dlssnr_on_amd.ini";
 inline constexpr const wchar_t *kHipName = L"amdhip64_7.dll";

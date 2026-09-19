@@ -77,6 +77,26 @@ STOCK_SHA256 = "bc97f3b06718e19042acaf227bfe15d1e43d4977f9dc2e39994fcc511445ff4e
 #: It is also the hash the driver's own image check pins.
 PATCHED_SHA256 = "c8a5d3af65f35058a2274fa3fbd3aa7a713ff86c3375e12d74af7d9618279066"
 
+#: The SECOND build the driver knows: v0.3.1, the maintainer's current release.
+#:
+#: Why it is here at all: on the same Radeon architecture the newer release is
+#: reported working (upstream issue #182, RDNA3 gfx1100 - `route fsr`, no
+#: timeouts, healthy self-check) while v0.2.17 shows a black picture in this
+#: project's own reports. Its notes also close what this host kept meeting by
+#: hand ("new wait method ... reduces the chance of stalls", "Fixed three
+#: crashes"). The driver carries an offset table for it; this script is how a
+#: user ends up with it.
+#:
+#: NO PATCHES ARE APPLIED to this build, and that is deliberate rather than an
+#: omission. The two patches this project uses are byte-level edits to v0.2.17
+#: at offsets that do not exist here (checked: the `before` bytes of every
+#: published v0.3.0 patch are absent from this image, except one log string).
+#: The published patch set for v0.3.0 does not apply either. v0.3.1 ships as
+#: the maintainer built it, and the driver drives it unmodified - which is the
+#: same shape as the stock v0.2.17 path that already works this way.
+V0310_SIZE = 7_304_192
+V0310_SHA256 = "b108d6407eb7f094a4f9111edd778eee7b978b648d413a9fc7aeedfdd914c154"
+
 #: Where --download gets the installer. The author's own release page, so the
 #: file goes from him to the user and never through this project - his licence
 #: forbids redistribution and asks for a link instead. The size is pinned:
@@ -476,6 +496,21 @@ def main() -> int:
             return 3
 
     have = hashlib.sha256(data).hexdigest()
+    if have == V0310_SHA256:
+        # v0.3.1 - the second build the driver drives. It ships as the
+        # maintainer built it: no patches are applied, because the patches this
+        # project uses are v0.2.17 byte edits and the published v0.3.0 set does
+        # not apply here either (checked, see V0310_SHA256's note). Writing it
+        # under its own name keeps both builds side by side, exactly like the
+        # v0.2.17 pair, so switching is one environment variable and no
+        # reinstall.
+        v0310_dst = folder / "dlssnr_amd_pass1_v0310.dll"
+        v0310_dst.write_bytes(bytes(data))
+        print(f"written: {v0310_dst}  <- the v0.3.1 build, unmodified")
+        print("note: this is NOT what runs by default. The default image is "
+              "dlssnr_amd_pass1.dll (v0.2.17); the driver accepts both and "
+              "picks the offset table from each file's own hash.")
+        return 0
     if have == STOCK_SHA256:
         pass
     elif have == PATCHED_SHA256:
