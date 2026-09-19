@@ -34,6 +34,10 @@
 #include <dxgi1_4.h>
 #include <dxgi1_6.h>   // IDXGIOutput6: the captured display's colour space (HDR)
 #include <d3dcompiler.h>
+// The minidump types and callbacks for the self-dump in CrashFilter. Header
+// only: the DLL itself is loaded at run time (see WriteCrashDump), so a machine
+// without dbghelp.dll loses the dump and nothing else.
+#include <dbghelp.h>
 #include "spout_bridge.h"
 #include <cstdio>
 #include <cstdarg>
@@ -168,6 +172,76 @@ static void Log(const char *fmt, ...)
 // Defined next to the AMD bridge (the counters it reports live there).
 static void AmdCrashCounters(char *out, size_t cap);
 
+// Where the process was when it died, written by the process itself.
+//
+// WHY THIS EXISTS, and why it is not left to Windows Error Reporting: WER
+// writes a dump only when LocalDumps is configured, and that key lives under
+// HKLM - it needs an administrator and a deliberate setup step on the user's
+// machine. Measured on the reports we have: of five reporters, exactly one had
+// it configured, and the dumps in that one's package turned out to belong to a
+// PREVIOUS session (an older build entirely). So the artifact that names the
+// faulting stack was missing exactly where it was needed.
+//
+// A dump is far more useful than our crash line for the classes we hit: the
+// line names the module and offset, the dump carries the whole stack, the
+// loaded modules and their versions. For an engine that is a closed binary
+// with no symbols, the stack is the only way to see WHICH of its code paths
+// was running.
+//
+// Best effort and silent on failure: a process on its way out must not turn a
+// diagnosable crash into a different one.
+static void WriteCrashDump(EXCEPTION_POINTERS *info)
+{
+    // dbghelp's MiniDumpWriteDump is resolved at run time, not linked: the
+    // worker ships as the process it is, and adding a link dependency to a
+    // system DLL that some stripped Windows install lacks would trade one
+    // failure for another.
+    HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
+    if (dbghelp == nullptr) return;
+    using WriteFn = BOOL (WINAPI *)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE,
+                                    PMINIDUMP_EXCEPTION_INFORMATION,
+                                    PMINIDUMP_USER_STREAM_INFORMATION,
+                                    PMINIDUMP_CALLBACK_INFORMATION);
+    auto write = reinterpret_cast<WriteFn>(
+        GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (write == nullptr) return;
+
+    // Beside the worker, where our log already is: the folder a user is asked
+    // to zip, so nobody has to know where Windows keeps its own.
+    char path[MAX_PATH] = {};
+    lstrcpynA(path, g_log_path, MAX_PATH);
+    if (char *dot = strrchr(path, '.')) *dot = 0;
+    lstrcatA(path, ".dmp");
+
+    HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    MINIDUMP_EXCEPTION_INFORMATION ex = {};
+    ex.ThreadId = GetCurrentThreadId();
+    ex.ExceptionPointers = info;
+    ex.ClientPointers = FALSE;
+
+    // Thread and module info, and the memory a stack walk needs - deliberately
+    // NOT full memory: the engine's weights and our surfaces are gigabytes, and
+    // a bundle has to stay attachable to an issue.
+    const MINIDUMP_TYPE type = static_cast<MINIDUMP_TYPE>(
+        MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory |
+        MiniDumpWithUnloadedModules | MiniDumpWithProcessThreadData |
+        MiniDumpWithDataSegs);
+    const BOOL ok = write(GetCurrentProcess(), GetCurrentProcessId(), file,
+                          type, &ex, nullptr, nullptr);
+    CloseHandle(file);
+
+    if (ok)
+        Log("[crash] === CRASH: wrote %s - the stack in it names the faulting "
+            "path ===", path);
+    else
+        Log("[crash] === CRASH: the dump could not be written (error %lu) ===",
+            GetLastError());
+    FreeLibrary(dbghelp);
+}
+
 static LONG WINAPI CrashFilter(EXCEPTION_POINTERS *info)
 {
     const EXCEPTION_RECORD *rec = info != nullptr ? info->ExceptionRecord : nullptr;
@@ -232,6 +306,9 @@ static LONG WINAPI CrashFilter(EXCEPTION_POINTERS *info)
     Log("[crash] === CRASH: %s ===", counters);
     Log("[crash] === CRASH: the worker is gone; the lines above are the last "
         "ones it wrote ===");
+    // The dump last: everything above is in the log already, and this is the
+    // step that can fail without costing us the lines that describe the crash.
+    WriteCrashDump(info);
     return EXCEPTION_EXECUTE_HANDLER;   // let it die, but now it says why
 }
 

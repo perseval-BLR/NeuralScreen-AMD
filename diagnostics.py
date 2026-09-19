@@ -27,6 +27,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import sys
 import re
 import shutil
 import subprocess
@@ -638,6 +639,64 @@ def _crash_dump_dirs() -> list[Path]:
     return dirs
 
 
+#: Our own dumps, written by the worker's CrashFilter next to its log. These
+#: are the ones that matter: they need no registry key and no administrator, so
+#: they exist on machines where Windows Error Reporting is not configured -
+#: which, measured, is four out of five reporters.
+_OWN_DUMP_GLOB = ("*.dmp",)
+
+
+def _own_worker_dirs() -> list[Path]:
+    """Folders that may hold our own dump, newest first."""
+    dirs: list[Path] = []
+    here = Path(__file__).resolve().parent
+    dirs.append(here / "native")
+    dirs.append(here)
+    # The worker's own directory is the one the app was started from.
+    if getattr(sys, "frozen", False):
+        dirs.insert(0, Path(sys.executable).resolve().parent / "native")
+    return dirs
+
+
+def collect_own_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes]]:
+    """Dumps THIS process's worker wrote, as ``(name, bytes)``.
+
+    Preferred over the WER folder: ours need no configuration to exist, so they
+    are present exactly when the crash we are diagnosing happened here.
+    """
+    started = process_start_time()
+    cutoff = started - _CRASH_DUMP_SLACK_S if started > 0 else 0.0
+    found: list[tuple[float, Path]] = []
+    for directory in _own_worker_dirs():
+        try:
+            for entry in directory.glob("*.dmp"):
+                try:
+                    mtime = entry.stat().st_mtime
+                except OSError:
+                    continue
+                if cutoff > 0.0 and mtime < cutoff:
+                    continue
+                found.append((mtime, entry))
+        except OSError:
+            continue
+    found.sort(key=lambda item: item[0], reverse=True)
+    dumps: list[tuple[str, bytes]] = []
+    for _, path in found[:limit]:
+        try:
+            if path.stat().st_size > CRASH_DUMP_BYTES:
+                continue
+            data = path.read_bytes()
+        except OSError:
+            continue
+        # Read the signature rather than trusting the extension: a truncated
+        # or unrelated file would otherwise ride along and waste a reader's
+        # time trying to open it.
+        if not data.startswith(b"MDMP"):
+            continue
+        dumps.append((f"crashdump/{len(dumps) + 1}.dmp", data))
+    return dumps
+
+
 def collect_crash_dumps(limit: int = _CRASH_DUMP_LIMIT) -> list[tuple[str, bytes]]:
     """Newest minidumps of OUR worker, as ``(name, bytes)`` for the archive.
 
@@ -898,9 +957,15 @@ def create_diagnostic_bundle(
     # record of the faulting stack (see collect_crash_dumps). The policy is
     # reported even when none was found, so "no dump here" is never confused
     # with "this machine does not write dumps".
-    crash_dumps = collect_crash_dumps()
+    # Ours first: a dump this run wrote beats one Windows happened to keep.
+    crash_dumps = collect_own_crash_dumps()
+    source = "worker" if crash_dumps else "none"
+    if not crash_dumps:
+        crash_dumps = collect_crash_dumps()
+        source = "wer" if crash_dumps else "none"
     log_metadata["crash_dumps"] = {
         "included": len(crash_dumps),
+        "source": source,
         "policy": crash_dump_policy(),
         # Said out loud so a reader can tell a bundle that carried this run's
         # crash from one that carried nothing (the folder is per-machine and

@@ -243,6 +243,56 @@ class DiagnosticBundleTests(unittest.TestCase):
             self.assertFalse(
                 report["log"]["crash_dumps"]["policy"]["local_dumps_configured"])
 
+    def test_our_own_dump_wins_over_the_wer_folder(self) -> None:
+        """A dump this run wrote is preferred to one Windows happened to keep.
+
+        The registry path needs HKLM and an administrator, so most machines
+        have nothing there; the worker therefore writes its own dump next to
+        its log, and that one is certainly about the crash being reported.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            native = Path(tmp) / "native"
+            native.mkdir()
+            mine = native / "dlss5-feed-host.dmp"
+            mine.write_bytes(b"MDMP" + b"\x00" * 64)
+            # Right name, wrong content: must not ride along, or a reader opens
+            # it and blames the tooling.
+            (native / "not-really.dmp").write_bytes(b"GARBAGE")
+            # A valid dump under a name the glob would only match if it were
+            # widened: the collector reads *.dmp specifically, and a widened
+            # glob would sweep in unrelated files from the program folder.
+            (native / "somethingelse.bin").write_bytes(b"MDMP" + b"\x00" * 64)
+
+            def collect():
+                with mock.patch.object(diagnostics, "_own_worker_dirs",
+                                       return_value=[native]), \
+                     mock.patch.object(diagnostics, "process_start_time",
+                                       return_value=time.time()):
+                    return diagnostics.collect_own_crash_dumps()
+
+            got = collect()
+            self.assertEqual(len(got), 1)
+            self.assertTrue(got[0][1].startswith(b"MDMP"))
+
+            # A stale one of ours is skipped, the same rule as the WER folder.
+            old = time.time() - 3600.0
+            os.utime(mine, (old, old))
+            self.assertEqual(collect(), [])
+
+            # Negative control: a truncated dump is not a dump.
+            os.utime(mine, (time.time(), time.time()))
+            mine.write_bytes(b"M")
+            self.assertEqual(collect(), [])
+
+        # The real search path is checked WITHOUT a mock: a mocked
+        # _own_worker_dirs cannot see the function being broken (removing the
+        # `native/` entry would leave every test above passing), and that entry
+        # is where the worker actually writes. Found by breaking it on purpose.
+        real_dirs = diagnostics._own_worker_dirs()
+        self.assertTrue(real_dirs, "the collector must search somewhere")
+        self.assertIn("native", {d.name for d in real_dirs},
+                      "the worker writes its dump into native/, which must be searched")
+
     def test_engine_log_rides_along_and_secrets_stay_out(self) -> None:
         """The engine's own log is the only place that says it initialised.
 
