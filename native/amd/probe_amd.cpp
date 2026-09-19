@@ -433,15 +433,32 @@ int wmain(int argc, wchar_t **argv) {
         if (log) fclose(log);
         return 5;
     }
-    // Bind the HIP device first: the engine reads it at a known offset.
-    for (int i = 0; i < count; ++i) {
+    // The device field is set to -1 (auto), and this probe deliberately does
+    // NOT bind a device of its own any more.
+    //
+    // It used to pick the first device that hipSetDevice accepted and write
+    // that index into the runtime's `HipDevice` field. That index is an
+    // OVERRIDE in the runtime's eyes: with one written it skips its own
+    // selection and logs `(HipDevice in the ini)`. With -1 it matches a HIP
+    // device to the D3D12 device behind the first presented swapchain and
+    // says which one it took (`matches the game's D3D12 adapter`). That
+    // automatic path is upstream's fix for the multi-GPU and iGPU black
+    // screens this project keeps receiving, so a diagnostic tool that pins an
+    // index both pre-empts the fix and hides the evidence the fix prints.
+    //
+    // The HIP call is still made: it is the cheapest way to prove that the
+    // HIP runtime can actually open the card this probe just enumerated, and
+    // a failure here is worth knowing before the engine is asked to init.
+    {
         auto set = reinterpret_cast<int (*)(int)>(GetProcAddress(hip, "hipSetDevice"));
-        if (set && set(i) == 0) {
-            *reinterpret_cast<int *>(reinterpret_cast<uintptr_t>(mod) + kRvaHipDevice) = i;
-            out("init: HIP device %d selected\n", i);
-            break;
-        }
+        if (set && count > 0 && set(0) == 0)
+            out("init: HIP can open device 0; the device field is left at -1 "
+                "(auto) for the engine to match\n");
+        else
+            out("init: HIP could not open device 0 (hipSetDevice failed) - the "
+                "engine will most likely fail to start\n");
     }
+    *reinterpret_cast<int *>(reinterpret_cast<uintptr_t>(mod) + kRvaHipDevice) = -1;
     std::wstring wpath = dir + L"\\" + kWeightsName;
     // The runtime takes std::string, so convert once (the runtime itself is a
     // narrow-path API - a non-ASCII install path is out of scope for now).

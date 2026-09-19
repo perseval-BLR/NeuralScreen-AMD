@@ -389,10 +389,17 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
         return false;
     }
 
-    // Device selection is by adapter LUID at +272: the two APIs enumerate in
-    // their own orders (the same lesson as issue #81 on the NVIDIA side), and
-    // the textures the host hands over are only reachable from the matching
-    // adapter. A mismatch is fatal, not a fallback.
+    // Device selection. Two things are going on here and they are NOT the same
+    // job: finding which HIP device matches the D3D12 device we hand over (so
+    // a mismatch can be refused loudly), and telling the runtime which device
+    // to use (which the runtime now does better than we can).
+    //
+    // The match is by adapter LUID at +272, not by index: the two APIs
+    // enumerate in their own orders (the same lesson as issue #81 on the
+    // NVIDIA side), and the textures the host hands over are only reachable
+    // from the matching adapter. One physical card regularly appears two to
+    // four times with DIFFERENT LUIDs, so "the first AMD adapter" is exactly
+    // the heuristic that produced upstream's multi-GPU black screens.
     LUID target{};
     bool have_target = false;
     if (device != nullptr) {
@@ -416,6 +423,23 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     if (chosen < 0) chosen = 0;  // no device to compare against; single-GPU case
     hip_device_ = chosen;
     hip_set_(chosen);
+    // But the runtime is NOT told this index, and that is deliberate.
+    //
+    // The ini key `HipDevice` is an OVERRIDE: with an index written there the
+    // runtime uses it and logs `(HipDevice in the ini)`, skipping its own
+    // selection entirely. With -1 it matches a HIP device to the D3D12 device
+    // behind the first presented swapchain and says so in its own log
+    // (`matches the game's D3D12 adapter`, `<- the adapter the game renders
+    // on`). That auto path IS the upstream fix for this project's
+    // multi-GPU/iGPU reports (v0.2.17: "Fixed crashes and black screens on
+    // multi-GPU systems"), and it is the path the maintainer points at when a
+    // user's card is picked wrong. Writing our own index pre-empts it - and
+    // the runtime's log line is how a report proves which device it took, so
+    // pre-empting it also removes the evidence.
+    //
+    // The value written above (kHipDevice) is therefore -1, and the LUID pass
+    // above is kept for what it is good at: refusing a machine where NO HIP
+    // device matches the adapter, before the runtime wastes a frame on it.
 
     // --- 3. the runtime module ------------------------------------------
     // Where the runtime's log ended BEFORE it loads: the hook wait below reads
@@ -468,7 +492,11 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     if (device != nullptr) device->AddRef();
     At<ID3D12CommandQueue *>(module_, rva::kQueue) = queue;
     if (queue != nullptr) queue->AddRef();
-    At<int>(module_, rva::kHipDevice) = chosen;
+    // -1 = auto: the runtime matches a HIP device to the D3D12 device behind
+    // the first presented swapchain itself, and says which one it took in
+    // its own log. See the selection block above for why this is not the
+    // index we just computed.
+    At<int>(module_, rva::kHipDevice) = -1;
 
     // --- 6. mode flags, in the reference order --------------------------
     // The ORDER is load-bearing, and so is writing Inline TWICE. The
