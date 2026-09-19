@@ -37,6 +37,13 @@ how three earlier guards in this project were written and had to be rewritten.
    we handed it. The exposure value is what separates the cases: 4.0000 is its
    ordinary value, 9999.9980 is the ceiling it runs to on a zero input.
 
+5. A VERDICT ABOUT THE CAPTURE NEEDS A SAMPLE, NOT A FRAME.
+
+   The first report of a run is forced on frame 1, and the capture line
+   concluded "THE CAPTURE ITSELF IS BLACK" from that one frame. Across two
+   launches of the same game on one machine, frame 1 read 0.139 and 0.000 - the
+   verdict flipped sign. The number is always printed; the conclusion waits.
+
 Run:  runtime\\python.exe tests\\test_amd_engine_init.py
 """
 import re
@@ -287,6 +294,47 @@ def main() -> int:
                     "the mean line no longer consults the exposure, which is the "
                     "value that actually separates a zero input from a normal one")
 
+    # --- 5. a verdict about the CAPTURE needs a sample -----------------------
+    #
+    # The capture verdict had the same shape of bug as the engine-init verdict
+    # above, and was found the same way: by reading a real report. The first
+    # report of a run is forced on the FIRST frame (the accounting forces one at
+    # startup so a crash still leaves a line), and the line called the capture
+    # black on that single frame. Across two launches of the SAME game on one
+    # machine, frame 1 read 0.139 in one and 0.000 in the other - so the verdict
+    # flipped sign between launches of a game whose capture was fine.
+    if not health:
+        pass
+    else:
+        if "kCaptureVerdictFrames" not in bridge:
+            failures.append(
+                "no frame threshold exists for the capture verdict - the first "
+                "report fires on frame 1 and one frame cannot support a "
+                "conclusion about the capture")
+        # The threshold is declared outside AmdEngineHealth, so look at the file.
+        if "kCaptureVerdictFrames = " not in bridge:
+            failures.append("the capture threshold has no value")
+        cap_at = health.find("g_cap_frames >= kCaptureVerdictFrames")
+        if cap_at < 0:
+            failures.append(
+                "the capture verdict does not consult the frame count - it would "
+                "call a one-frame sample black again")
+        else:
+            # And a bare number must still be printed while it holds back, or
+            # the log loses the measurement along with the false conclusion.
+            window = health[cap_at:cap_at + 900]
+            # The fragment must be CONTIGUOUS inside one C string literal: the
+            # sentence is split across two lines by the compiler's own
+            # concatenation ("...too " "few to call..."), so searching for the
+            # whole sentence fails while the code is entirely correct.
+            if ("few to call the capture black" not in window
+                    and "not enough frames" not in window):
+                failures.append(
+                    "nothing says why the verdict is withheld - a reader sees "
+                    "zero over 1 frame and draws the conclusion we refused to")
+            if "%.3f over %llu frames" not in health:
+                failures.append("the capture measurement itself is no longer printed")
+
     if failures:
         print("FAIL")
         for f in failures:
@@ -294,7 +342,8 @@ def main() -> int:
         return 1
     print("PASS: the engine-init verdict is asked where it can be answered, "
           "the retry is bounded and comes after auto, the dead-engine fallback "
-          "is gated on a settled verdict, and the mean is no longer called black")
+          "is gated on a settled verdict, the mean is no longer called black, "
+          "and the capture verdict waits for a sample")
     return 0
 
 

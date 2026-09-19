@@ -422,6 +422,11 @@ static void AmdReleaseResources()
 // confident and the engine knows. This reads the engine's log after the fact
 // and repeats the numbers that decide it, so the next report says it in one
 // file.
+// How many captured frames a verdict about the capture needs before it is
+// stated. Below this the line reports the number and says it is holding back;
+// one frame is enough to print, not enough to conclude.
+static constexpr uint64_t kCaptureVerdictFrames = 30;
+
 static void AmdEngineHealth()
 {
     if (g_amd.dir.empty()) return;
@@ -540,13 +545,41 @@ static void AmdEngineHealth()
             Log("[amd] the capture's own mean luminance: not measured yet "
                 "(no captured frame has reached the guides)");
         else
+        {
+            // A verdict needs a sample, and the first report fires on the FIRST
+            // frame - the accounting forces one at startup so that a crash still
+            // leaves a line behind. One frame is not evidence about a capture:
+            // measured across two launches of the SAME game on one machine,
+            // frame 1 read 0.139 in one and 0.000 in the other, and the report
+            // called the second one black on that single frame. That is the same
+            // mistake as the engine-init verdict that was asked before the
+            // engine could answer, and it sends a reader to the capture when the
+            // capture was never the problem.
+            //
+            // The number itself is always printed - it is a measurement. Only
+            // the capitalised conclusion waits for enough frames to support it,
+            // and until then the line says why it is holding back.
+            const bool enough = g_cap_frames >= kCaptureVerdictFrames;
+            const char *verdict = "";
+            char verdict_buf[160];
+            if (milli == 0 && enough)
+                verdict = "  <- THE CAPTURE ITSELF IS BLACK; the pass is not "
+                          "what lost the picture";
+            else if (milli == 0)
+            {
+                _snprintf_s(verdict_buf, sizeof(verdict_buf), _TRUNCATE,
+                            "  <- zero so far, but over only %llu frame(s): too "
+                            "few to call the capture black",
+                            static_cast<unsigned long long>(g_cap_frames));
+                verdict = verdict_buf;
+            }
             Log("[amd] the capture's own mean luminance: %.3f over %llu frames "
                 "(%llu of them fully black)%s",
                 static_cast<double>(milli) / 1000.0,
                 static_cast<unsigned long long>(g_cap_frames),
                 static_cast<unsigned long long>(g_cap_dark_frames),
-                milli == 0 ? "  <- THE CAPTURE ITSELF IS BLACK; the pass is not "
-                             "what lost the picture" : "");
+                verdict);
+        }
     }
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
