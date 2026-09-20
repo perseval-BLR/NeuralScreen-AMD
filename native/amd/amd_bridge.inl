@@ -2077,3 +2077,36 @@ static void AmdOnVideoResize()
     if (!g_amd.active) return;
     AmdReleaseResources();
 }
+
+// AmdShutdown: stop the engine BEFORE anything under it is torn down.
+//
+// This is the counterpart the runtime's own header asks for and we never
+// called. `Runtime::~Runtime()` is deliberately empty with this comment:
+//
+//   "the worker owns the device and the queue, and the engine's worker threads
+//    must not be stopped while a submission may still be in flight. The
+//    reference stops workers only from an explicit Shutdown call after
+//    everything has drained, and so do we."
+//
+// Every exit therefore left the engine's threads running against a device and
+// a queue we were about to release. Measured on a reporter's machine (RX 7900
+// XTX, v0.3.12): the process aborted with exception 0xC0000409 and parameter 7
+// - FAST_FAIL_FATAL_APP_EXIT, which is what the UCRT abort() raises - on
+// THIRTEEN of thirteen launches: once on the window-mode switch, twice on
+// exit, in every one of his three runs. The module it died in was
+// dlssnr_amd_pass1.dll, which is the engine itself, not our worker.
+//
+// Both places that hand the device back call this first: the video loop's
+// teardown and the AMD path being dropped for any other reason. Calling it
+// twice is harmless (guarded_shutdown tolerates it and the runtime's own
+// function is idempotent by contract), so it is not gated on a flag.
+static void AmdShutdown()
+{
+    if (!g_amd.requested && !g_amd.active) return;
+    // Stop the engine's workers while its device is still alive: this is the
+    // whole point of the call, so it goes BEFORE any resource release.
+    g_amd.runtime.Shutdown();
+    g_amd.active = false;
+    g_amd.requested = false;
+    Log("[amd] engine shutdown requested before the device goes away");
+}

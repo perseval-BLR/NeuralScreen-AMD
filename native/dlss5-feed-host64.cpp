@@ -6250,6 +6250,9 @@ static int RunVideo()
                 // NGX) are freed only when the process dies, and a quick
                 // restart of a new worker conflicts with the leftovers of the
                 // old one (exit 127 / a hang).
+                // The AMD engine goes first, and for the same reason: its
+                // threads must be stopped while the device is still alive.
+                AmdShutdown();
                 CleanupVideoNgx();
                 CloseSharedInput();
                 ClosePresent();
@@ -6887,6 +6890,10 @@ static int RunVideo()
     }
     FlushProfileFrames();
     Log("[pure] complete: %u frames delivered, %u direct evaluations", frame, g_eval_count);
+    // The engine first: its worker threads must be stopped while the device
+    // and the queue still exist (see AmdShutdown - this is the call whose
+    // absence aborted the process on 13 of 13 launches).
+    AmdShutdown();
     CleanupVideoNgx();
     CloseOut();
     CloseSharedInput();
@@ -7142,6 +7149,11 @@ static int Serve(DWORD game_pid)
     // Normal exit: release the NGX resources, otherwise a quick worker restart
     // conflicts with the leftovers (exit 127 / a hang on frame 0). The Spout2
     // sender goes the same way - a DX11 device and a 4K shared texture.
+    // The AMD engine is stopped FIRST: its threads run against the device and
+    // the queue, and the runtime's destructor is empty on purpose - it expects
+    // this explicit call. Without it every exit aborted inside
+    // dlssnr_amd_pass1.dll (0xC0000409 / FAST_FAIL_FATAL_APP_EXIT).
+    AmdShutdown();
     CleanupVideoNgx();
     SpoutBridgeShutdown();
     return 0;
