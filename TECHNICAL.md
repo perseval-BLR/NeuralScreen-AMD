@@ -286,6 +286,37 @@ a change, or the same state after five quiet seconds, is written. `describe_wind
 never raises - a dead or null handle degrades to `hwnd=invalid`, because
 diagnostics must not break the render path.
 
+**Leaving the process on the AMD path.** Two calls, and both are needed - a
+report gave thirteen aborts in thirteen launches (`0xC0000409`, parameter 7,
+inside `dlssnr_amd_pass1.dll`) without either.
+
+The engine is stopped first, by `AmdShutdown()`, before anything under it is
+released. `Runtime::~Runtime()` is empty on purpose and says why: the worker owns
+the device and the queue, and the engine's worker threads must not be stopped
+while a submission may still be in flight - the reference stops them only from an
+explicit call after everything has drained. Every path that hands the device back
+calls it before the first resource release.
+
+Then the process leaves without the runtime's own unload path, through
+`ExitWithoutRuntimeTeardown()`, and only when `AmdHostedRuntime()` says a
+third-party runtime was actually loaded - an NVIDIA machine has no detours to
+unload and must keep exiting normally. The evidence for this half is upstream: the
+working fork hosts the same runtime and hit the same abort, and its fix is to
+leave without running that teardown ("the process carries a third party's
+detours, its worker thread and its DLL unload path; that teardown fails fast
+(0xC0000409)"). Our dump agrees - the fault is at `+0x3a885`, while the runtime's
+shutdown entry is `0x12690` on one build and `0x17150` on the other, so what
+aborts is the unload/static-destructor path, not the stop function.
+
+**The defer-tail choice is logged.** `defer_tail` defers the neural waits to the
+present fence, and it used to run entirely silently - a report that alternated
+between a correct frame and a blown-white one at exactly its present period
+carried zero lines about it, so whether it was even active was unanswerable. It
+now writes one line per change of state, in both states, naming the three facts
+that decided it (`hdr_capture`, the HDR switch, `PresentModeActive`) - with the
+choice alone you cannot tell which one flipped, and on an HDR desktop the capture
+flag and the switch disagree by design.
+
 **NR off (bypass).** `Num1` does not stop the pipeline anymore. Frames are
 sent with `FRAME_FLAG_BYPASS`: the worker skips the NGX evaluate and
 presents the raw capture instead. The overlay stays alive; everything is
