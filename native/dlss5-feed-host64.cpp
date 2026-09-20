@@ -7161,6 +7161,37 @@ static int Serve(DWORD game_pid)
 
 // ---------------------------------------------------------------------------
 
+// Leave without letting the hosted runtime's own teardown run.
+//
+// The counterpart of AmdShutdown, and the evidence comes from upstream: the
+// working fork hosts the same HIP runtime and hit the SAME abort we did -
+//
+//   "the worker leaves without running the hosted runtime's teardown (it was
+//    failing fast, 0xC0000409, on a normal session end)"
+//
+// - and their fix is not a shutdown call, it is TerminateProcess:
+//
+//   "When the HIP runtime is hosted, the process carries a third party's
+//    detours, its worker thread and its DLL unload path; that teardown fails
+//    fast (0xC0000409) and the parent logs a crash for a session that ended
+//    normally. There is nothing left to do here that the OS will not do better."
+//
+// That matches our dump: the fault is at dlssnr_amd_pass1.dll + 0x3a885, which
+// is NOT the runtime's shutdown entry (kShutdown is 0x12690 on one build and
+// 0x17150 on the other) - so the abort is on the unload/static-destructor path,
+// exactly the one the fork avoids.
+//
+// This runs AFTER our own cleanup, which has already stopped the engine and
+// released the device, the queue, the window and the shared mappings. The exit
+// code is what the parent reads, so it is preserved.
+static void ExitWithoutRuntimeTeardown(int code)
+{
+    // Flush everything we wrote: TerminateProcess does not run atexit handlers
+    // and the log is written through a FILE* that must not lose its tail.
+    fflush(nullptr);
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+}
+
 int main(int argc, char **argv)
 {
     // Per-monitor DPI awareness BEFORE any window exists. Without it, on a
@@ -7254,6 +7285,15 @@ int main(int argc, char **argv)
     SpoutBridgeInit(h.dev);
 
     if (test) return RunTest();
-    if (video) return RunVideo();
-    return Serve(pid);
+    if (video)
+    {
+        const int code = RunVideo();
+        // The runtime's DLL unload path is what aborts (0xC0000409) - upstream
+        // avoids it the same way. Only when a runtime was actually hosted.
+        if (AmdHostedRuntime()) ExitWithoutRuntimeTeardown(code);
+        return code;
+    }
+    const int code = Serve(pid);
+    if (AmdHostedRuntime()) ExitWithoutRuntimeTeardown(code);
+    return code;
 }

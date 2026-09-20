@@ -1920,6 +1920,21 @@ static void AmdFrameAccounting()
 
 // The one-line-per-question report a stranger's log has to answer: which
 // build, which device, did the engine come up, at what extent, and how fast.
+// AmdHostedRuntime: was a third-party HIP runtime loaded into this process?
+//
+// Sticky on purpose - AmdShutdown clears the live state, and the answer has to
+// survive it. The exit path needs to know ONE thing after every teardown has
+// run: is there a third party's DLL still mapped in here, with its own worker
+// thread and its own unload path? If yes, leaving normally lets that unload
+// path run, and upstream measured what it does:
+//
+//   "the worker leaves without running the hosted runtime's teardown (it was
+//    failing fast, 0xC0000409, on a normal session end)"
+//
+// so the process is ended without it. On a machine that never hosted a runtime
+// (the NVIDIA path, or AMD refused) this stays false and the exit is ordinary.
+static bool g_amd_hosted = false;
+
 static bool AmdInit()
 {
     g_amd.requested = true;
@@ -2066,6 +2081,9 @@ static bool AmdInit()
     g_amd.hip_index_resolved = g_amd.runtime.ResolvedHipIndex();
 
     g_amd.active = true;
+    // Remember for the exit path that a third party's DLL is now mapped into
+    // this process (see AmdHostedRuntime / ExitWithoutRuntimeTeardown).
+    g_amd_hosted = true;
     Log("[amd] ===== AMD path active =====");
     return true;
 }
@@ -2077,7 +2095,6 @@ static void AmdOnVideoResize()
     if (!g_amd.active) return;
     AmdReleaseResources();
 }
-
 // AmdShutdown: stop the engine BEFORE anything under it is torn down.
 //
 // This is the counterpart the runtime's own header asks for and we never
@@ -2096,10 +2113,9 @@ static void AmdOnVideoResize()
 // exit, in every one of his three runs. The module it died in was
 // dlssnr_amd_pass1.dll, which is the engine itself, not our worker.
 //
-// Both places that hand the device back call this first: the video loop's
-// teardown and the AMD path being dropped for any other reason. Calling it
-// twice is harmless (guarded_shutdown tolerates it and the runtime's own
-// function is idempotent by contract), so it is not gated on a flag.
+// Every path that hands the device back calls this first. Calling it twice is
+// harmless (guarded_shutdown tolerates it and the runtime's own function is
+// idempotent by contract), so it is not gated on a flag.
 static void AmdShutdown()
 {
     if (!g_amd.requested && !g_amd.active) return;
@@ -2110,3 +2126,5 @@ static void AmdShutdown()
     g_amd.requested = false;
     Log("[amd] engine shutdown requested before the device goes away");
 }
+
+static bool AmdHostedRuntime() { return g_amd_hosted; }

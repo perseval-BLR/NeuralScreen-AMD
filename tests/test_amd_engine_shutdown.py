@@ -20,7 +20,7 @@ the UCRT abort() raises - on THIRTEEN of thirteen launches: once on the
 window-mode switch and twice on exit, in each of his three runs, and the module
 it died in was dlssnr_amd_pass1.dll, the engine itself.
 
-WHAT THIS LOCKS
+What this locks
 ---------------
 1. AmdShutdown() exists and calls g_amd.runtime.Shutdown().
 2. Each teardown path that hands the device back calls AmdShutdown() BEFORE the
@@ -29,8 +29,19 @@ WHAT THIS LOCKS
 
 The ORDER is the contract, not the presence: stopping the engine after the
 device is released is exactly the bug, so a call that exists but sits below the
-teardown is still a failure. Rule 2 checks the first occurrence of either, per
-function, and reports what it found.
+teardown is still a failure.
+
+3. The process does NOT leave through the runtime's own unload path. Upstream
+   hosts the same runtime and hit the same abort; their fix is to end the
+   process without that teardown:
+
+     "the worker leaves without running the hosted runtime's teardown (it was
+      failing fast, 0xC0000409, on a normal session end)"
+
+   Our dump agrees: the fault is at dlssnr_amd_pass1.dll + 0x3a885, which is not
+   the runtime's shutdown entry. So the exits call ExitWithoutRuntimeTeardown,
+   and only when a runtime was actually hosted - a machine on the NVIDIA path
+   must still exit normally.
 
 Run:  runtime\\python.exe tests/test_amd_engine_shutdown.py
 """
@@ -130,6 +141,33 @@ def main() -> int:
         failures.append(
             "no teardown path was found to check - the checker is looking at "
             "the wrong file or the paths were renamed")
+
+    # --- 3. the exit does not run the runtime's own unload path -------------
+    # Only when a runtime was hosted: a machine on the NVIDIA path has no third
+    # party's detours to unload, and must keep exiting normally.
+    if "ExitWithoutRuntimeTeardown" not in host:
+        failures.append(
+            "ExitWithoutRuntimeTeardown is gone - the runtime's unload path "
+            "then runs on every exit, and upstream measured that it aborts "
+            "(0xC0000409) on a normal session end")
+    else:
+        at = host.find("if (AmdHostedRuntime()) ExitWithoutRuntimeTeardown(code);")
+        if at < 0:
+            failures.append(
+                "ExitWithoutRuntimeTeardown is not guarded by AmdHostedRuntime() "
+                "- an unconditional process kill would take the exit code's "
+                "ordinary path away from machines that never hosted a runtime")
+        else:
+            # Both worker entry points must take it: the video loop and Serve.
+            if host.count("if (AmdHostedRuntime()) ExitWithoutRuntimeTeardown(code);") < 2:
+                failures.append(
+                    "only one of the two worker entry points leaves without the "
+                    "runtime's teardown - the other still aborts")
+            if "TerminateProcess(GetCurrentProcess()" not in host:
+                failures.append(
+                    "ExitWithoutRuntimeTeardown no longer terminates the "
+                    "process - it is then just a return, and the unload path "
+                    "runs anyway")
 
     if failures:
         print("FAIL: the engine is not stopped before its device is released")
