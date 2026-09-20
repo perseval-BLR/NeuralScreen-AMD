@@ -170,17 +170,17 @@ itself uses the card's own encoder (AMF on a Radeon) or the CPU as the floor.
 program — it names the cause. The commonest is an unprepared neural
 runtime: see **[native/AMD.md](native/AMD.md)**.
 
-**The overlay is invisible in a game.** True fullscreen cannot have anything
-drawn over it — a Windows rule. Switch the game to *borderless*.
-
-**The menu pointer is missing or frozen.** A fullscreen game hides the system
-cursor, and the overlay only shows that one. Borderless fixes it.
+**The overlay is invisible, or the menu pointer is missing, in a game.** True
+fullscreen allows nothing drawn over it and hides the system cursor — a Windows
+rule; a *borderless* game fixes both.
 
 **Everything is too bright and the sliders do nothing.** HDR is on for that
 display. Turn it off (Win+Alt+B), or try **HDR compatibility** in the
 settings — it is experimental; see [HDR setup](https://github.com/perseval-BLR/NeuralScreen-AMD/blob/main/docs/HDR.md).
 
 **A key does nothing.** Something else claimed it; reassign it in the menu.
+
+**Your antivirus flags the download as a virus.** A known false positive on the embedded interpreter: **[native/AMD.md](native/AMD.md)**.
 
 ## Known limitations
 
@@ -189,9 +189,8 @@ settings — it is experimental; see [HDR setup](https://github.com/perseval-BLR
 - **Windows 10 is untested on a Radeon here** — built from user logs of the NVIDIA build. Reports welcome.
 - **A rotated display:** 180° is turned back over on capture; 90° and 270° are not handled yet and come out with the sides swapped.
 - **Pipeline latency** was measured on the NVIDIA build (40-60 ms there); on a Radeon it is unknown until the pass runs. **Processing resolution is capped at 2560×1440**, output is always your full native resolution.
-- **Window mode:** the panel's hard blink and the drag stutter are fixed in
-  this build; focus/taskbar polish (the overlay dropping behind on the first
-  focus change) is still in progress.
+- **Window mode:** the panel's hard blink and the drag stutter are fixed in this
+  build; focus/taskbar polish (the overlay dropping behind on the first focus change) is still in progress.
 
 ## License
 

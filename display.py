@@ -1517,11 +1517,60 @@ class Display:
         # The "grabbed an edge" highlight is cursor state and has no place in
         # the file: it would freeze on the frame for no visible reason.
         hover, self.menu.hover = self.menu.hover, None
+        # The panel is placed against the SCREEN, not against the frame. `draw`
+        # re-lays it out for whatever surface it is handed, so passing the
+        # captured frame put the panel at the frame's centre instead of the
+        # screen's - measured 524 px away in one-window mode, which is what the
+        # reporter saw as "transparent / wrongly composited" (#107). The frame
+        # gets the panel shifted by its own origin, so it appears where the user
+        # saw it.
+        origin = getattr(self, "_window_layer", None)
+        # self.width/height is the SCREEN the layer covers; _window_layer is the
+        # captured window inside it. In one-window mode the frame being saved is
+        # that window, so the panel - laid out for the screen - must be shifted by
+        # the window's origin.
+        screen = (self.width, self.height)
+        same_view = (origin is None
+                     or tuple(surface.get_size()) == (int(screen[0]),
+                                                      int(screen[1])))
         try:
             self.menu.set_stats(self._hud)
-            self.menu.draw(surface)
+            if same_view:
+                self.menu.draw(surface)
+            else:
+                self._draw_menu_at_screen_position(surface, screen, origin)
         finally:
             self.menu.hover = hover
+
+    def _draw_menu_at_screen_position(self, surface, screen, origin) -> None:
+        """Draw the menu where the screen puts it, onto a smaller frame.
+
+        The menu is composed on a screen-sized scratch surface and then blitted
+        at the negative of the frame's origin, so only the part that belongs
+        inside the frame lands in it. Composed on scratch rather than drawn
+        straight onto the frame because the layout must use the SCREEN's size:
+        drawing onto the frame would lay it out for the frame again.
+        """
+        sw, sh = int(screen[0]), int(screen[1])
+        # The layer's own corner, subtracted exactly as show() subtracts it.
+        # `_window_layer` is in VIRTUAL-DESKTOP pixels while the layer starts at
+        # this monitor's corner, so on any monitor but the primary the raw
+        # number is the origin too large: a window at desktop x=4000 on a
+        # monitor starting at 3840 would push the menu 3840 px off the frame and
+        # out of the file altogether.
+        lx, ly = getattr(self, "_origin", (0, 0))
+        ox, oy = int(origin[0]) - int(lx), int(origin[1]) - int(ly)
+        scratch = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        scratch.fill((0, 0, 0, 0))
+        saved = list(self.menu.offset)
+        try:
+            # The menu's own offset is relative to the screen; the scratch is the
+            # screen, so only the frame's origin is subtracted.
+            self.menu.offset = [saved[0], saved[1]]
+            self.menu.draw(scratch)
+        finally:
+            self.menu.offset = saved
+        surface.blit(scratch, (-ox, -oy))
 
     def draw_overlay(self, min_interval: float = 0.1) -> None:
         """Redraw the HUD over the frame the worker is showing.

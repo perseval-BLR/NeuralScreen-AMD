@@ -325,7 +325,27 @@ static bool AmdEnsurePipeline()
 
     D3D12_DESCRIPTOR_HEAP_DESC hd = {};
     hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    hd.NumDescriptors = 9;   // three passes, three descriptors each
+    // FOUR slots, one per user, and that is a correctness requirement rather
+    // than a spare:
+    //
+    //   0  the conversion pass (pso_in)
+    //   1  the motion pass (pso_motion)
+    //   2  the composite (pso_out)
+    //   3  the engine-facing rebind (net as SRV and UAV)
+    //
+    // A descriptor table is resolved by the GPU when it EXECUTES a command, not
+    // when the command is recorded, and all four users above record into ONE
+    // command list that is submitted once at the end. Sharing a slot between two
+    // users therefore rewrites the first one's bindings before it ever runs: the
+    // shader's declared t0/u0 no longer point at its resources, and a typed UAV
+    // store through a descriptor that does not match is dropped silently - the
+    // frame arrives black with every counter healthy.
+    //
+    // That is not hypothetical: slot 3 exists because the engine rebind used to
+    // take slot 0, which the conversion pass also used, and it zeroed the
+    // network's input on every frame from the commit that added the rebind until
+    // this fix. Do not merge any two of these slots back together.
+    hd.NumDescriptors = 12;   // four slots, three descriptors each
     hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr = h.dev->CreateDescriptorHeap(&hd, __uuidof(ID3D12DescriptorHeap),
                                      reinterpret_cast<void **>(&g_amd.heap));
@@ -1264,21 +1284,34 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     //
     // The command list's LAST binding before the record matters: the
     // reference re-binds the heap, re-sets the root signature and points
-    // table 0 at SLOT 0 (the engine's own set: the work surface as an SRV and
-    // the same resource as a UAV) immediately before filling the packet, and
-    // says why - "the engine opens the resource for HIP access itself; this
-    // binding is here so the command list matches the one the engine was
-    // written against". Our motion pass above leaves table 0 on slot 1, so
-    // without this the engine is handed a list whose bindings are somebody
-    // else's.
+    // table 0 at the engine's own set (the work surface as an SRV and the same
+    // resource as a UAV) immediately before filling the packet, and says why -
+    // "the engine opens the resource for HIP access itself; this binding is
+    // here so the command list matches the one the engine was written against".
+    //
+    // It gets its OWN slot, and that is the fix for the black frame, not a
+    // tidiness pass. This rebind used to take slot 0 - the same slot the
+    // conversion pass above records into - and the conversion therefore
+    // executed with the engine's descriptors bound: its declared t0/u0 were
+    // gone, the typed UAV store had no matching resource and was dropped, and
+    // `fsr_in` stayed at its creation value, i.e. zeros. See the heap comment
+    // in AmdEnsurePipeline: a descriptor slot is per-EXECUTION state, and every
+    // pass sharing one command list needs its own for the life of that list.
     {
-        AmdBindTriplet(0, g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT,
+        AmdBindTriplet(3, g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT,
                        g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT,
                        g_amd.net, DXGI_FORMAT_R16G16B16A16_FLOAT, 1);
         ID3D12DescriptorHeap *heaps[] = { g_amd.heap };
         h.list->SetDescriptorHeaps(1, heaps);
         h.list->SetComputeRootSignature(g_amd.rs);
         D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_amd.heap->GetGPUDescriptorHandleForHeapStart();
+        // The table must point at the TRIPLET JUST WRITTEN, not at the heap's
+        // start. Binding into one slot and pointing the table at another is the
+        // same defect the separate slot exists to fix, only mirrored: the engine
+        // would read whatever the heap's first slot holds - the conversion's
+        // descriptors - while its own sit unused three strides away.
+        gpu.ptr += static_cast<UINT64>(3) * 3 *
+                   h.dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         h.list->SetComputeRootDescriptorTable(0, gpu);
     }
 

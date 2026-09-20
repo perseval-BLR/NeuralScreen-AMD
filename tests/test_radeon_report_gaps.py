@@ -187,12 +187,45 @@ def main() -> int:
     elif events_before > worker_failed_at:
         failures.append("the event pump sits AFTER the worker_failed branch - "
                         "its `continue` skips it, so the menu ignores clicks")
-    # (c) The engine is handed a list whose last binding must be its own
-    #     slot 0 (work surface as SRV and UAV), not whatever the host's
-    #     motion pass left behind.
-    if "AmdBindTriplet(0, g_amd.net" not in bridge_src:
-        failures.append("no slot-0 rebind before the record - the engine gets "
-                        "a list whose bindings belong to the host's last pass")
+    # (c) The engine is handed a list whose last binding must be its OWN
+    #     descriptors (the work surface as SRV and UAV), not whatever the host's
+    #     motion or conversion pass left behind.
+    #
+    #     It used to be pinned as a literal `AmdBindTriplet(0, g_amd.net` - the
+    #     engine's triplet in slot 0. That literal WAS the defect: slot 0 is the
+    #     conversion pass's slot, so the engine's rebind overwrote the
+    #     conversion's descriptors before the list executed, `fsr_in` was never
+    #     written, and the picture was black while every counter read healthy.
+    #     The engine now gets a slot of its own; what this check guards is the
+    #     property, not the number: the LAST triplet bound before the record is
+    #     the engine's own (net as SRV0 and as UAV), and its table points at
+    #     that triplet rather than at the heap's start.
+    engine_bind = re.findall(
+        r"AmdBindTriplet\(\s*(\d+)\s*,\s*g_amd\.net\s*,\s*DXGI_FORMAT_R16G16B16A16_FLOAT\s*,"
+        r"\s*g_amd\.net\s*,\s*DXGI_FORMAT_R16G16B16A16_FLOAT\s*,"
+        r"\s*g_amd\.net\s*,\s*DXGI_FORMAT_R16G16B16A16_FLOAT\s*,\s*1\s*\)",
+        bridge_src, re.S)
+    if not engine_bind:
+        failures.append("no engine rebind before the record - the engine gets a "
+                        "list whose bindings belong to the host's last pass")
+    else:
+        eng_slot = int(engine_bind[-1])
+        # The conversion pass must not be the same slot, or one overwrites the
+        # other before execution - the original black-frame defect.
+        conv_slot = re.search(r"AmdDispatch\(\s*(\d+)\s*,\s*g_amd\.pso_in", bridge_src, re.S)
+        if conv_slot and int(conv_slot.group(1)) == eng_slot:
+            failures.append(
+                f"the engine and the conversion share slot {eng_slot} - the "
+                f"engine's rebind overwrites the conversion's descriptors before "
+                f"the list executes, which is exactly the black-frame defect")
+        # And the table must point at that triplet, not at the heap's start.
+        after = bridge_src[bridge_src.rfind("AmdBindTriplet(%d, g_amd.net" % eng_slot):]
+        table = re.search(r"SetComputeRootDescriptorTable\(\s*0\s*,", after)
+        if table is not None and f"({eng_slot}) * 3" not in after[:table.start()]:
+            failures.append(
+                f"the engine's triplet is written to slot {eng_slot} but the "
+                f"table still points at the heap's start - the engine reads the "
+                f"conversion's descriptors instead of its own")
     # (d) The report has to be reachable when the overlay is not: the tray
     #     icon is a Windows-owned menu and works whenever the process lives.
     if "_diagnostics" not in (BASE / "tray.py").read_text(encoding="utf-8"):

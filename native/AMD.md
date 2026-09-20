@@ -226,6 +226,22 @@ Otherwise the log names the exact failure - a missing file, an unknown build, no
 HIP device, or the engine's own refusal reason. That is the point of this first
 release: it is built to explain itself.
 
+**If your antivirus flags the download as a virus.** It is a false positive.
+The archive carries the embedded Python interpreter the program runs on, and its
+stdlib file `runtime/python313.zip` (3,825,631 bytes) is the *unmodified* file
+from python.org: SHA-256
+`1916abd946d2044ec8c04c3319f96c8415d5b6fce01e125622827f2b7756cbab`, byte for byte
+identical to the one inside
+[python-3.13.15-embed-amd64.zip](https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-amd64.zip).
+Heuristics flag packed interpreters often enough that this is a known false
+positive, not a detection of anything in this program. Download the release
+straight from the release page rather than through a third-party mirror, allow
+it in your antivirus, and check the hash yourself first if you prefer: unpack
+the archive and compare `runtime/python313.zip` against the value above. The
+SHA-256 of the whole archive is
+`8a81f474f5ecc42316ef0e7541939251642c08c2836f3469ae955b8cd82ee55f` for v0.3.11,
+so the download itself can be verified before it is unpacked.
+
 ## Known limits of this first version
 
 - **No Frame Generation.** FG rides on an NVIDIA-only optical-flow runtime;
