@@ -238,9 +238,8 @@ positive, not a detection of anything in this program. Download the release
 straight from the release page rather than through a third-party mirror, allow
 it in your antivirus, and check the hash yourself first if you prefer: unpack
 the archive and compare `runtime/python313.zip` against the value above. The
-SHA-256 of the whole archive is
-`8a81f474f5ecc42316ef0e7541939251642c08c2836f3469ae955b8cd82ee55f` for v0.3.11,
-so the download itself can be verified before it is unpacked.
+release page lists a SHA-256 for the archive itself, so the download can be
+verified before it is unpacked.
 
 ## Known limits of this first version
 
