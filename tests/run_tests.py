@@ -157,6 +157,8 @@ ABOUT = {
     "test_recorder_fallback.py": "the NVENC codec chain falls back AV1->HEVC->H.264",
     "test_rec_indicator.py": "the recording indicator draws only while recording, never in the file",
     "test_bake_menu_position.py": "the baked menu lands where the user saw it, not at the frame centre",
+    "test_reveal_below_panel.py": "the picture is shown below the panel in one guarded operation, not on top of it",
+    "test_zorder_decision_log.py": "the z-order guard names what it saw and which branch it took",
     "test_shot_dir.py": "the screenshot folder is configured, persisted and shown on the button",
     "test_spout_toggle.py": "the Spout2 toggle drives the config, the environment and the restart",
     "test_swappable_runtime.py": "the swappable runtime is driven by the config",

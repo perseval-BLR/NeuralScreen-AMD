@@ -2797,13 +2797,58 @@ static void ReassertPresentTopmost()
 // frame that actually presents is the moment the window becomes visible -
 // it appears with a picture already on it (user: screen flashes black on
 // startup and on one-window mode switches).
+// The parent's panel, published by it in NS_HUD_HWND and read once. The
+// picture goes directly below this window when it is revealed.
+static HWND HudWindow()
+{
+    static HWND cached = reinterpret_cast<HWND>(-1);
+    if (cached != reinterpret_cast<HWND>(-1)) return cached;
+    char buf[32] = {0};
+    const DWORD got = GetEnvironmentVariableA("NS_HUD_HWND", buf,
+                                              static_cast<DWORD>(sizeof(buf)));
+    cached = nullptr;
+    if (got > 0 && got < sizeof(buf))
+    {
+        const unsigned long long v = strtoull(buf, nullptr, 10);
+        if (v != 0ull) cached = reinterpret_cast<HWND>(
+            static_cast<uintptr_t>(v));
+    }
+    return cached;
+}
+
 static void RevealOnFirstPresent()
 {
     if (g_present_hwnd == nullptr || g_present_revealed) return;
-    ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
+    // Shown directly BELOW the parent's panel rather than on top of it.
+    //
+    // ShowWindow puts a topmost window above every other topmost window, and
+    // this one covers the whole monitor - so the panel vanished for as long
+    // as it took the parent's z-order guard to notice and put it back.
+    // Measured in a reporter's package (#89, v1.17.0): nine reveals, nine
+    // `[z] picture-above-hud` lines, one to one, corrected 10-55 ms later.
+    // That is one to three monitor refreshes with no panel, which is exactly
+    // the single-refresh flash another reporter measured frame by frame in
+    // his own video (#107).
+    //
+    // Inserting after the panel shows and orders the window in ONE operation,
+    // so there is no moment in between to be caught. The panel must be
+    // topmost for this: SetWindowPos placed after a NON-topmost window drops
+    // this one out of the topmost band, and the picture would go behind other
+    // applications - much worse than the flash. If it is not topmost, or the
+    // handle is stale (a set_mode can hand the parent a different window),
+    // fall back to what we did before and let the guard do its work.
+    const HWND hud = HudWindow();
+    const bool usable = hud != nullptr && IsWindow(hud) &&
+        (GetWindowLongPtrW(hud, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    if (usable)
+        SetWindowPos(g_present_hwnd, hud, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    else
+        ShowWindow(g_present_hwnd, SW_SHOWNOACTIVATE);
     g_present_shown = true;
     g_present_revealed = true;
-    Log("[present] window revealed on the first Present");
+    Log("[present] window revealed on the first Present (%s)",
+        usable ? "below the panel" : "on top - no usable panel handle");
 }
 
 // Present answered - now read the answer properly.

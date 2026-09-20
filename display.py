@@ -97,6 +97,62 @@ def system_cursor_visible() -> bool:
         return True
     return bool(ci.flags & CURSOR_SHOWING)
 
+
+def describe_window(hwnd) -> str:
+    """Name a window for the log: class, title, process id and rect.
+
+    The z-order guard decides whether to re-assert the HUD above the worker
+    picture, and until now it decided silently. A user reporting "the panel
+    is invisible over the picture" sent a log in which nothing said what the
+    guard saw or which branch it took, so the only next step was to guess
+    (issue #96/#89). This is the line that answers it.
+
+    Failure is not fatal: a window can die between the walk and this call, so
+    every field degrades to a placeholder and the function never raises.
+    """
+    try:
+        user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    except Exception:
+        pass
+    cls, title, pid, rect_s = "", "", 0, "?"
+    try:
+        hwnd = int(hwnd)
+    except (TypeError, ValueError):
+        # A null or bogus handle - the callers log whatever they have, and a
+        # diagnostic must never raise inside the render path.
+        return "hwnd=invalid"
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        if user32.GetClassNameW(hwnd, buf, 256):
+            cls = buf.value
+        if user32.GetWindowTextW(hwnd, buf, 256):
+            title = buf.value
+    except Exception:
+        pass
+    try:
+        p = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p))
+        pid = int(p.value)
+    except Exception:
+        pass
+    try:
+        r = wintypes.RECT()
+        if user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            rect_s = f"{r.left},{r.top},{r.right},{r.bottom}"
+    except Exception:
+        pass
+    if len(title) > 40:
+        title = title[:37] + "..."
+    return (f"hwnd=0x{int(hwnd):X} pid={pid} class={cls!r} "
+            f"title={title!r} rect=({rect_s})")
+
+
 # DPI-aware BEFORE import pygame: on load SDL freezes the process awareness,
 # and a later SetProcessDpiAwarenessContext no longer takes effect (it returns
 # an error). Without this Windows scales the window: 125% -> 3072x1728 instead
@@ -373,6 +429,13 @@ class Display:
         self._menu_opaque = False
         self._last_overlay = 0.0
         self._last_alert_count = 0
+        # The z-order guard's decision log: signature of the last reported
+        # state and when it was written. The guard runs every frame while the
+        # menu is open, so an unthrottled line would drown the log; only a
+        # CHANGE of the picture (or a re-assert after a quiet spell) is worth
+        # a line. See raise_topmost.
+        self._zlog_sig = None
+        self._zlog_t = 0.0
         # The mode-switch veil (blur + assembling mark): shown while the
         # pipeline is rebuilt and the new worker warms up, so the screen
         # does not sit bare for a second on every Num5 (user: mode-switch
@@ -568,6 +631,22 @@ class Display:
                 # pre-multi-monitor behaviour (no move at all) stays intact.
                 flags |= 0x0002  # SWP_NOMOVE
             ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, 0, 0, flags)
+            # The worker needs this handle, and this is the one place that
+            # runs after every creation AND every recreation of the window
+            # (__init__, the layer resize, the fullscreen layer all end
+            # here). Published through the environment because the worker is
+            # a child process started later - and re-published on every move,
+            # because a set_mode can hand us a different window and a stale
+            # handle would silently put the picture back on top.
+            #
+            # Why the worker wants it: it reveals its picture window on the
+            # first real frame, and ShowWindow puts a topmost window ABOVE
+            # this one. Measured on a reporter's machine (#89): nine reveals,
+            # nine losses of the top, each corrected 10-55 ms later - one to
+            # three refreshes with no panel on screen. With the handle it
+            # inserts the picture directly below this window instead, in one
+            # operation, and there is no moment to catch.
+            os.environ["NS_HUD_HWND"] = str(int(hwnd))
         except Exception:
             pass
 
@@ -998,16 +1077,52 @@ class Display:
             if hud is None:
                 return
             if top == hud:
-                pass  # the HUD is on top; nothing to do
+                # The HUD is on top; nothing to do. Logged anyway: a user log
+                # that never shows this line means the guard never ran or
+                # never reached here, which is a different bug from "it ran
+                # and chose wrong" - and telling those apart is the whole
+                # point of the decision log.
+                self._zlog("hud-on-top", f"top={describe_window(top)}")
             elif top == present:
                 # The picture took the band: insert the HUD above it (one
                 # placement, after the picture) - the invariant is owned.
                 user32.SetWindowPos(hud, present, 0, 0, 0, 0,
                                     0x0001 | 0x0002 | 0x0010 | 0x0004)
+                self._zlog("picture-above-hud", f"top={describe_window(top)}")
             elif top_is_foreign:
                 # A foreign window took the topmost slot: re-assert the pair.
                 user32.SetWindowPos(hud, -1, 0, 0, 0, 0,
                                     0x0001 | 0x0002 | 0x0010)
+                self._zlog("foreign-above-hud", f"top={describe_window(top)}")
+            else:
+                # top is None (the walk found nothing that can cover us) or
+                # the HUD is already above. Both are the healthy steady state
+                # and are worth one line each so a log proves they were seen
+                # rather than never reached.
+                self._zlog("hud-on-top" if top == hud else "nothing-covers",
+                           f"top={describe_window(top) if top else 'none'}")
+        except Exception:
+            pass
+
+    def _zlog(self, decision: str, detail: str) -> None:
+        """One throttled line per z-order decision.
+
+        A user's log is the only view we get of this guard, and it runs every
+        frame while the menu is open: printing every call would bury the
+        interesting one. A line is written when the DECISION CHANGES, and
+        again after QUIET seconds so a state that persists is still visible
+        next to a later event. Never raises - diagnostics must not be able to
+        break the render path.
+        """
+        try:
+            now = time.monotonic()
+            sig = (decision, detail)
+            if sig == self._zlog_sig and now - self._zlog_t < 5.0:
+                return
+            changed = sig != self._zlog_sig
+            self._zlog_sig = sig
+            self._zlog_t = now
+            print(f"[z] {decision}{' (changed)' if changed else ''} {detail}")
         except Exception:
             pass
 

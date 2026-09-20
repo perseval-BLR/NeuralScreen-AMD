@@ -253,6 +253,39 @@ is filled with a chroma key and made transparent (`LWA_COLORKEY`). While the
 menu is open the window's global alpha (`LWA_ALPHA`) goes to 255, otherwise
 the bright frame underneath bleeds through the panel.
 
+**Revealing the picture window.** It is created hidden on purpose, so nothing
+flashes black while the pipeline warms up, and it is shown on the first real
+Present. `ShowWindow` puts a topmost window ABOVE every other topmost window,
+so showing it that way also covered the panel with the picture. The parent's
+z-order guard noticed one to three monitor refreshes later and put the panel
+back - which is a visible flash of the picture with no menu on it.
+
+The panel publishes its own handle in `NS_HUD_HWND` from `_move_to_origin()`,
+the one place that runs after every creation AND every recreation of its window
+(`__init__`, the layer resize and the fullscreen layer all end there), so a
+`set_mode` that hands the parent a different window cannot leave a stale handle
+behind. The worker reads it once and reveals the picture with `SetWindowPos`
+placed **after** the panel, so showing and ordering happen in one operation and
+there is no moment in between to be caught.
+
+Two guards on that shortcut, because getting it wrong is worse than the flash:
+the handle must still be a window (`IsWindow`), and the panel must be topmost
+(`WS_EX_TOPMOST`) - placed after a non-topmost window the picture would leave
+the topmost band entirely and go behind other applications. If either fails,
+the worker falls back to `ShowWindow` and the guard does its work.
+
+**The z-order guard's decision log.** The guard runs every frame while the menu
+is open and used to decide silently, which left reports of "the panel is
+invisible over the picture" with nothing to read - the only next step was to
+guess, twice. Every branch now writes one `[z]` line naming the window it found
+(class, title, pid, rect) and the branch it took: `hud-on-top`,
+`picture-above-hud`, `foreign-above-hud`, `nothing-covers`. The healthy state is
+logged too, so a log proves the guard was reached rather than skipped - "never
+ran" and "ran and chose wrong" are different bugs. Throttled per decision: only
+a change, or the same state after five quiet seconds, is written. `describe_window`
+never raises - a dead or null handle degrades to `hwnd=invalid`, because
+diagnostics must not break the render path.
+
 **NR off (bypass).** `Num1` does not stop the pipeline anymore. Frames are
 sent with `FRAME_FLAG_BYPASS`: the worker skips the NGX evaluate and
 presents the raw capture instead. The overlay stays alive; everything is
