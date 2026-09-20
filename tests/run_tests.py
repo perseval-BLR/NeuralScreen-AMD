@@ -110,6 +110,7 @@ ABOUT = {
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",
     "test_amd_recreate_flag.py": "the engine's staging-rebuild flag is mapped, verified against the image, and reported rather than gated",
     "test_amd_dump_identity.py": "a dump says which image it came from, and the freshness claim matches the filter it describes",
+    "test_amd_exposure_bound.py": "the 1x1 exposure reaches the FFX dispatch field named for it, with auto-exposure off",
     "test_diagnostic_bundle.py": "the bundle carries both logs, our own dump in preference to WER's, and never a previous session's crash",
     "test_amd_install_verdict.py": "a missing runtime file is not read as a bad graphics card",
     "test_amd_worker_survives.py": "a Radeon keeps its worker when the pass is off, and the magenta fill cannot reach an unkeyed layer",

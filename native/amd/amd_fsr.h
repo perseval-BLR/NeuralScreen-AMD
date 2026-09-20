@@ -85,10 +85,19 @@ public:
     // Dispatch A: the one the runtime follows. Records FSR's own work
     // (1:1 resample, which is a no-op at matching sizes) and writes into
     // `net`; the runtime then runs the network on that surface in place.
+    // `exposure` is the 1x1 R32F surface the network must be handed instead of
+    // letting FSR adapt its own. The FFX API has a field for exactly this -
+    // `ffxDispatchDescUpscale::exposure`, "Optional resource containing a 1x1
+    // exposure value" - and this call used to leave it null while arming
+    // FFX_UPSCALE_ENABLE_AUTO_EXPOSURE at context creation. That combination is
+    // why the engine logs `staging ready: ... exposure no`: with no resource
+    // bound and the input black, its own adaptation ran away to its ceiling
+    // (9999.9980), which is the brightness pump the fixed 1.0 value exists to
+    // stop.
     bool DispatchNet(ID3D12CommandList *list, ID3D12Resource *color,
                      ID3D12Resource *depth, ID3D12Resource *motion,
-                     ID3D12Resource *net, float frame_ms, bool reset,
-                     std::string &why);
+                     ID3D12Resource *exposure, ID3D12Resource *net,
+                     float frame_ms, bool reset, std::string &why);
 
     // Dispatch B: plain FSR upscale from the network's output to the display
     // resolution, deliberately without motion vectors so the runtime leaves

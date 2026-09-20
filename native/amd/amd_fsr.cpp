@@ -98,8 +98,20 @@ bool Upscaler::CreateContexts(ID3D12Device *device, UINT work_w, UINT work_h,
     ffxCreateContextDescUpscale net_desc{};
     net_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     net_desc.header.pNext = &backend.header;
-    net_desc.flags = FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
-                     FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
+    // NO FFX_UPSCALE_ENABLE_AUTO_EXPOSURE.
+    //
+    // The flag asks the upscaler to adapt exposure from the input, and it was
+    // armed here while the dispatch bound no exposure resource at all - so with
+    // a black input the adaptation had nothing to hold on to and the network
+    // read a runaway value. The engine logged it as `exposure 9999.9980` on
+    // every Radeon report.
+    //
+    // The network is now handed a fixed 1x1 exposure instead. Measured on the
+    // reference host: its own adaptation wandered 0.645..0.925 on input stuck
+    // at 0.490..0.502, which reads as a brightness pump; a constant is the
+    // stable answer and the resource still travels through the FFX field the
+    // API provides for it.
+    net_desc.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE;
     // A is 1:1 on purpose: its job is to be the dispatch the runtime follows,
     // not to scale anything.
     net_desc.maxRenderSize = { work_w, work_h };
@@ -142,8 +154,8 @@ void Upscaler::ReleaseContexts() {
 
 bool Upscaler::DispatchNet(ID3D12CommandList *list, ID3D12Resource *color,
                            ID3D12Resource *depth, ID3D12Resource *motion,
-                           ID3D12Resource *net, float frame_ms, bool reset,
-                           std::string &why) {
+                           ID3D12Resource *exposure, ID3D12Resource *net,
+                           float frame_ms, bool reset, std::string &why) {
     if (ctx_net_.handle == nullptr) { why = "no network context"; return false; }
 
     ffxDispatchDescUpscale d{};
@@ -155,6 +167,13 @@ bool Upscaler::DispatchNet(ID3D12CommandList *list, ID3D12Resource *color,
     // here and deliberately null in DispatchUpscale.
     d.motionVectors = ffxApiGetResourceDX12(motion, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.output = ffxApiGetResourceDX12(net, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    // The 1x1 exposure the network is handed. Bound as COMPUTE_READ because the
+    // FFX runtime samples it; passing nullptr here is what made the engine
+    // report `exposure no` and adapt its own on a black input.
+    //
+    // Left optional on purpose: a caller with no exposure surface still gets a
+    // valid dispatch, and the engine's own reading is then the honest one.
+    d.exposure = ffxApiGetResourceDX12(exposure, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.jitterOffset = { 0.0f, 0.0f };
     d.motionVectorScale = { static_cast<float>(work_w_), static_cast<float>(work_h_) };
     d.renderSize = { work_w_, work_h_ };

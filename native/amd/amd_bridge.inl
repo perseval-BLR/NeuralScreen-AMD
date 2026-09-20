@@ -1238,8 +1238,8 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         const float frame_ms = g_amd.last_frame_ms > 0.0f ? g_amd.last_frame_ms : 16.6f;
         std::string why;
         if (!g_amd.fsr.DispatchNet(h.list, g_amd.fsr_in, g_amd.depth,
-                                   g_amd.motion, g_amd.net, frame_ms,
-                                   reset != 0, why)) {
+                                   g_amd.motion, g_amd.exposure, g_amd.net,
+                                   frame_ms, reset != 0, why)) {
             Log("[amd] %s", why.c_str());
             ++g_amd.fsr_failures;
             AbortCommands();
