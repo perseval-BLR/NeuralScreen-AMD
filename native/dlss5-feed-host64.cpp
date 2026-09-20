@@ -6276,9 +6276,28 @@ static int RunVideo()
             if (!CreateVideoResources(v, rc.width, rc.height, rup ? rc.full_w : 0,
                                       rup ? rc.full_h : 0, want_small))
             {
-                Log("[video] RNSZ: resource creation failed at %ux%u", rc.width, rc.height);
+                // The resize cannot be honoured. Say so and STOP this command
+                // (audit B2): the failure used to fall through into
+                // CreateFeature and then write a SUCCESS ack (ok = 1) four
+                // lines later, so the client believed the resize had been
+                // applied. CreateVideoResources can fail after assigning
+                // v.tex with v.upload still null, and FillUpload dereferences
+                // v.upload unconditionally - the next frame was an access
+                // violation with no [failure] line, which is why this crash
+                // was invisible in user logs.
+                Log("[video] RNSZ aborted: resource creation failed at %ux%u "
+                    "- keeping the previous size", rc.width, rc.height);
                 VideoResizeAck bad = { RESIZE_ACK_MAGIC, 0u, 0x7FFFFFFFu, 0u, fh.pts };
                 if (!WriteExact(g_wire, &bad, sizeof(bad))) return 3;
+                // The half-built state must not survive into the next frame:
+                // release whatever the failed attempt left behind and stop
+                // using the feature whose textures no longer match.
+                ReleaseVideoTextures(v);
+                SafeReleaseFeature(h.feature);
+                h.feature = nullptr;
+                warmup_done = true;          // nothing to warm: no feature
+                g_force_next_frame = true;
+                continue;
             }
             NVSDK_NGX_Result rr = NVSDK_NGX_Result_Fail;
             if (AmdRequested())

@@ -108,6 +108,7 @@ ABOUT = {
     "test_amd_slot_discipline.py": "no two passes in one command list share a descriptor slot: the GPU resolves tables at execution time",
     "test_hud_frame_delta.py": "the HUD's frame delta is named for what it is, and a reset frame says it is a reset",
     "test_amd_tripwire.py": "three surfaces of one frame: the capture, the converted input and the dispatch output each name a different failing side",
+    "test_rnsz_failure_stops.py": "a failed RNSZ stops, is reported, and releases what it built - it does not answer ok",
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_engine_init.py": "the engine-init verdict is asked after the swapchain exists, the retry is bounded, a dead engine is not fed, and the mean is not called black",
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",
