@@ -113,6 +113,7 @@ ABOUT = {
     "test_amd_rnsz_verdict.py": "the RNSZ rebuild verdict asks NrReady(), so a live AMD pass is not called SAFE PASSTHROUGH",
     "test_amd_dispatch_shapes.py": "A is work->work with motion vectors and B is work->out without them, so the engine staging table stays readable",
     "test_amd_engine_shutdown.py": "the engine is stopped before the device it runs on is released",
+    "test_defer_tail_verdict.py": "the defer-tail choice says whether it is on and which fact decided it",
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_engine_init.py": "the engine-init verdict is asked after the swapchain exists, the retry is bounded, a dead engine is not fed, and the mean is not called black",
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",

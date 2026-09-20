@@ -6739,6 +6739,34 @@ static int RunVideo()
             defer_tail = !g_hdr_capture && warmup_done && NrReady() &&
                 PresentModeActive(v) &&
                 (fh.reserved & (FRAME_FLAG_BYPASS | FRAME_FLAG_SPLIT | FRAME_FLAG_WANT_PIXELS)) == 0;
+            // Say it once, and name which input decided it.
+            //
+            // This optimisation defers the neural waits to the present fence,
+            // and it used to run entirely silently: a reporter's package that
+            // alternated between a correct frame and a blown-white one at
+            // exactly his present period (133 ms per state, 3.8 Hz) carried ZERO
+            // lines about it, so whether it was even on was unanswerable from the
+            // log. Same shape as the z-order guard's silent decisions - the code
+            // ran and nothing said what it chose, so the report could only be
+            // guessed at. One line per state change, not per frame.
+            {
+                static int defer_logged = -1;
+                const int now_defer = defer_tail ? 1 : 0;
+                if (now_defer != defer_logged)
+                {
+                    defer_logged = now_defer;
+                    if (now_defer)
+                        Log("[video] defer-tail on: the neural waits ride the present fence "
+                            "(hdr_capture=%d, hdr_switch=%d, present_mode=%d)",
+                            g_hdr_capture ? 1 : 0, HdrEnabled() ? 1 : 0,
+                            PresentModeActive(v) ? 1 : 0);
+                    else
+                        Log("[video] defer-tail off: every wait is taken before the next "
+                            "frame (hdr_capture=%d, hdr_switch=%d, present_mode=%d)",
+                            g_hdr_capture ? 1 : 0, HdrEnabled() ? 1 : 0,
+                            PresentModeActive(v) ? 1 : 0);
+                }
+            }
             // This frame is being processed: remember what it will show, so the
             // next unchanged frame can tell whether anything differs.
             g_last_out_bypass = (fh.reserved & FRAME_FLAG_BYPASS) != 0 || !NrReady();
