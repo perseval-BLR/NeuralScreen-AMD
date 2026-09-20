@@ -117,7 +117,15 @@ struct AmdState
     ID3D12Resource *fsr_in = nullptr;    // RGBA16F at the work extent
     ID3D12Resource *motion = nullptr;    // R16G16F
     ID3D12Resource *depth = nullptr;     // R32F, zeroed, never written (depth is off)
-    ID3D12Resource *exposure = nullptr;  // 1x1 R32F = 1.0
+    ID3D12Resource *exposure = nullptr;  // 1x1 R32F, the value the engine is handed
+    //: The staging buffer the exposure value travels through, and where it is
+    //: mapped. Kept between frames because the value is now written on every
+    //: frame that changes it, not once at startup - see AmdUpdateExposure.
+    ID3D12Resource *exposure_up = nullptr;
+    BYTE *exposure_up_map = nullptr;
+    //: The last value actually copied into the texture. -1 = nothing written
+    //: yet. Compared against so an unchanged exposure costs no submission.
+    float exposure_written = -1.0f;
     UINT net_w = 0, net_h = 0;
     //: Output (display) extent, kept alongside so a resize of either one
     //: rebuilds the pair.
@@ -626,6 +634,14 @@ static void AmdReleaseResources()
     drop(g_amd.net); drop(g_amd.fsr_in); drop(g_amd.up_out);
     drop(g_amd.probe_rb); g_amd.probe_pitch = 0;
     drop(g_amd.motion); drop(g_amd.depth); drop(g_amd.exposure);
+    // The exposure staging goes with the texture it feeds: both are rebuilt
+    // together on the next frame, and a stale mapping would be written through
+    // after its resource was released.
+    if (g_amd.exposure_up_map != nullptr && g_amd.exposure_up != nullptr)
+        g_amd.exposure_up->Unmap(0, nullptr);
+    g_amd.exposure_up_map = nullptr;
+    drop(g_amd.exposure_up);
+    g_amd.exposure_written = -1.0f;
     // The FSR contexts are sized to the extents that just went away, so they
     // go with them; the next frame rebuilds both together.
     g_amd.fsr.ReleaseContexts();
@@ -894,11 +910,28 @@ static void AmdEngineHealth()
     if (!frames.empty()) Log("[amd] the engine's route: %s", frames.c_str());
 }
 
-// The 1x1 exposure the engine is handed instead of letting it adapt its own.
-// The reference's own measurements are the reason: its choice swung between
-// 0.645 and 0.925 on input whose mean never left 0.48..0.51, which reads as a
-// brightness pump. It has to be default-heap and UAV-capable - an upload-heap
-// shortcut makes the filter read zero, which normalises the picture to black.
+// Copy the mapped value into the 1x1 texture. Split out of AmdCreateExposure so
+// the per-frame update can reuse it without a second copy of the footprint math.
+static bool AmdCopyExposureIntoTexture();
+
+// The 1x1 exposure the engine is handed.
+//
+// It is NOT "let the engine adapt its own": the reference's own measurements are
+// the reason - its choice swung between 0.645 and 0.925 on input whose mean never
+// left 0.48..0.51, which reads as a brightness pump. So this host decides the
+// value and the engine stops at it.
+//
+// What changed: the value was 1.0, written ONCE at surface creation, and never
+// touched again. That is a fixed exposure, and a reporter's report says what it
+// costs - "the good frames are over-exposed too, sky and grass wash out to
+// white". The host already computes a per-frame exposure for the NGX path
+// (UpdateAdaptiveExposure, PaperWhite over the frame's own luminance, smoothed
+// with a time constant), and on this path that number was calculated and thrown
+// away. AmdUpdateExposure hands it to the engine instead, which is also what the
+// working upstream fork does per frame.
+//
+// It has to be default-heap and UAV-capable - an upload-heap shortcut makes the
+// filter read zero, which normalises the picture to black.
 static bool AmdCreateExposure(float value)
 {
     if (g_amd.exposure != nullptr) return true;
@@ -906,24 +939,33 @@ static bool AmdCreateExposure(float value)
                                 D3D12_RESOURCE_STATE_COPY_DEST, true);
     if (g_amd.exposure == nullptr) return false;
 
+    // The staging buffer is kept, not made per update: this is one 256-byte
+    // upload heap per exposure change, and a fresh allocation every frame would
+    // be a commitment the driver has to track for no reason.
     D3D12_HEAP_PROPERTIES up = {};
     up.Type = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RESOURCE_DESC bd = {};
     bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
     bd.Width = 256; bd.Height = 1; bd.DepthOrArraySize = 1; bd.MipLevels = 1;
     bd.SampleDesc.Count = 1; bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    ID3D12Resource *upload = nullptr;
     if (FAILED(h.dev->CreateCommittedResource(&up, D3D12_HEAP_FLAG_NONE, &bd,
         D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, __uuidof(ID3D12Resource),
-        reinterpret_cast<void **>(&upload)))) return false;
+        reinterpret_cast<void **>(&g_amd.exposure_up)))) return false;
+    if (FAILED(g_amd.exposure_up->Map(0, nullptr,
+        reinterpret_cast<void **>(&g_amd.exposure_up_map))))
+    { g_amd.exposure_up_map = nullptr; return false; }
 
-    BYTE *mapped = nullptr;
-    if (SUCCEEDED(upload->Map(0, nullptr, reinterpret_cast<void **>(&mapped))))
-    {
-        memcpy(mapped, &value, sizeof(float));
-        upload->Unmap(0, nullptr);
-    }
+    memcpy(g_amd.exposure_up_map, &value, sizeof(float));
+    g_amd.exposure_written = value;
+    return AmdCopyExposureIntoTexture();
+}
 
+// Copy the mapped value into the 1x1 texture. Split out of AmdCreateExposure so
+// the per-frame update can reuse it without a second copy of the footprint math.
+static bool AmdCopyExposureIntoTexture()
+{
+    if (g_amd.exposure == nullptr || g_amd.exposure_up_map == nullptr)
+        return false;
     D3D12_RESOURCE_DESC td = {};
     td.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     td.Width = 1; td.Height = 1; td.DepthOrArraySize = 1; td.MipLevels = 1;
@@ -936,7 +978,7 @@ static bool AmdCreateExposure(float value)
     if (BeginCommands())
     {
         D3D12_TEXTURE_COPY_LOCATION s = {}, d = {};
-        s.pResource = upload;
+        s.pResource = g_amd.exposure_up;
         s.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         s.PlacedFootprint = fp;
         d.pResource = g_amd.exposure;
@@ -949,8 +991,33 @@ static bool AmdCreateExposure(float value)
         const UINT64 fv = EndCommands();
         WaitFenceValue(h.fence, fv, 10000);
     }
-    upload->Release();
     return true;
+}
+
+// AmdUpdateExposure: hand the engine this frame's exposure.
+//
+// The value comes from UpdateAdaptiveExposure, which the host already runs for
+// the NGX path: PaperWhite over the captured frame's own mean luminance, smoothed
+// with a time constant. On this path it used to be computed and discarded, while
+// the engine was handed a fixed 1.0 forever - which is the over-exposure a
+// reporter describes ("sky and grass wash out to white"). The upstream fork hands
+// its engine a per-frame value too.
+//
+// Cost control: only a CHANGE is submitted. The value is already smoothed, so it
+// moves by little between consecutive frames, and 1x1 copy that changes nothing
+// is a submission the frame does not need. The threshold is deliberately tiny -
+// it exists to skip identical values, not to quantise the signal.
+static bool AmdUpdateExposure(float value)
+{
+    if (g_amd.exposure == nullptr || g_amd.exposure_up_map == nullptr)
+        return false;
+    if (!(value > 0.0f)) value = 1.0f;         // never hand the engine a NaN/0
+    if (g_amd.exposure_written >= 0.0f &&
+        fabsf(value - g_amd.exposure_written) < 1e-4f)
+        return true;                            // unchanged: nothing to submit
+    memcpy(g_amd.exposure_up_map, &value, sizeof(float));
+    g_amd.exposure_written = value;
+    return AmdCopyExposureIntoTexture();
 }
 
 // Create the three engine surfaces at a given extent. Depth is never written
@@ -1189,6 +1256,13 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     const UINT ch = v.upscale ? v.full_h : v.hgt;
     UINT nw = 0, nh = 0;
     AmdNetExtent(v, cw, ch, nw, nh);
+
+    // This frame's exposure, before anything is dispatched: the value was
+    // already computed for the NGX path from the captured frame's luminance
+    // (see AmdUpdateExposure for why it matters and what it costs). Submitted
+    // only when it changed, and the resources exist by the time the dispatch
+    // below reads the texture.
+    AmdUpdateExposure(g_pw_exposure);
 
     // The engine's verdict, asked from here because only here can it be
     // answered (the swapchain exists by now). Once per run, then it is inert.
