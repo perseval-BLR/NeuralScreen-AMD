@@ -110,6 +110,8 @@ ABOUT = {
     "test_amd_tripwire.py": "three surfaces of one frame: the capture, the converted input and the dispatch output each name a different failing side",
     "test_rnsz_failure_stops.py": "a failed RNSZ stops, is reported, and releases what it built - it does not answer ok",
     "test_capture_output_log.py": "the capture log names every output the adapter exposes, before the NS_OUTPUT match",
+    "test_amd_rnsz_verdict.py": "the RNSZ rebuild verdict asks NrReady(), so a live AMD pass is not called SAFE PASSTHROUGH",
+    "test_amd_dispatch_shapes.py": "A is work->work with motion vectors and B is work->out without them, so the engine staging table stays readable",
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_engine_init.py": "the engine-init verdict is asked after the swapchain exists, the retry is bounded, a dead engine is not fed, and the mean is not called black",
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",

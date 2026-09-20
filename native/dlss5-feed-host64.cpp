@@ -6356,8 +6356,20 @@ static int RunVideo()
             // in the same breath. It also names the composite now - the
             // parameters-only path has said which one is live since A7, and
             // the rebuild path stayed silent about it.
+            //
+            // And it asks NrReady(), not `h.feature`: on the AMD path there IS
+            // no NGX feature - AmdInit replaces it end to end and never creates
+            // one - so `h.feature != nullptr` is false on a Radeon while the
+            // neural pass is running perfectly. The line therefore printed
+            // "SAFE PASSTHROUGH, matched residual" after every resize on every
+            // Radeon report, including the ones whose log shows the engine
+            // taking a job per frame. "SAFE PASSTHROUGH" and "matched residual"
+            // in one sentence is the tell: one is the NGX feature's verdict and
+            // the other is the AMD pass's state. NrReady() is the predicate the
+            // warm-up decision one line above already uses, and it is true for
+            // both paths.
             Log("[video] RNSZ applied at %ux%u: %s, %s", rc.width, rc.height,
-                h.feature != nullptr ? "feature ready" : "SAFE PASSTHROUGH",
+                NrReady() ? "feature ready" : "SAFE PASSTHROUGH",
                 !v.nr_small ? "no composite"
                             : (v.residual ? "matched residual"
                                           : "direct reconstruction"));
