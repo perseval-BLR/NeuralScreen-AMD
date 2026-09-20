@@ -518,6 +518,60 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
     const UINT pitch = ((mw * bpp) + 255u) & ~255u;  // D3D12 rows are 256-aligned
     const UINT64 bytes = (UINT64)pitch * mh;
 
+    // The spec is a CLAIM about a resource this function does not own, so it is
+    // checked against the resource before anything is copied.
+    //
+    // This is not belt-and-braces: the first version of the spec-driven reader
+    // declared the captured frame at the CLIENT's work size (`v.w`/`v.hgt`),
+    // while `v.color.tex` and `v.output` are created at the composition size -
+    // full resolution whenever the frame is upscaled. Copying a smaller
+    // footprint out of a larger resource is a mismatched copy, and D3D12
+    // answers a mismatched copy by REMOVING THE DEVICE. On a reporter's RX 7900
+    // XTX that read as a first submission that never retired and a worker exit
+    // 7 at frame 0, on every launch, with the fault appearing at the PROBE -
+    // the one instrument in the build that exists to explain failures - and
+    // with nothing in the log saying so, because the wait it poisoned fails
+    // silently (see WaitFenceValue: the device-removed exit logs nothing).
+    //
+    // A diagnostic that can kill the process it is diagnosing is worth less
+    // than no diagnostic. So the size is read from the resource, and a
+    // disagreement is REPORTED as the defect it is instead of being copied:
+    // the frame carries on and the log names the surface and both sizes.
+    {
+        const D3D12_RESOURCE_DESC rd = src->GetDesc();
+        const UINT rw = (UINT)rd.Width, rh = rd.Height;
+        if (rw != mw || rh != mh)
+        {
+            // Once per session per surface size, not once per frame: at the
+            // probe's per-frame cadence (NS_AMD_PROBE_EACH=1) a line every
+            // frame would bury the report it belongs to.
+            static UINT warned_w = 0, warned_h = 0;
+            if (warned_w != rw || warned_h != rh)
+            {
+                warned_w = rw; warned_h = rh;
+                Log("[amd] the surface probe was handed a spec that does not "
+                    "match the resource: the reader says %ux%u, the resource is "
+                    "%ux%u - NOT copying it (a mismatched copy removes the "
+                    "device); the frame continues unmeasured",
+                    mw, mh, rw, rh);
+            }
+            return false;
+        }
+        if (rd.Format != spec.format)
+        {
+            static DXGI_FORMAT warned_fmt = DXGI_FORMAT_UNKNOWN;
+            if (warned_fmt != rd.Format)
+            {
+                warned_fmt = rd.Format;
+                Log("[amd] the surface probe was handed the wrong format for the "
+                    "resource: the reader says %u, the resource is %u - NOT "
+                    "copying it; the frame continues unmeasured",
+                    (unsigned)spec.format, (unsigned)rd.Format);
+            }
+            return false;
+        }
+    }
+
     if (g_amd.probe_rb == nullptr || g_amd.probe_pitch != pitch)
     {
         if (g_amd.probe_rb != nullptr) { g_amd.probe_rb->Release(); g_amd.probe_rb = nullptr; }
@@ -1846,7 +1900,7 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         // same reader with its own spec.
         const AmdSurfaceSpec kNetSpec{ g_amd.net_w, g_amd.net_h,
                                        DXGI_FORMAT_R16G16B16A16_FLOAT, true };
-        const AmdSurfaceSpec kFrameSpec{ (UINT)v.w, (UINT)v.hgt,
+        const AmdSurfaceSpec kFrameSpec{ cw, ch,
                                          DXGI_FORMAT_R8G8B8A8_UNORM, false };
         const bool got_conv = AmdMeasureSurface(
             g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, kNetSpec, &conv);

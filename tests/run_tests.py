@@ -108,6 +108,7 @@ ABOUT = {
     "test_amd_slot_discipline.py": "no two passes in one command list share a descriptor slot: the GPU resolves tables at execution time",
     "test_hud_frame_delta.py": "the HUD's frame delta is named for what it is, and a reset frame says it is a reset",
     "test_amd_tripwire.py": "three surfaces of one frame: the capture, the converted input and the dispatch output each name a different failing side",
+    "test_amd_probe_spec_match.py": "the probe verifies its spec against the resource before copying, so a diagnostic cannot remove the device",
     "test_rnsz_failure_stops.py": "a failed RNSZ stops, is reported, and releases what it built - it does not answer ok",
     "test_capture_output_log.py": "the capture log names every output the adapter exposes, before the NS_OUTPUT match",
     "test_amd_rnsz_verdict.py": "the RNSZ rebuild verdict asks NrReady(), so a live AMD pass is not called SAFE PASSTHROUGH",

@@ -127,9 +127,46 @@ def main() -> int:
                 failures.append(
                     "no dispatch call follows the exposure update in "
                     "AmdEvaluateVideo - the order cannot be checked")
-        if not re.search(r"AmdUpdateExposure\(\s*g_pw_exposure\s*\)", ev):
+        # The argument has to be a value the HOST MEASURED on this frame, not a
+        # literal - that was the property when this check was written, and it is
+        # the property now.
+        #
+        # The spelling changed: it was `g_pw_exposure` (the NGX curve's smoothed
+        # value) and became `AmdExposureForEngine()` when this path got its OWN
+        # curve, because the shared curve cannot come down (min 1.00) while the
+        # complaint is over-exposure. `AmdExposureForEngine` returns
+        # `g_pw_exposure` itself whenever the curve is off (NS_AMD_PW=0) or
+        # nothing has been measured yet, so it is the same value one call deeper.
+        #
+        # A check that named only the old spelling failed on CORRECT code: the
+        # v0.3.14 tag carried a red suite for exactly this reason. So it accepts
+        # either form and then verifies that the function behind the new form is
+        # itself fed by the measured value, which is what makes "not invented"
+        # true rather than merely stated.
+        if re.search(r"AmdUpdateExposure\(\s*g_pw_exposure\s*\)", ev):
+            pass
+        elif re.search(r"AmdUpdateExposure\(\s*AmdExposureForEngine\(\s*\)\s*\)", ev):
+            eng = body_of(code, "static float AmdExposureForEngine()")
+            if not eng:
+                failures.append(
+                    "AmdEvaluateVideo passes AmdExposureForEngine(), but that "
+                    "function could not be read - the chain from the measured "
+                    "value to the engine cannot be checked")
+            else:
+                if "g_cap_mean_milli" not in eng:
+                    failures.append(
+                        "AmdExposureForEngine does not read the frame's measured "
+                        "mean - the engine would be handed a value with no "
+                        "measurement behind it")
+                if "g_pw_exposure" not in eng:
+                    failures.append(
+                        "AmdExposureForEngine has no path back to the host's own "
+                        "value - with the curve off, or before anything is "
+                        "measured, the engine would get nothing defined")
+        else:
             failures.append(
-                "AmdEvaluateVideo does not pass g_pw_exposure - the host's own "
+                "AmdEvaluateVideo passes neither g_pw_exposure nor "
+                "AmdExposureForEngine() to AmdUpdateExposure - the host's own "
                 "per-frame value is what belongs here, not an invented one")
 
     # --- 3. a bad value cannot reach the engine ----------------------------
