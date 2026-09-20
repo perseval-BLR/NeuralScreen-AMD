@@ -447,7 +447,17 @@ static float AmdMeanFromHalf(uint16_t hv)
 // One surface, one readback, two numbers. Returns false and leaves the means
 // untouched when anything in the chain fails - a diagnostic that invents a
 // value on failure is worse than one that stays silent.
-static bool AmdMeasureSurface(ID3D12Resource *src, float *out_mean)
+// `state` is the state the resource IS IN when this is called, and the state it
+// is returned to afterwards.
+//
+// It is a parameter rather than a constant because a constant here is a claim
+// about a resource this function does not own, and the two callers do not agree:
+// the frame leaves `fsr_in` readable and `net` in UNORDERED_ACCESS. Declaring
+// the wrong "from" tells D3D12 about a transition that never happened - the same
+// class of lie the comment under the final pass warns about for net/up_out. The
+// probe sat outside that discipline.
+static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
+                             float *out_mean)
 {
     if (src == nullptr || g_amd.net_w < 8 || g_amd.net_h < 8) return false;
     const UINT mw = g_amd.net_w, mh = g_amd.net_h;
@@ -487,7 +497,7 @@ static bool AmdMeasureSurface(ID3D12Resource *src, float *out_mean)
                                         reinterpret_cast<void **>(&cl))))
     { al->Release(); return false; }
 
-    D3D12_RESOURCE_BARRIER b1 = Transition(src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    D3D12_RESOURCE_BARRIER b1 = Transition(src, state,
                                            D3D12_RESOURCE_STATE_COPY_SOURCE);
     cl->ResourceBarrier(1, &b1);
     D3D12_TEXTURE_COPY_LOCATION dstl = {}, srcl = {};
@@ -502,7 +512,7 @@ static bool AmdMeasureSurface(ID3D12Resource *src, float *out_mean)
     srcl.pResource = src; srcl.SubresourceIndex = 0;
     cl->CopyTextureRegion(&dstl, 0, 0, 0, &srcl, nullptr);
     D3D12_RESOURCE_BARRIER b2 = Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                                           state);
     cl->ResourceBarrier(1, &b2);
     cl->Close();
     // NOT EndCommands(): that one closes and submits `h.list`, the FRAME's own
@@ -1477,8 +1487,14 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     if ((g_amd.fsr_frames % 300) == 1)
     {
         float conv = -1.0f, netm = -1.0f;
-        const bool got_conv = AmdMeasureSurface(g_amd.fsr_in, &conv);
-        const bool got_net  = AmdMeasureSurface(g_amd.net, &netm);
+        // Each surface is measured in the state the frame left it in: `fsr_in`
+        // readable (the conversion's post-barrier), `net` writable (the final
+        // pass returns it to UNORDERED_ACCESS for the next dispatch). Naming
+        // them differently would declare a transition that never happened.
+        const bool got_conv = AmdMeasureSurface(
+            g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &conv);
+        const bool got_net = AmdMeasureSurface(
+            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &netm);
         if (got_conv) g_amd.probe_conv_mean = conv;
         if (got_net)  g_amd.probe_net_mean = netm;
         ++g_amd.probe_frames;

@@ -124,7 +124,7 @@ def main() -> int:
     # The reporter who sent them said, unprompted, that the probe should be
     # confirmed to read the intended resource - he was right.
     code = strip_comments(text)
-    call_at = code.find("AmdMeasureSurface(g_amd.fsr_in")
+    call_at = code.find("AmdMeasureSurface(\n            g_amd.fsr_in")
     submit_at = code.find("const UINT64 fence = EndCommands();")
     if call_at < 0 or submit_at < 0:
         failures.append("the probe call or the frame submission is missing")
@@ -135,12 +135,40 @@ def main() -> int:
             "zeros on a working frame (this is what happened on a 7900 XTX)")
 
     # 5. It must be CALLED, not merely defined: an unused probe is a comment.
-    if "AmdMeasureSurface(g_amd.fsr_in" not in text or "AmdMeasureSurface(g_amd.net" not in text:
+    if "g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &conv" not in text or \
+       "g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &netm" not in text:
         failures.append(
             "the probe is defined but never called on both surfaces - only the "
             "pair (input AND dispatch output) can name the side")
 
-    # 6. And its result must reach the log, or the report carries no evidence.
+    # 6. The state handed to the probe must be the state the resource IS IN.
+    #
+    # The frame leaves the two surfaces in different states - fsr_in readable,
+    # net writable - and the probe used to declare both as readable. A barrier
+    # that names the wrong "from" tells D3D12 about a transition that never
+    # happened, which is the same class of lie the final pass warns about for
+    # net/up_out. The states are checked by name because a constant there is a
+    # claim about a resource the probe does not own.
+    if "D3D12_RESOURCE_STATES state" not in code:
+        failures.append(
+            "AmdMeasureSurface takes no state parameter - it declares a fixed "
+            "state for both surfaces, and the two are left in different ones")
+    else:
+        if "Transition(src, state," not in code:
+            failures.append(
+                "the probe's entry barrier does not use the state it was given - "
+                "it would declare a transition that never happened")
+        if "Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE,\n                                           state)" not in code:
+            failures.append(
+                "the probe does not return the resource to the state it found it "
+                "in - the next frame's dispatches would be told a state the "
+                "resource is not in")
+        if "g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &netm" not in text:
+            failures.append(
+                "net is measured as if it were readable, but the final pass "
+                "leaves it in UNORDERED_ACCESS for the next dispatch")
+
+    # 7. And its result must reach the log, or the report carries no evidence.
     if "what WE hand over" not in text:
         failures.append("the measured pair is never printed - the report would "
                         "still lack the number")
