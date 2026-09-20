@@ -4407,6 +4407,34 @@ static void CloseWgc();
 // the log - the capture is never taken down over it.
 static IDXGIOutput *EnumCaptureOutput(IDXGIAdapter1 *adapter)
 {
+    // How many outputs this adapter actually exposes, NAMED, before anything is
+    // chosen. "The capture sees my monitor but the log never mentions it" had no
+    // honest answer in a report (#96): the capture can only duplicate an output
+    // this adapter enumerates, so these are the displays it can use - and when
+    // the one the user is looking at is absent from this list, that is the whole
+    // answer.
+    //
+    // It runs FIRST, not after the match: when NS_OUTPUT names an output that is
+    // not there, the selection below falls back to output 0 and the list is
+    // exactly what the reader needs to see why. Printed after the match, the
+    // most confusing case would be the one without the list.
+    {
+        UINT total = 0;
+        for (UINT i = 0; ; ++i)
+        {
+            IDXGIOutput *probe = nullptr;
+            if (FAILED(adapter->EnumOutputs(i, &probe)) || probe == nullptr) break;
+            DXGI_OUTPUT_DESC d = {};
+            if (SUCCEEDED(probe->GetDesc(&d)))
+                Log("[cap] output %u: %ls %dx%d at (%d,%d)", i, d.DeviceName,
+                    d.DesktopCoordinates.right - d.DesktopCoordinates.left,
+                    d.DesktopCoordinates.bottom - d.DesktopCoordinates.top,
+                    d.DesktopCoordinates.left, d.DesktopCoordinates.top);
+            probe->Release();
+            ++total;
+        }
+        Log("[cap] the capture adapter exposes %u output(s) - capture is limited to these", total);
+    }
     wchar_t want[64] = {};
     const DWORD got = GetEnvironmentVariableW(L"NS_OUTPUT", want, 64);
     UINT index = 0;
