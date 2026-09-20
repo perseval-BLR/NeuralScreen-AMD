@@ -1010,15 +1010,12 @@ static bool AmdCopyExposureIntoTexture()
 
 // AmdUpdateExposure: hand the engine this frame's exposure.
 //
-// The value comes from UpdateAdaptiveExposure, which the host already runs for
-// the NGX path: PaperWhite over the captured frame's own mean luminance, smoothed
-// with a time constant. On this path it used to be computed and discarded, while
-// the engine was handed a fixed 1.0 forever - which is the over-exposure a
-// reporter describes ("sky and grass wash out to white"). The upstream fork hands
-// its engine a per-frame value too.
+// The value comes from the captured frame's own mean luminance, and it is NOT
+// the NGX curve's number - see AmdExposureForEngine below for why that curve
+// cannot answer the complaint this fixes.
 //
 // Cost control: only a CHANGE is submitted. The value is already smoothed, so it
-// moves by little between consecutive frames, and 1x1 copy that changes nothing
+// moves by little between consecutive frames, and a 1x1 copy that changes nothing
 // is a submission the frame does not need. The threshold is deliberately tiny -
 // it exists to skip identical values, not to quantise the signal.
 static bool AmdUpdateExposure(float value)
@@ -1032,6 +1029,106 @@ static bool AmdUpdateExposure(float value)
     memcpy(g_amd.exposure_up_map, &value, sizeof(float));
     g_amd.exposure_written = value;
     return AmdCopyExposureIntoTexture();
+}
+
+// AmdExposureForEngine: the exposure this path hands the engine, from the
+// captured frame's own brightness.
+//
+// WHY NOT THE HOST'S OWN CURVE. The NGX-side PaperWhite curve runs inside
+// min=1.00 .. max=1.10 (NS_PW_MIN/NS_PW_MAX). It can only ever RAISE exposure.
+// Evaluated on a reporter's own frame means from his package - 0.345 / 0.385 /
+// 0.439, bright outdoor content - it returns 1.0089 / 1.0007 / 1.0000, i.e.
+// effectively the 1.0 that was hard-coded here before any of this existed. His
+// complaint is the opposite direction: "the good frames are over-exposed too -
+// sky and grass wash out to white - so 1.000 may still be high for this
+// content." A curve whose FLOOR is the problem value cannot answer that, no
+// matter how often it is evaluated. That is why this is a separate curve and not
+// a change to the shared one.
+//
+// THE SHAPE comes from the working upstream fork, which maps the same luminance
+// with `target = 1.0 + (0.35 - avg) * 2.0 + dark_f * 0.5 - lit_f * 0.3` clamped
+// to 0.5 .. 2.0. The dark/lit fractions are not computed here (the host keeps the
+// mean, not the histogram), so this is the core term alone: it is symmetric
+// about 0.35, lifts dark content and - the part that matters - brings bright
+// content DOWN.
+//
+//   avg 0.10 -> 1.50    avg 0.35 -> 1.00    avg 0.45 -> 0.80    avg 0.60 -> 0.50
+//
+// NS_AMD_PW=0 turns it off and hands the engine the NGX curve's value instead,
+// so a bad result on real hardware is one environment variable away from the old
+// behaviour rather than a rebuild.
+//
+// NOT VERIFIED ON A RADEON: this machine has no AMD card, so the shape is
+// reasoned from the fork and from the reporter's numbers, not measured here.
+static float AmdExposureForEngine()
+{
+    static const bool enabled = [] {
+        char v[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_PW", v, sizeof(v));
+        return !(got > 0 && got < sizeof(v) && v[0] == '0');
+    }();
+    if (!enabled) return g_pw_exposure;
+
+    const LONG milli = InterlockedCompareExchange(&g_cap_mean_milli, 0, 0);
+    if (milli < 0) return g_pw_exposure;        // nothing measured yet
+    const float avg = static_cast<float>(milli) / 1000.0f;
+
+    // The centre: the luminance this curve treats as "correctly exposed", and the
+    // one number in it that is a judgement rather than a shape. 0.35 is the
+    // fork's own constant, so it is the default - but it is NOT fitted to the
+    // reporter's content here, because his frames measure 0.344-0.439 and with
+    // the centre at 0.35 the darkest of them is still treated as "dark" and
+    // lifted. Raising the centre would flatten exactly the content he complains
+    // about, and lowering it would brighten everything else; which is right
+    // depends on what his pictures look like once this runs, and that cannot be
+    // measured from here. So it is a knob: NS_AMD_PW_CENTER, default as upstream.
+    static const float centre = [] {
+        char v[16] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_PW_CENTER", v, sizeof(v));
+        if (got > 0 && got < sizeof(v))
+        {
+            const float f = static_cast<float>(atof(v));
+            if (f > 0.01f && f < 0.99f) return f;
+        }
+        return 0.35f;
+    }();
+
+    float target = 1.0f + (centre - avg) * 2.0f;
+    target = (target < 0.5f) ? 0.5f : (target > 2.0f) ? 2.0f : target;
+
+    // Smoothed with the same time constant the host's curve uses, so a scene
+    // change does not step the brightness in one frame - which would be a
+    // visible flicker of its own, the class this program has spent a week on.
+    static float smoothed = 1.0f;
+    static double last = 0.0;
+    static bool logged = false;
+    const double now = static_cast<double>(GetTickCount64());
+    float tau = 0.50f;
+    {
+        char tb[16] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_PW_TAU", tb, sizeof(tb));
+        if (got > 0 && got < sizeof(tb))
+        {
+            const float f = static_cast<float>(atof(tb));
+            if (f >= 0.0f) tau = f;
+        }
+    }
+    if (!logged)
+    {
+        logged = true;
+        Log("[amd] adaptive exposure for the engine: from the captured frame's "
+            "mean, 0.5..2.0 around 0.35, tau %.2fs (NS_AMD_PW=0 for the host's "
+            "own curve instead)", tau);
+    }
+    if (tau <= 0.0f || last == 0.0) smoothed = target;
+    else
+    {
+        const float dt = static_cast<float>((now - last) / 1000.0);
+        const float a = 1.0f - expf(-dt / tau);
+        smoothed += (target - smoothed) * a;
+    }
+    last = now;
+    return smoothed;
 }
 
 // Create the three engine surfaces at a given extent. Depth is never written
@@ -1276,7 +1373,7 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // (see AmdUpdateExposure for why it matters and what it costs). Submitted
     // only when it changed, and the resources exist by the time the dispatch
     // below reads the texture.
-    AmdUpdateExposure(g_pw_exposure);
+    AmdUpdateExposure(AmdExposureForEngine());
 
     // The engine's verdict, asked from here because only here can it be
     // answered (the swapchain exists by now). Once per run, then it is inert.
