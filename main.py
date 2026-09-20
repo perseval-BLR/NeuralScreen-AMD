@@ -1121,7 +1121,26 @@ def main() -> int:
 
             if now - last_log >= FPS_LOG_INTERVAL:
                 last_fps = len(fps_window) / sum(fps_window) if fps_window else 0.0
-                scene = f" | scene {guide.scene_score:.3f}" if guide is not None else ""
+                # The field is the MEAN PIXEL DELTA between this frame and the
+                # previous one, and until now the HUD called it `scene`. Two
+                # readings of that name are wrong in opposite directions, and
+                # both cost a diagnosis on a real report:
+                #
+                #   `scene 1.000` is not "the picture is moving" - guides.py
+                #   returns 1.0 whenever there is no previous frame, i.e. the
+                #   first frame after a reset, so it means "nothing to compare
+                #   with yet";
+                #   `scene 0.000` on a static desktop is not "the frame is
+                #   black" - a still desktop has no delta by definition.
+                #
+                # The name is what a reader trusts, so it now says what the
+                # number is, and a reset is called a reset.
+                if guide is not None:
+                    scene = (f" | frame_delta {guide.scene_score:.3f}"
+                             + (" (reset: first frame, no previous to compare)"
+                                if guide.reset else ""))
+                else:
+                    scene = ""
                 print(f"[main] {status} | FPS {last_fps:5.1f} | frames {st.frame_index} | "
                       f"work {st.work_w}x{st.work_h}{scene}")
                 last_log = now

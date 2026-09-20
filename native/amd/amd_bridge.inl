@@ -157,6 +157,11 @@ struct AmdState
     uint64_t probe_failed = 0;
     float probe_conv_mean = -1.0f;   // `fsr_in` - what we hand the dispatch
     float probe_net_mean = -1.0f;    // `net`     - what the engine reads
+    //: `v.color.tex` - the CAPTURED frame, where the chain starts. Without this
+    //: one, a zero at `fsr_in` and a zero at `net` are the same fact counted
+    //: twice and cannot say which side lost the picture; with it the question
+    //: is answered in one line (see the tripwire in AmdEngineHealth).
+    float probe_frame_mean = -1.0f;
 
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
@@ -476,12 +481,28 @@ static float AmdMeanFromHalf(uint16_t hv)
 // the wrong "from" tells D3D12 about a transition that never happened - the same
 // class of lie the comment under the final pass warns about for net/up_out. The
 // probe sat outside that discipline.
-static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
-                             float *out_mean)
+//: What a surface is made of, so one reader can measure more than one of them.
+//:
+//: The first version of this probe hardcoded the network's extent and RGBA16F,
+//: because the only surfaces worth measuring when it was written were the two
+//: the dispatch touches. The tripwire the black-frame hunt asked for needs a
+//: THIRD one - the captured frame in `v.color.tex`, which is RGBA8 at the full
+//: resolution - and that is the surface the whole chain starts from, so a
+//: measurement that cannot reach it cannot settle where the zero appeared.
+struct AmdSurfaceSpec
 {
-    if (src == nullptr || g_amd.net_w < 8 || g_amd.net_h < 8) return false;
-    const UINT mw = g_amd.net_w, mh = g_amd.net_h;
-    const UINT pitch = ((mw * 8u) + 255u) & ~255u;  // RGBA16F, D3D12 rows are 256-aligned
+    UINT w, h;
+    DXGI_FORMAT format;     // RGBA16F for the dispatch surfaces, RGBA8 for the frame
+    bool     is_half;       // 8-byte vs 4-byte pixel when computing the pitch
+};
+
+static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
+                             const AmdSurfaceSpec &spec, float *out_mean)
+{
+    if (src == nullptr || spec.w < 8 || spec.h < 8) return false;
+    const UINT mw = spec.w, mh = spec.h;
+    const UINT bpp = spec.is_half ? 8u : 4u;
+    const UINT pitch = ((mw * bpp) + 255u) & ~255u;  // D3D12 rows are 256-aligned
     const UINT64 bytes = (UINT64)pitch * mh;
 
     if (g_amd.probe_rb == nullptr || g_amd.probe_pitch != pitch)
@@ -523,7 +544,7 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
     D3D12_TEXTURE_COPY_LOCATION dstl = {}, srcl = {};
     dstl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     dstl.pResource = g_amd.probe_rb;
-    dstl.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    dstl.PlacedFootprint.Footprint.Format = spec.format;
     dstl.PlacedFootprint.Footprint.Width = mw;
     dstl.PlacedFootprint.Footprint.Height = mh;
     dstl.PlacedFootprint.Footprint.Depth = 1;
@@ -559,15 +580,36 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
     {
         double sum = 0.0;
         uint64_t n = 0;
-        for (UINT y = 0; y < mh; ++y)
+        // The two formats need two readers: the dispatch surfaces are half
+        // floats, the captured frame is 8-bit UNORM. Reading one as the other
+        // would report a number that looks plausible and means nothing - the
+        // exact failure this probe exists to end.
+        if (spec.is_half)
         {
-            const uint16_t *row = reinterpret_cast<const uint16_t *>(p + (size_t)y * pitch);
-            for (UINT x = 0; x < mw; ++x)
+            for (UINT y = 0; y < mh; ++y)
             {
-                const uint16_t *px = row + (size_t)x * 4;
-                for (UINT c = 0; c < 3; ++c)          // colour only, like the engine
-                    sum += AmdMeanFromHalf(px[c]);
-                n += 3;
+                const uint16_t *row = reinterpret_cast<const uint16_t *>(p + (size_t)y * pitch);
+                for (UINT x = 0; x < mw; ++x)
+                {
+                    const uint16_t *px = row + (size_t)x * 4;
+                    for (UINT c = 0; c < 3; ++c)          // colour only, like the engine
+                        sum += AmdMeanFromHalf(px[c]);
+                    n += 3;
+                }
+            }
+        }
+        else
+        {
+            for (UINT y = 0; y < mh; ++y)
+            {
+                const uint8_t *row = p + (size_t)y * pitch;
+                for (UINT x = 0; x < mw; ++x)
+                {
+                    const uint8_t *px = row + (size_t)x * 4;
+                    for (UINT c = 0; c < 3; ++c)          // B,G,R - all three are colour
+                        sum += (double)px[c] / 255.0;
+                    n += 3;
+                }
             }
         }
         D3D12_RANGE none{ 0, 0 };
@@ -704,14 +746,31 @@ static void AmdEngineHealth()
         // OWN chain, not the frame this host handed it, so on its own it says
         // nothing about whether the input was black.
         //
-        // What separates the two cases is the exposure the engine settles on:
-        // 4.0000 is its ordinary value on real content, while 9999.9980 is what
-        // it runs away to when the input really is zero.
+        // This line used to add "the exposure ran away to its ceiling: the input
+        // to the network was zero" whenever the mean read 9999.9980, and that
+        // sentence was WITHDRAWN as false. Across sixteen reports 4.0000 is only
+        // the STARTING value and every run without a bound exposure drifts to
+        // 9999.9980 - including runs whose feeding is provably correct. It
+        // separates nothing, so it is not printed as a conclusion any more. The
+        // exposure is still shown as the measurement it is; what changed is that
+        // the log no longer tells a reader to look for a black frame on it.
+        //
+        // Since the 1x1 exposure was bound and auto-exposure turned off, the
+        // engine stops at the value it is handed (`exposure 1.000`, 33 of 33
+        // samples in the v0.3.11 report) instead of drifting, so the runaway
+        // branch is also stale on its own terms.
         const bool runaway = mean.find("9999.9980") != std::string::npos ||
                              mean.find("9999.99") != std::string::npos;
+        // The runaway is reported as a MEASUREMENT, not as a diagnosis. It used
+        // to read "the input to the network was zero", which was withdrawn: the
+        // value drifts there on healthy runs too. What it is worth saying is
+        // that an exposure that is not the one this host binds (1.0) means the
+        // dispatch's exposure field did not reach the engine - that IS actionable
+        // and it is what the reader can check in the same log.
         Log("[amd] the engine's own measure: %s%s", mean.c_str(),
-            runaway ? "  <- the exposure ran away to its ceiling: the input to "
-                      "the network was zero (compare with the capture line below)"
+            runaway ? "  <- the exposure is NOT the 1.0 this host binds: check "
+                      "`staging ready ... exposure no` above, which is the field "
+                      "that carries it (this value alone is not a black input)"
                     : "");
     }
     // ...and OURS, on the capture, in the same breath.
@@ -777,6 +836,58 @@ static void AmdEngineHealth()
     if (g_amd.probe_conv_mean >= 0.0f)
         Log("[amd] our own measure, last taken: converted input mean %.4f, dispatch "
             "output mean %.4f", g_amd.probe_conv_mean, g_amd.probe_net_mean);
+    // The TRIPWIRE. Three surfaces from one frame, and the first is the one the
+    // whole chain starts from - that is the piece this report was missing for
+    // its entire history.
+    //
+    // What it separates, and why each line ends in a different action:
+    //
+    //   frame == 0                    -> the CAPTURE is empty. Nothing downstream
+    //                                    could have been anything else; go and
+    //                                    look at the capture, not at the pass.
+    //   frame > 0, fsr_in == 0        -> the frame WAS there and our conversion
+    //                                    lost it. This is the pass to read.
+    //   fsr_in > 0, net == 0          -> the conversion delivered and the
+    //                                    dispatch did not. Read the FFX path.
+    //
+    // All three are the mean of the colour channels of the same frame, so the
+    // comparison is meaningful; the numbers are printed every time regardless of
+    // the verdict, because a measurement is worth having even when it is not
+    // yet a conclusion.
+    if (g_amd.probe_frame_mean >= 0.0f)
+    {
+        const bool frame_zero = g_amd.probe_frame_mean <= 0.0005f;
+        const bool conv_zero = g_amd.probe_conv_mean >= 0.0f &&
+                               g_amd.probe_conv_mean <= 0.0005f;
+        const bool net_zero = g_amd.probe_net_mean >= 0.0f &&
+                              g_amd.probe_net_mean <= 0.0005f;
+        // A half-threshold: these are means over millions of pixels, so anything
+        // real lands far above it. 0.0005 is the same floor the capture verdict
+        // uses for "fully black".
+        const char *side = "";
+        char side_buf[224];
+        if (frame_zero)
+            side = "  <- THE CAPTURE IS EMPTY on this frame: nothing downstream "
+                   "could have carried a picture, so the fault is upstream of "
+                   "the neural pass";
+        else if (conv_zero)
+            side = "  <- the CAPTURE was alive and the CONVERSION lost it: this "
+                   "is our pass, and `fsr_in` is where to read";
+        else if (net_zero)
+            side = "  <- the conversion delivered and the DISPATCH did not: the "
+                   "fault is in the FFX path, not in the capture";
+        else
+        {
+            _snprintf_s(side_buf, sizeof(side_buf), _TRUNCATE,
+                        "  <- all three surfaces carry a picture on the frame "
+                        "measured: nothing to explain here");
+            side = side_buf;
+        }
+        Log("[amd] the tripwire, same frame: captured frame mean %.4f, converted "
+            "input %.4f, dispatch output %.4f%s",
+            g_amd.probe_frame_mean, g_amd.probe_conv_mean, g_amd.probe_net_mean,
+            side);
+    }
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
     const std::string frames = last_with("frames ");
@@ -1519,17 +1630,33 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // A readback is a full GPU->CPU sync, so it stays on every 300th frame.
     if ((g_amd.fsr_frames % 300) == 1)
     {
-        float conv = -1.0f, netm = -1.0f;
+        float conv = -1.0f, netm = -1.0f, frame = -1.0f;
         // Each surface is measured in the state the frame left it in: `fsr_in`
         // readable (the conversion's post-barrier), `net` writable (the final
         // pass returns it to UNORDERED_ACCESS for the next dispatch). Naming
         // them differently would declare a transition that never happened.
+        //
+        // The THIRD one is the captured frame itself, and it is the one this
+        // probe was missing. `v.color.tex` is where the chain starts: if it is
+        // zero then nothing downstream could have been anything else, and the
+        // whole hunt belongs to the capture rather than to our pass. With only
+        // the two dispatch surfaces measured, a zero at `fsr_in` and a zero at
+        // `net` are one fact reported twice - they cannot say which side lost
+        // the picture. It is RGBA8 at the FULL resolution, so it travels the
+        // same reader with its own spec.
+        const AmdSurfaceSpec kNetSpec{ g_amd.net_w, g_amd.net_h,
+                                       DXGI_FORMAT_R16G16B16A16_FLOAT, true };
+        const AmdSurfaceSpec kFrameSpec{ (UINT)v.w, (UINT)v.hgt,
+                                         DXGI_FORMAT_R8G8B8A8_UNORM, false };
         const bool got_conv = AmdMeasureSurface(
-            g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &conv);
+            g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, kNetSpec, &conv);
         const bool got_net = AmdMeasureSurface(
-            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &netm);
+            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kNetSpec, &netm);
+        const bool got_frame = v.color.tex != nullptr && AmdMeasureSurface(
+            v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, kFrameSpec, &frame);
         if (got_conv) g_amd.probe_conv_mean = conv;
         if (got_net)  g_amd.probe_net_mean = netm;
+        if (got_frame) g_amd.probe_frame_mean = frame;
         ++g_amd.probe_frames;
         if (!got_conv || !got_net) ++g_amd.probe_failed;
         if (got_conv && got_net)

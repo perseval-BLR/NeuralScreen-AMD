@@ -106,6 +106,8 @@ ABOUT = {
     "test_module_layers.py": "no module imports main, no dangling names, all import clean",
     "test_amd_state_bookkeeping.py": "every AMD bridge barrier starts from a real state and none is a no-op",
     "test_amd_slot_discipline.py": "no two passes in one command list share a descriptor slot: the GPU resolves tables at execution time",
+    "test_hud_frame_delta.py": "the HUD's frame delta is named for what it is, and a reset frame says it is a reset",
+    "test_amd_tripwire.py": "three surfaces of one frame: the capture, the converted input and the dispatch output each name a different failing side",
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_engine_init.py": "the engine-init verdict is asked after the swapchain exists, the retry is bounded, a dead engine is not fed, and the mean is not called black",
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",

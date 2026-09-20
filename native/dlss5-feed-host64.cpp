@@ -3899,7 +3899,7 @@ static bool EnsureDdaSwizzle()
     prm[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     D3D12_ROOT_SIGNATURE_DESC rsd = {};
     prm[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    prm[2].Constants.Num32BitValues = 3;   // isFloat, white, rotate180
+    prm[2].Constants.Num32BitValues = 4;   // isFloat, white, rotate180, hdr
     prm[2].Constants.ShaderRegister = 0;
     rsd.NumParameters = 3; rsd.pParameters = prm;
     ID3DBlob *sig = nullptr;
@@ -4776,10 +4776,13 @@ static bool SwizzleCaptureIntoColor(VideoState &v)
     h.list->SetComputeRootDescriptorTable(1, g1);
     // rotate180 only for duplication: a WGC window is already composed the
     // way the user sees it, so turning it over would be a second rotation.
-    struct { UINT is_float; float white; UINT rotate180; } hdr = {
+    // hdr is the second, independent fact about the same frame: FP16 arrival
+    // says nothing about the picture being scRGB (see kHdrCaptureHlsl).
+    struct { UINT is_float; float white; UINT rotate180; UINT hdr; } hdr = {
         g_capture_float ? 1u : 0u, g_hdr_frame_white,
-        (g_dda_active && g_capture_rotate180) ? 1u : 0u };
-    h.list->SetComputeRoot32BitConstants(2, 3, &hdr, 0);
+        (g_dda_active && g_capture_rotate180) ? 1u : 0u,
+        g_hdr_capture ? 1u : 0u };
+    h.list->SetComputeRoot32BitConstants(2, 4, &hdr, 0);
     h.list->Dispatch((g_dda_w + 7) / 8, (g_dda_h + 7) / 8, 1);
     // copy swizzled dst into v.color.tex
     D3D12_RESOURCE_BARRIER pre_color = Transition(v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,

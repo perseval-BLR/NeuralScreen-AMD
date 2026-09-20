@@ -135,11 +135,22 @@ def main() -> int:
             "zeros on a working frame (this is what happened on a 7900 XTX)")
 
     # 5. It must be CALLED, not merely defined: an unused probe is a comment.
-    if "g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, &conv" not in text or \
-       "g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &netm" not in text:
+    #
+    # The signature gained a surface spec when the tripwire needed a THIRD
+    # surface (the captured frame in v.color.tex, RGBA8, full resolution), so
+    # the two dispatch surfaces are matched on the call, not on a literal tail:
+    # what matters is that both are called with their OWN state, which the
+    # checks below name separately.
+    if not re.search(r"AmdMeasureSurface\(\s*\n?\s*g_amd\.fsr_in,\s*"
+                     r"D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE", code):
         failures.append(
-            "the probe is defined but never called on both surfaces - only the "
-            "pair (input AND dispatch output) can name the side")
+            "the probe is not called on the converted input with its readable "
+            "state - only the pair (input AND dispatch output) can name the side")
+    if not re.search(r"AmdMeasureSurface\(\s*\n?\s*g_amd\.net,\s*"
+                     r"D3D12_RESOURCE_STATE_UNORDERED_ACCESS", code):
+        failures.append(
+            "the probe is not called on the dispatch output with its writable "
+            "state - only the pair (input AND dispatch output) can name the side")
 
     # 6. The state handed to the probe must be the state the resource IS IN.
     #
@@ -163,7 +174,7 @@ def main() -> int:
                 "the probe does not return the resource to the state it found it "
                 "in - the next frame's dispatches would be told a state the "
                 "resource is not in")
-        if "g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, &netm" not in text:
+        if not re.search(r"g_amd\.net,\s*D3D12_RESOURCE_STATE_UNORDERED_ACCESS", code):
             failures.append(
                 "net is measured as if it were readable, but the final pass "
                 "leaves it in UNORDERED_ACCESS for the next dispatch")

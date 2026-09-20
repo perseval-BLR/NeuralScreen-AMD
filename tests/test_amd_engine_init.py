@@ -56,6 +56,21 @@ RUNTIME_H = BASE / "native" / "amd" / "amd_runtime.h"
 BRIDGE = BASE / "native" / "amd" / "amd_bridge.inl"
 
 
+def strip_comments(text: str) -> str:
+    """Drop // comments so a quoted sentence in prose is not read as code.
+
+    A guard that searches the raw body forbids its own explanation: the comment
+    above the exposure line quotes the withdrawn sentence to say why it went
+    away, and the search then reports the withdrawal as a regression.
+    """
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("//"):
+            continue
+        out.append(line.split("//")[0] if "//" in line else line)
+    return "\n".join(out)
+
+
 def function_body(text: str, signature: str) -> str:
     """The body of one function, from its DEFINITION to its closing brace.
 
@@ -289,10 +304,36 @@ def main() -> int:
                     "present in every log collected, including healthy v0.2.14 "
                     "runs with self-check 0.13%, so the claim sends readers to "
                     "the wrong half of the problem")
+            # And the SECOND version of that same mistake, withdrawn the same
+            # way. The line then read "the exposure ran away to its ceiling: the
+            # input to the network was zero" whenever the mean was 9999.9980.
+            # Across sixteen reports 4.0000 is only the STARTING value and every
+            # run without a bound exposure drifts to 9999.9980 - healthy feeding
+            # included - so the sentence separates nothing and must not come
+            # back. It is pinned here because it was wrong in the SHIPPED text
+            # and a reader would act on it.
+            #
+            # Only the LOG STRING is searched, not the whole body: the comment
+            # above the code quotes the withdrawn sentence to explain why it went
+            # away, and a guard that searches prose ends up forbidding the
+            # explanation as well ("source-scanning tests strip docstrings" -
+            # see worker-env-and-testing.md).
+            code_only = strip_comments(health)
+            for withdrawn in ("the input to the network was zero",
+                              "ran away to its ceiling"):
+                if withdrawn in code_only:
+                    failures.append(
+                        f"the withdrawn exposure claim is back in the log: "
+                        f"'{withdrawn}' - every run without a bound exposure "
+                        f"drifts to 9999.9980, healthy feeding included, so this "
+                        f"tells a reader to hunt a black input that is not there")
+            # The exposure must still be reported - it IS a measurement, and it
+            # is what shows whether the field reached the engine.
             if "9999.99" not in health:
                 failures.append(
-                    "the mean line no longer consults the exposure, which is the "
-                    "value that actually separates a zero input from a normal one")
+                    "the mean line no longer consults the exposure, so a "
+                    "dispatch whose exposure field did not reach the engine "
+                    "reads exactly like one that did")
 
     # --- 5. a verdict about the CAPTURE needs a sample -----------------------
     #

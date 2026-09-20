@@ -22,12 +22,20 @@ static const char kHdrCaptureHlsl[] =
     NS_HDR_COLOR_FUNCTIONS
     "Texture2D<float4> src : register(t0);\n"
     "RWTexture2D<float4> dst : register(u0);\n"
-    "cbuffer Params : register(b0) { uint isFloat; float white; uint rotate180; };\n"
+    "cbuffer Params : register(b0) { uint isFloat; float white; uint rotate180; uint hdr; };\n"
     "[numthreads(8,8,1)] void CSMain(uint3 p : SV_DispatchThreadID) {\n"
     " uint w,h; dst.GetDimensions(w,h); if(p.x>=w || p.y>=h) return;\n"
     " int2 s = rotate180 ? int2(w-1-p.x, h-1-p.y) : int2(p.xy);\n"
     " float4 c=src.Load(int3(s,0));\n"
-    " if(isFloat) c=float4(ToSrgb(max(c.rgb,0)/(white+Peak(c.rgb))),1);\n"
+    // isFloat and hdr are two different facts. "the frame arrived as FP16" is
+    // not "the picture is scRGB" - a 10-bit SDR scan-out also duplicates as
+    // FP16 (the format is pinned so it cannot flap, issue #86), and that frame
+    // carries an SDR desktop whose 1.0 IS white. Dividing it by white+Peak
+    // tone-mapped an SDR picture: white landed at ToSrgb(1/(1+1)) = 0.735, the
+    // "whites turned grey" report (#99, 10 bpc with HDR off). Only a real
+    // scRGB capture gets the tone map; FP16-without-HDR is linear SDR and
+    // needs nothing but the display encode.
+    " if(isFloat) c=float4(ToSrgb(max(c.rgb,0)/(hdr ? white+Peak(c.rgb) : 1.0)),1);\n"
     " dst[p.xy]=c; }\n";
 
 static const char kHdrCompositeHlsl[] =
