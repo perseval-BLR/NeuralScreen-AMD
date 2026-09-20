@@ -74,7 +74,7 @@ int main()
         for(UINT i=0;i<W*H;++i) for(UINT c=0;c<4;++c) raw[i*4+c]=XMConvertFloatToHalf(samples[i%10][c]);
         auto native=texture(DXGI_FORMAT_R16G16B16A16_FLOAT,raw.data(),8);
         auto proxy=texture(DXGI_FORMAT_R8G8B8A8_UNORM,nullptr,4,true);
-        struct { UINT fp; float white; UINT pad[2]; } cap={1,2.5f,{}};
+        struct { UINT fp; float white; UINT rotate; UINT hdr; } cap={1,2.5f,0,1};
         dispatch(kHdrCaptureHlsl,{native.Get()},proxy.Get(),&cap);
         auto proxyBytes=read(proxy.Get(),4);
         check(proxyBytes[0]==0 && proxyBytes[1]==0,"black lifted in capture");
@@ -143,22 +143,47 @@ int main()
             marked[i]=(unsigned char)(x*13+1); marked[i+1]=(unsigned char)(y*29+2);
             marked[i+2]=(unsigned char)((x+y)*7+3); marked[i+3]=255; }
         auto markedTex=texture(DXGI_FORMAT_B8G8R8A8_UNORM,marked.data(),4);
-        cap.fp=0; cap.pad[0]=1;
+        cap.fp=0; cap.rotate=1;
         dispatch(kHdrCaptureHlsl,{markedTex.Get()},proxy.Get(),&cap);
         auto turned=read(proxy.Get(),4);
         for(UINT y=0;y<H;++y) for(UINT x=0;x<W;++x) {
             const UINT d=(y*W+x)*4, s=((H-1-y)*W+(W-1-x))*4;
             check(turned[d]==marked[s+2] && turned[d+1]==marked[s+1] &&
                   turned[d+2]==marked[s],"180 rotation did not turn the frame over"); }
-        cap.pad[0]=0;
+        cap.rotate=0;
         dispatch(kHdrCaptureHlsl,{markedTex.Get()},proxy.Get(),&cap);
         auto upright=read(proxy.Get(),4);
         for(UINT i=0;i<W*H;++i)
             check(upright[i*4]==marked[i*4+2] && upright[i*4+1]==marked[i*4+1] &&
                   upright[i*4+2]==marked[i*4],"the unrotated path moved a pixel");
+        // #99: a 10-bit SDR display duplicates as FP16 with HDR OFF, and that
+        // frame's 1.0 IS white. Running the HDR tone map on it turned white
+        // into ToSrgb(1/(white+Peak)) - the 74 %-grey report. Same frame, same
+        // values, only the hdr flag differs: with it, unit white must come out
+        // 255; without it, 187 (the old, wrong behaviour) - so this cannot
+        // pass by the tone map simply being gone.
+        std::vector<HALF> unit(W*H*4);
+        for(UINT i=0;i<W*H;++i) {
+            unit[i*4]=XMConvertFloatToHalf(1.0f); unit[i*4+1]=XMConvertFloatToHalf(1.0f);
+            unit[i*4+2]=XMConvertFloatToHalf(1.0f); unit[i*4+3]=XMConvertFloatToHalf(1.0f); }
+        auto unitTex=texture(DXGI_FORMAT_R16G16B16A16_FLOAT,unit.data(),8);
+        cap.fp=1; cap.white=1.0f; cap.hdr=0;
+        dispatch(kHdrCaptureHlsl,{unitTex.Get()},proxy.Get(),&cap);
+        auto sdrFloat=read(proxy.Get(),4);
+        check(sdrFloat[0]==255 && sdrFloat[1]==255 && sdrFloat[2]==255,
+              "FP16 without HDR must keep SDR white at 255, not tone-map it");
+        cap.hdr=1;
+        dispatch(kHdrCaptureHlsl,{unitTex.Get()},proxy.Get(),&cap);
+        auto hdrTone=read(proxy.Get(),4);
+        // ToSrgb(1/(1+1)) = 0.7354 -> 187.5, so the exact byte depends on the
+        // conversion's rounding; a range keeps the check about the tone map
+        // being applied at all, which is the contract.
+        check(hdrTone[0] >= 180 && hdrTone[0] <= 195,
+              "a real scRGB capture at unit white must still tone-map (~187)");
+        cap.hdr=0;
         auto display=QueryHdrDisplay(MonitorFromPoint(POINT{0,0},MONITOR_DEFAULTTOPRIMARY));
         printf("Display probe: HDR=%d, SDR white=%.1f nits\n",display.enabled,display.white*80);
-        puts("PASS: HDR shader compilation, highlights, signed gamut, zero-edit identity, bypass, wipe, finite edits, SDR output, channel order and 180 rotation (WARP)");
+        puts("PASS: HDR shader compilation, highlights, signed gamut, zero-edit identity, bypass, wipe, finite edits, SDR output, channel order, 180 rotation and SDR-FP16 white (#99) (WARP)");
         return 0;
     } catch(const std::exception &e) { fprintf(stderr,"FAIL: %s\n",e.what()); return 1; }
 }
