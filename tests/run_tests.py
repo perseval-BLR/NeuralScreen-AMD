@@ -115,6 +115,7 @@ ABOUT = {
     "test_amd_engine_shutdown.py": "the engine is stopped before the device it runs on is released",
     "test_defer_tail_verdict.py": "the defer-tail choice says whether it is on and which fact decided it",
     "test_amd_exposure_update.py": "the engine is handed this frame's exposure, not a value frozen at startup",
+    "test_amd_probe_cadence.py": "the probe can run every frame on request, and it measures the presented surface",
     "test_amd_runtime_traps.py": "the AMD hook wait is a real wait and the intensity slider reaches the network",
     "test_amd_engine_init.py": "the engine-init verdict is asked after the swapchain exists, the retry is bounded, a dead engine is not fed, and the mean is not called black",
     "test_amd_own_measure.py": "the host measures its own surface with the engine's metric, on its own submission",

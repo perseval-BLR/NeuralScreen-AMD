@@ -170,6 +170,11 @@ struct AmdState
     //: twice and cannot say which side lost the picture; with it the question
     //: is answered in one line (see the tripwire in AmdEngineHealth).
     float probe_frame_mean = -1.0f;
+    //: `v.output` - the surface the present copies into the backbuffer. The
+    //: three above stop at the composite's input; a report whose picture
+    //: alternates every presented frame needs the value AT the presentation
+    //: point, or the question "does it alternate here" has no answer.
+    float probe_out_mean = -1.0f;
 
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
@@ -904,6 +909,15 @@ static void AmdEngineHealth()
             g_amd.probe_frame_mean, g_amd.probe_conv_mean, g_amd.probe_net_mean,
             side);
     }
+    // The presentation point, on its own: a frame that alternates between a
+    // correct picture and a blown one at the present period differs HERE, whatever
+    // the three above do, and the value is what a reader compares against the
+    // pictures in a recording. Reported only when it was measured.
+    if (g_amd.probe_out_mean >= 0.0f)
+        Log("[amd] the presented surface: mean %.4f (against the captured frame's "
+            "%.4f) - the last value before the backbuffer, so this is the number "
+            "the two visible states differ in",
+            g_amd.probe_out_mean, g_amd.probe_frame_mean);
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
     const std::string frames = last_with("frames ");
@@ -1702,7 +1716,22 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // number". He was right, and this is the answer.
     //
     // A readback is a full GPU->CPU sync, so it stays on every 300th frame.
-    if ((g_amd.fsr_frames % 300) == 1)
+    //
+    // Which is exactly why one report could not be read: NS_AMD_PROBE_EACH
+    // makes it every frame instead. A reporter's package alternates between a
+    // correct frame and a blown-white one at his present period, and its three
+    // launches ran 51, 73 and 216 frames - so the modulo never fired once and
+    // the numbers that would say WHICH surface alternates are absent from his
+    // log. The instrument existed; its cadence put it out of reach of the
+    // reports it was built for.
+    //
+    // Off by default, because the sync is real: the probe is for a diagnosis
+    // run, not for playing.
+    static const bool probe_each = [] {
+        char v[8] = {};
+        return GetEnvironmentVariableA("NS_AMD_PROBE_EACH", v, sizeof(v)) > 0 && v[0] == '1';
+    }();
+    if (probe_each || (g_amd.fsr_frames % 300) == 1)
     {
         float conv = -1.0f, netm = -1.0f, frame = -1.0f;
         // Each surface is measured in the state the frame left it in: `fsr_in`
@@ -1728,6 +1757,21 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
             g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kNetSpec, &netm);
         const bool got_frame = v.color.tex != nullptr && AmdMeasureSurface(
             v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, kFrameSpec, &frame);
+        // And the FOURTH: the surface the present actually copies from.
+        //
+        // The three above measure the chain up to the composite's INPUT. A
+        // report that alternates between a correct picture and a blown-white one
+        // at the present period asks a question none of them can answer - which
+        // surface carries the alternating value, and does it alternate at the
+        // point of presentation. v.output is what PresentFrame copies into the
+        // backbuffer (CopyResource(bb, v.output)), so its mean is the number the
+        // reporter's two states differ in if the mechanism is behind the
+        // composite, and a constant here with alternating inputs would move the
+        // question in front of it.
+        float outm = -1.0f;
+        const bool got_out = v.output != nullptr && AmdMeasureSurface(
+            v.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kFrameSpec, &outm);
+        if (got_out) g_amd.probe_out_mean = outm;
         if (got_conv) g_amd.probe_conv_mean = conv;
         if (got_net)  g_amd.probe_net_mean = netm;
         if (got_frame) g_amd.probe_frame_mean = frame;
@@ -1735,14 +1779,22 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         if (!got_conv || !got_net) ++g_amd.probe_failed;
         if (got_conv && got_net)
             Log("[amd] what WE hand over: converted input mean %.4f, dispatch output "
-                "mean %.4f (colour channels only - the engine's own metric; compare "
+                "mean %.4f%s (colour channels only - the engine's own metric; compare "
                 "with its 'encoded mean' above)",
-                conv, netm);
+                conv, netm,
+                got_out ? "" : " [the presented surface was not measured this pass]");
         else
             Log("[amd] the surface probe did not run this pass (converted %s, "
                 "dispatch output %s) - the engine's own number stands alone",
                 got_conv ? "measured" : "not measured",
                 got_net ? "measured" : "not measured");
+        // Its own line, because it is the one that answers a per-frame
+        // alternation: the values above can be steady while this one is not.
+        if (got_out)
+            Log("[amd] the presented surface, this frame: mean %.4f (native anchor "
+                "%.4f) - a value that alternates frame to frame here is the "
+                "reporter's two states",
+                outm, got_frame ? frame : -1.0f);
     }
 
     // ---- the tick the engine needs ---------------------------------------
