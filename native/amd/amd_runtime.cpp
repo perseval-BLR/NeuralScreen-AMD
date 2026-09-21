@@ -406,6 +406,11 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
             { L"Enabled",       L"1" },
             { L"UseFsrInputs",  L"1" },   // arms the ffxDispatch hook
             { L"UseDepth",      L"0" },
+            // NOTE: this key does NOT decide interop. The runtime reads the ini in
+            // its DllMain and the host re-writes the field after that, so the value
+            // that counts is the one at the write site below. Kept here so the file
+            // still describes what the engine is configured with, and so a reader
+            // is not left thinking this line is the control.
             { L"Interop",       L"1" },
             { L"Inline",        L"1" },
             { L"InlineWaitMs",  L"200" },
@@ -630,7 +635,37 @@ bool Runtime::Load(const std::wstring &runtime_dir, ID3D12Device *device,
     At<uint8_t>(module_, table_->kInlineMode) = 1;
     At<uint8_t>(module_, table_->kEnabled) = 1;
     At<uint8_t>(module_, table_->kInlineMode) = 1;   // again, after Enabled
-    At<uint8_t>(module_, table_->kInterop) = 1;
+    // Interop: zero-copy shared textures, and it is the ONE field here that is
+    // not pinned.
+    //
+    // Why it is the suspect: #4 (RX 7600, Windows 10) dies with a read at offset
+    // 0x18C inside D3D12Core - a device-child object whose back-reference is NULL -
+    // with `last job -1`, before the engine has done anything. Upstream has the
+    // same fault open in their own standalone host (#84) and name zero-copy interop
+    // as where it happens. The shape matches ours: not a game, a host that hands
+    // shared resources over.
+    //
+    // Why the default does NOT change: the same upstream report says their COPY
+    // path fails too (0x887A0005), so 0 is not known to be better than 1. Flipping
+    // the default on a guess would trade a fault we have diagnosed for one we have
+    // not. What the reporter needs is the A/B arm, and that is what this is:
+    //
+    //     NS_AMD_INTEROP=0   -> hand resources over by copy instead of zero-copy
+    //     NS_AMD_INTEROP=1   -> the value every working report runs (default)
+    //
+    // It is read here rather than from the ini because the runtime reads the ini in
+    // its DllMain and this write lands after that - the file cannot control it.
+    //
+    // The value is kept for the caller to log, the same way HooksSeen()/HooksMs()
+    // are: this translation unit has no Log(), the bridge owns it.
+    uint8_t interop = 1;
+    {
+        char v[8] = {};
+        const DWORD got = GetEnvironmentVariableA("NS_AMD_INTEROP", v, sizeof(v));
+        if (got > 0 && got < sizeof(v) && v[0] == '0') interop = 0;
+    }
+    At<uint8_t>(module_, table_->kInterop) = interop;
+    interop_ = interop;
     At<uint8_t>(module_, table_->kUseFsrInputs) = 1;
     At<uint8_t>(module_, table_->kUseDepth) = 0;
 

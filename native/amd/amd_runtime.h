@@ -165,7 +165,7 @@ struct Table {
     uintptr_t kInitCtx;    // the ctx struct the Init call takes
     uintptr_t kHipDevice;
     uintptr_t kInlineMode;  // pinned to 1
-    uintptr_t kInterop;     // pinned to 1
+    uintptr_t kInterop;     // the A/B arm: 1 = zero-copy (default), 0 = copy via NS_AMD_INTEROP=0
     uintptr_t kEnabled;
     uintptr_t kFlagAfterInit;  // written only AFTER init returns
 
@@ -532,6 +532,15 @@ public:
     //: written. The bridge logs it - this unit has no Log().
     float ScaleWritten() const { return scale_written_; }
 
+    //: The value written into the runtime's `Interop` field at load: 1 = zero-copy
+    //: shared textures (the default), 0 = the copy arm selected by NS_AMD_INTEROP=0.
+    //:
+    //: Reported for the same reason ScaleWritten is: a reporter testing the A/B has
+    //: to be able to see from the log which arm ran, and this unit cannot log. A
+    //: default returned before any load would read as "interop on", which is what
+    //: the engine would have done anyway - so the pre-load value is not a claim.
+    int InteropWritten() const { return interop_; }
+
     // One frame: hand the engine the colour resource it should process. The
     // result lands in the same resource (the engine works in place), so the
     // caller's output resource is simply the colour resource.
@@ -644,6 +653,9 @@ private:
     //: The last `Scale` written to the ini, for the caller to log. -1 means
     //: nothing has been written yet.
     float scale_written_ = -1.0f;
+    //: The value written into the runtime's `Interop` field at load. -1 until a
+    //: load has happened, so "not asked yet" stays distinguishable from "on".
+    int interop_ = -1;
     //: Where the runtime's ini lives, kept for WriteScale.
     std::wstring ini_path_;
     ImageKind kind_ = ImageKind::Unknown;

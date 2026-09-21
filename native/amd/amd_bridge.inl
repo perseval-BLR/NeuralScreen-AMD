@@ -2270,6 +2270,22 @@ static bool AmdInit()
 
     Log("[amd] runtime: %s", AmdImageKindName(g_amd.runtime.Kind()));
     Log("[amd] sha256: %s", g_amd.runtime.FoundHash().c_str());
+    // Which interop arm this launch runs, said out loud. The default is zero-copy
+    // and that is what every working report has run, so a reader who is not testing
+    // the A/B learns nothing new - but the reporter who SET NS_AMD_INTEROP=0 has to
+    // be able to see from the log that the other arm was actually taken, and a
+    // silent flag is exactly how a one-variable test turns into two runs that are
+    // secretly the same.
+    {
+        const int io = g_amd.runtime.InteropWritten();
+        if (io == 0)
+            Log("[amd] interop OFF: resources are handed over by copy, not zero-copy "
+                "(NS_AMD_INTEROP=0)");
+        else if (io > 0)
+            Log("[amd] interop on: zero-copy shared textures (the default)");
+        else
+            Log("[amd] interop: not written by this run - the engine's own value stands");
+    }
     // The hook wait's verdict. A runtime whose detours never appeared cannot
     // see our frames at all - the pass would run and process nothing, which is
     // the failure this release exists to end, so it is worth a line of its own.
