@@ -588,6 +588,29 @@ def switch_window(st, hwnd: int) -> None:
     # (see follow_window).
     rect = window_frame_rect(hwnd) if hwnd else None
     st.follow_size = rect[2:] if rect else None
+    # The display's own idea of where the captured window is, set HERE rather
+    # than left to follow_window.
+    #
+    # `_window_layer` is what draw_capture_overlay blits the panel by, and it
+    # used to be written in exactly two places: move_to, which follow_window
+    # SKIPS while the menu is open (the user may be dragging the panel by its
+    # title bar), and set_window_layer, which is called when the menu CLOSES.
+    # So a mode chosen from an OPEN menu left it describing the previous
+    # geometry: the panel was laid out for the screen and blitted as if the
+    # frame still sat at the old origin, and the reporter saw the menu baked
+    # into the recording "transparent / incorrectly composited" - the same
+    # class as #107, reached by a different route.
+    #
+    # This is the one moment the geometry really changes, and switch_window
+    # already computes the rect it changes to, so it is written where it is
+    # known instead of waiting for a menu event that may not come.
+    # set_window_layer records the geometry before its veil check returns, so
+    # this is safe under the rebuild's own veil.
+    if rect is not None:
+        st.display.set_window_layer(*rect)
+    else:
+        # Back to the desktop: no window, so no origin to shift the panel by.
+        st.display.clear_window_layer()
     rebuild_pipeline(st, note)
 
 

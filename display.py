@@ -885,6 +885,17 @@ class Display:
         except Exception as exc:
             print(f'Display: WARNING cannot expand the layer: {exc}')
 
+    def clear_window_layer(self) -> None:
+        """Forget the captured window: the frame covers the whole layer again.
+
+        The counterpart of set_window_layer for the switch back to the desktop.
+        `_window_layer` is the origin draw_capture_overlay shifts the panel by,
+        and a value left over from the previous one-window mode describes a
+        window that is no longer being captured - the panel would be blitted at
+        an origin the frame does not have.
+        """
+        self._window_layer = None
+
     def set_window_layer(self, x: int, y: int, w: int, h: int) -> None:
         """Shrink the HUD layer back onto the captured window.
 

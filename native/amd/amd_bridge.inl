@@ -175,6 +175,14 @@ struct AmdState
     //: alternates every presented frame needs the value AT the presentation
     //: point, or the question "does it alternate here" has no answer.
     float probe_out_mean = -1.0f;
+    //: `up_out` - the FSR upscale's output, the surface BETWEEN the network and
+    //: the composite. Added last, and for a specific reason: a reporter's own
+    //: bisect found the alternation stops at Work Scale 1:1 (231/231 frames of
+    //: a 1102x756 work buffer alternating, 2/329 of an 1816x1221 one that IS
+    //: 1:1). At 1:1 this surface is not created at all - the final pass reads
+    //: `net` instead - so the one variable that changed in that test is the
+    //: existence of this surface. It is the last unmeasured link.
+    float probe_up_mean = -1.0f;
 
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
@@ -1028,6 +1036,16 @@ static void AmdEngineHealth()
             "%.4f) - the last value before the backbuffer, so this is the number "
             "the two visible states differ in",
             g_amd.probe_out_mean, g_amd.probe_frame_mean);
+    // The upscale's own output, in the health summary rather than only in the
+    // per-frame line: this is the value that separates the last two candidates.
+    // A reporter's 1:1 bisect stopped the alternation, and at 1:1 this surface
+    // does not exist - so if it alternates here while `net` does not, the fault
+    // is in the FSR pass; if it is steady while the presented surface alternates,
+    // the composite is where the two states are made.
+    if (g_amd.probe_up_mean >= 0.0f)
+        Log("[amd] the upscale's own output: mean %.4f (the dispatch it reads was "
+            "%.4f) - the link between the neural pass and the composite",
+            g_amd.probe_up_mean, g_amd.probe_net_mean);
     // How often the probe itself failed. Counted since the probe was built and
     // NEVER printed, which made a partial failure invisible: a reader saw the
     // lines that did appear and had no way to know that others did not, and the
@@ -1991,6 +2009,33 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         float outm = -1.0f;
         const bool got_out = v.output != nullptr && AmdMeasureSurface(
             v.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kFrameSpec, &outm);
+        // And the FIFTH: the FSR upscale's own output, which is the surface the
+        // composite READS when there is an upscale to do.
+        //
+        // It is the one link left unmeasured, and the reason is a bisect rather
+        // than a theory. A reporter took Work Scale to 1:1 - one variable, no
+        // rebuild - and the alternation stopped: 231 of 231 frames of the
+        // processed half alternating at a 1102x756 work buffer, 2 of 329 at
+        // 1816x1221 where work == display. At 1:1 `upscaling_` is false, so this
+        // resource is never created and the final pass reads `net` instead. The
+        // single variable that test changed is the EXISTENCE of this surface, so
+        // its contents are what a diagnosis has to rule in or out.
+        //
+        // Its state at this point in the frame is UNORDERED_ACCESS, exactly like
+        // `net`: the closing block returns it to what dispatch B declares as its
+        // output, so the frame leaves it writable. Declaring it readable here
+        // would record a transition from a state the resource is not in - the
+        // same class of lie the creation states used to carry, and the reason
+        // tests/test_amd_state_bookkeeping.py exists. Not measured at 1:1, where
+        // the surface does not exist at all.
+        float upm = -1.0f;
+        const AmdSurfaceSpec kUpSpec{ g_amd.out_w, g_amd.out_h,
+                                      DXGI_FORMAT_R16G16B16A16_FLOAT, true };
+        const bool got_up = g_amd.fsr.Upscaling() && g_amd.up_out != nullptr &&
+                            AmdMeasureSurface(
+                                g_amd.up_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                kUpSpec, &upm);
+        if (got_up) g_amd.probe_up_mean = upm;
         if (got_out) g_amd.probe_out_mean = outm;
         if (got_conv) g_amd.probe_conv_mean = conv;
         if (got_net)  g_amd.probe_net_mean = netm;
@@ -2015,6 +2060,17 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
                 "%.4f) - a value that alternates frame to frame here is the "
                 "reporter's two states",
                 outm, got_frame ? frame : -1.0f);
+        // The upscale's own output, on its own line and in its own place in the
+        // chain: it sits BETWEEN the dispatch and the composite, so a value that
+        // alternates here with a steady `net` puts the fault in the FSR pass,
+        // while a steady value here with an alternating presented surface puts
+        // it in the composite - and the two are the only remaining candidates.
+        // Printed only when it was measured: at 1:1 the surface does not exist.
+        if (got_up)
+            Log("[amd] the upscale's own output, this frame: mean %.4f (against the "
+                "dispatch's %.4f) - the surface the composite reads when work != "
+                "display, and the one a 1:1 run does not create",
+                upm, got_net ? netm : -1.0f);
     }
 
     // ---- the tick the engine needs ---------------------------------------
