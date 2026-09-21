@@ -592,6 +592,35 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
         g_amd.probe_pitch = pitch;
     }
 
+    // Poison the buffer BEFORE the copy is recorded.
+    //
+    // The readback resource is allocated once and reused for every measured
+    // surface, and a copy that never executes leaves whatever was there. The
+    // function's own comment below records the artifact: an unexecuted copy
+    // reads back as the zeros the buffer was allocated with, and a perfectly
+    // black surface that was never sampled is reported as a measurement. That
+    // is the one failure mode this probe cannot tell from a real black frame -
+    // and it is the failure the whole black-frame hunt was about.
+    //
+    // A sentinel cannot be a value a real measurement could produce: the mean
+    // is over colour channels of a surface, so it lands in 0..1 for RGBA8 and
+    // in a small range for the FP16 dispatch surfaces. 0xA5 repeated is not a
+    // plausible mean of anything, and the check below is on the raw buffer, not
+    // on the mean, so no rounding can hide it.
+    {
+        void *poison = nullptr;
+        D3D12_RANGE whole{ 0, (SIZE_T)bytes };
+        if (SUCCEEDED(g_amd.probe_rb->Map(0, &whole, reinterpret_cast<void **>(&poison)))
+            && poison != nullptr)
+        {
+            memset(poison, 0xA5, static_cast<size_t>(bytes));
+            D3D12_RANGE wrote{ 0, (SIZE_T)bytes };
+            g_amd.probe_rb->Unmap(0, &wrote);
+        }
+        else
+            return false;   // cannot poison it, so cannot trust it
+    }
+
     // Its own list: this runs after the frame's submission has been handed
     // over, so it must not disturb the recording the engine is following.
     ID3D12GraphicsCommandList *cl = nullptr;
@@ -645,6 +674,33 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
     D3D12_RANGE all{ 0, (SIZE_T)bytes };
     if (SUCCEEDED(g_amd.probe_rb->Map(0, &all, reinterpret_cast<void **>(&p))) && p != nullptr)
     {
+        // Did the copy actually land? The buffer was poisoned with 0xA5 before
+        // the copy was recorded, so any byte still carrying that pattern means
+        // that region was never written. The first bytes are enough: a copy
+        // writes the whole footprint or the command never executed, and the
+        // point is to catch "never executed", not a partial write.
+        //
+        // This is checked on the RAW bytes, before any mean is computed, so
+        // there is no arithmetic between the sentinel and the verdict.
+        {
+            const size_t probe_len = static_cast<size_t>(bytes) < 64u
+                                         ? static_cast<size_t>(bytes) : 64u;
+            bool untouched = probe_len > 0;
+            for (size_t i = 0; i < probe_len; ++i)
+                if (p[i] != 0xA5) { untouched = false; break; }
+            if (untouched)
+            {
+                // A diagnostic that cannot tell "nothing was copied" from
+                // "the surface is black" is worse than silent: it reports the
+                // zero it never measured. Refuse to answer.
+                Log("[amd] the surface probe's copy did not execute - the "
+                    "readback still carries its sentinel, so NO mean is reported "
+                    "for this pass (this would otherwise read as a black surface)");
+                D3D12_RANGE read_only{ 0, 0 };
+                g_amd.probe_rb->Unmap(0, &read_only);
+                return false;
+            }
+        }
         double sum = 0.0;
         uint64_t n = 0;
         // The two formats need two readers: the dispatch surfaces are half
@@ -972,6 +1028,19 @@ static void AmdEngineHealth()
             "%.4f) - the last value before the backbuffer, so this is the number "
             "the two visible states differ in",
             g_amd.probe_out_mean, g_amd.probe_frame_mean);
+    // How often the probe itself failed. Counted since the probe was built and
+    // NEVER printed, which made a partial failure invisible: a reader saw the
+    // lines that did appear and had no way to know that others did not, and the
+    // numbers that were printed came from an unknown subset of the frames.
+    //
+    // Printed only when it happened, so a healthy report does not grow a line -
+    // and when it does, the reader is told the totals so the printed means can
+    // be read for what they are.
+    if (g_amd.probe_failed != 0)
+        Log("[amd] the surface probe failed on %llu of %llu passes - the means "
+            "above come from the passes that succeeded, not from every frame",
+            static_cast<unsigned long long>(g_amd.probe_failed),
+            static_cast<unsigned long long>(g_amd.probe_frames));
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
     const std::string frames = last_with("frames ");

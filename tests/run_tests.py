@@ -109,6 +109,7 @@ ABOUT = {
     "test_hud_frame_delta.py": "the HUD's frame delta is named for what it is, and a reset frame says it is a reset",
     "test_amd_tripwire.py": "three surfaces of one frame: the capture, the converted input and the dispatch output each name a different failing side",
     "test_amd_probe_spec_match.py": "the probe verifies its spec against the resource before copying, so a diagnostic cannot remove the device",
+    "test_amd_probe_sentinel.py": "the probe poisons its readback and refuses to report a mean when the copy never executed",
     "test_amd_interop_switch.py": "NS_AMD_INTEROP selects the copy arm without changing the default, and the log says which arm ran",
     "test_rnsz_failure_stops.py": "a failed RNSZ stops, is reported, and releases what it built - it does not answer ok",
     "test_capture_output_log.py": "the capture log names every output the adapter exposes, before the NS_OUTPUT match",
