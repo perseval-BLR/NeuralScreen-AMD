@@ -44,12 +44,43 @@ static struct FgState {
 static int g_fg_ui_enabled = -1;
 static unsigned g_fg_count = 1;
 
+// Whether the adapter chosen for this run is a Radeon, owned by the host file
+// and set once when the adapter is picked (g_radeon_present, ~line 1447). Read
+// by FgRequested below: the AMD pass and frame generation are mutually
+// exclusive, and the host's own flag is the one place that fact is recorded.
+// AmdActive() would answer a different question - whether the pass is live
+// RIGHT NOW - and a pass that failed is exactly the state in which a user goes
+// looking at the other switches.
+
 static bool FgRequested()
 {
     static const bool requested = [] {
         char value[8] = {};
         return GetEnvironmentVariableA("NS_FRAMEGEN", value, sizeof(value)) == 1 && value[0] == '1';
     }();
+    // The Radeon guard, and it is not a preference.
+    //
+    // Frame generation is an NGX feature: every path below this line is
+    // NVSDK_NGX_D3D12_*, served by nvngx_dlssg.dll. On a Radeon there is no
+    // NGX to serve it, and the call reached the hook with a null feature:
+    //
+    //   [fg] UI: on, 2x
+    //   [crash] CRASH: ACCESS_VIOLATION (0xC0000005) at nvngx.dll + 0xCA05
+    //   [crash] CRASH: tried to read address 0x0
+    //   [crash] CRASH: amd active=1 failed=0 frames=1293
+    //
+    // Twenty-one milliseconds after the switch went on (a 9070 XT, 21.09).
+    // nvngx.dll is THIS worker, so that is our own dereference of a null
+    // pointer, and the crash takes the session with it: the overlay, the
+    // recording and the pass all go, and the log names a fault the user cannot
+    // act on.
+    //
+    // g_radeon_present is the right question rather than "is the AMD pass
+    // live": it is decided once, when the adapter is picked, and it stays true
+    // even if the pass later fails - and a failed AMD pass is exactly when the
+    // user is most likely to reach for another switch. FG cannot work on a
+    // Radeon in any of those states, so the refusal does not depend on one.
+    if (g_radeon_present) return false;
     return (g_fg_ui_enabled < 0 ? requested : g_fg_ui_enabled != 0) && !g_fg.failed;
 }
 
@@ -532,4 +563,11 @@ static void ConfigureFgFrame(uint32_t flags)
     g_fg.failed = false;
     g_force_next_frame = true;
     Log("[fg] UI: %s, %ux", enabled ? "on" : "off", count + 1);
+    // And the answer, in the same breath. FgRequested refuses on a Radeon (see
+    // the guard there), so without this line the log would say "on" and then
+    // nothing at all would happen - which is the silent switch of issue #76,
+    // one layer deeper.
+    if (enabled && g_radeon_present)
+        Log("[fg] refused: this run is on a Radeon, and Frame Generation needs "
+            "an NGX card - the AMD neural pass keeps the picture");
 }

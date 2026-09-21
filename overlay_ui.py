@@ -220,6 +220,10 @@ class OverlayMenu:
             # then draws as off while the action behind it fires normally.
             "hdr": False,
             "motion_backend": "cpu",
+            # The card this run picked is a Radeon: frame generation cannot run
+            # there at all (see settings_io.radeon_present). The FG row is drawn
+            # as unavailable with the reason under it.
+            "fg_radeon": False,
             # Skip static frames (processing section): no new capture frame -
             # the network idles instead of re-running.
             "skip_static": True,
@@ -912,19 +916,34 @@ class OverlayMenu:
             # true: without it the same setting is visibly soft.
             fg = bool(self.state.get("frame_generation"))
             multiplier = int(self.state.get("frame_multiplier", 2))
-            # The multiplier rides the FG row: three small buttons between the
-            # label and the switch, the selected one filled (user, 14.09).
-            # Selectable whether or not FG runs (user, 15.09): it is a
-            # preference for the next attempt, not a live control - locking it
-            # behind the switch deadlocked a 40-series card (caps at 2x) when
-            # the first attempt refused and flipped itself back off.
-            toggle("frame_generation", "DLSS 4.5 FG", fg,
-                   inline_right=[("frame_multiplier:2", "×2"),
-                                 ("frame_multiplier:3", "×3"),
-                                 ("frame_multiplier:4", "×4")])
-            for idx, value in enumerate((2, 3, 4)):
-                btn = items[-3 + idx]
-                btn.extra["filled"] = multiplier == value
+            # On a Radeon this row is not a control at all. Frame generation is
+            # an NGX feature and this card has no NGX to serve it: the worker
+            # refuses it (FgRequested's guard) and the runtime call that used to
+            # be attempted took the whole session down with an access violation
+            # (a 9070 XT, 21.09 - "[crash] at nvngx.dll + 0xCA05, read 0x0",
+            # twenty-one milliseconds after the switch went on). A switch that
+            # can only crash the worker is worse than no switch, so the row
+            # stays - the feature is named, and the reason it is unavailable is
+            # right under it - and it does not respond.
+            if bool(self.state.get("fg_radeon")):
+                toggle("frame_generation", "DLSS 4.5 FG", False,
+                       hint=s.get("fg_radeon_hint", ""))
+                items[-1].extra["disabled"] = True
+            else:
+                # The multiplier rides the FG row: three small buttons between
+                # the label and the switch, the selected one filled (user,
+                # 14.09). Selectable whether or not FG runs (user, 15.09): it
+                # is a preference for the next attempt, not a live control -
+                # locking it behind the switch deadlocked a 40-series card
+                # (caps at 2x) when the first attempt refused and flipped
+                # itself back off.
+                toggle("frame_generation", "DLSS 4.5 FG", fg,
+                       inline_right=[("frame_multiplier:2", "×2"),
+                                     ("frame_multiplier:3", "×3"),
+                                     ("frame_multiplier:4", "×4")])
+                for idx, value in enumerate((2, 3, 4)):
+                    btn = items[-3 + idx]
+                    btn.extra["filled"] = multiplier == value
 
 
             boost = bool(self.state.get("nr_small"))
@@ -1401,7 +1420,13 @@ class OverlayMenu:
                 self.capturing = None
                 out.append(("capture", None))
             elif item.kind == "toggle":
-                out.append(("nr",) if item.key == "nr" else ("toggle", item.key))
+                # A disabled row is not a control: the FG row on a Radeon looks
+                # like a switch and would otherwise behave like one, sending the
+                # action that the guard then refuses - a click that appears to do
+                # nothing. Same shape as the button branch below.
+                if not item.extra.get("disabled"):
+                    out.append(("nr",) if item.key == "nr"
+                               else ("toggle", item.key))
             elif item.kind == "button":
                 if not item.extra.get("disabled"):
                     out.extend(self._button_click(item.key))
@@ -1988,6 +2013,7 @@ class OverlayMenu:
 
     def _draw_toggle(self, surface, item: Item, s: dict) -> None:
         on = item.value > 0.5
+        disabled = bool(item.extra.get("disabled"))
         size = self._u(20)
         # A switch, not a checkbox: the track is a pill and the knob sits at
         # the end that matches the state. A square box could only be read by
@@ -2006,17 +2032,20 @@ class OverlayMenu:
         if hint:
             box.y = item.rect.y + (self._u(CTRL_H) - size) // 2
         radius = size // 2
+        muted = self.c["muted"]
         pygame.draw.rect(surface,
-                         _rgb(self.c["accent"] if on else self.c["surface"]),
+                         _rgb(self.c["surface"] if disabled
+                              else self.c["accent"] if on
+                              else self.c["surface"]),
                          box, border_radius=radius)
-        if not on:
+        if not on or disabled:
             pygame.draw.rect(surface, _rgb(self.c["border"]), box, self._u(1),
                              border_radius=radius)
         knob_r = max(3, size // 2 - self._u(3))
         knob_x = (box.right - knob_r - self._u(3)) if on else (
             box.x + knob_r + self._u(3))
         pygame.draw.circle(surface,
-                           _rgb(self.c["bg"] if on else self.c["muted"]),
+                           _rgb(self.c["bg"] if on and not disabled else muted),
                            (knob_x, box.centery), knob_r)
         text = item.extra.get("label")
         if not text:
@@ -2025,7 +2054,9 @@ class OverlayMenu:
         if hint:
             room = item.rect.w
         label = self._clip(self._font, text,
-                           _rgb(self.c["text"] if on else self.c["muted"]),
+                           _rgb(muted if disabled
+                                else self.c["text"] if on
+                                else self.c["muted"]),
                            room)
         surface.blit(label, (item.rect.x,
                              item.rect.y + (self._u(CTRL_H) - label.get_height()) // 2))

@@ -712,6 +712,25 @@ def fg_verdict(lines):
     return None
 
 
+def radeon_present(st) -> bool:
+    """Whether the card this run picked is a Radeon.
+
+    Read from the worker's own line - "[host] adapter 0 is the Radeon - the AMD
+    pass runs there" - because that is the same fact the C++ side holds in
+    g_radeon_present, decided once when the adapter was picked. The config's
+    motion_backend is a different question: it says which pass was ASKED for,
+    and on a Radeon the FG refusal holds even when the user has switched the
+    AMD pass off.
+
+    Bounded and cheap: this runs on every menu payload while the menu is open,
+    and the line is written once per worker start.
+    """
+    for line in reversed(st.worker_logs[-400:]):
+        if "is the Radeon - the AMD pass runs there" in line:
+            return True
+    return False
+
+
 def refresh_fg_ok(st) -> None:
     """The FG switch reflects reality (issue #76).
 
@@ -721,6 +740,26 @@ def refresh_fg_ok(st) -> None:
     refusal the switch goes back off with an alert naming the reason.
     Once per attempt: flipping the switch back on arms the alert again.
     """
+    # First the case that has no runtime answer to wait for: a Radeon. Frame
+    # generation is an NGX feature and this card has no NGX to serve it, so the
+    # worker refuses it outright (FgRequested's guard, frame_generation.inl) and
+    # logs why. A config that still says on - carried over from an NVIDIA run,
+    # or flipped by an older build - would otherwise put "FG on" in every frame
+    # header for a feature that cannot start, which is exactly the silent ON
+    # this function exists to end.
+    if radeon_present(st):
+        if not bool(st.cfg.get("frame_generation", False)):
+            return
+        st.cfg["frame_generation"] = False
+        save_menu_layout(st)
+        if not getattr(st, "fg_alerted", False):
+            st.fg_alerted = True
+            st.display.alert(UI_STRINGS[st.lang].get(
+                "fg_radeon",
+                "Frame Generation needs an NGX card and this run is on a "
+                "Radeon - the switch is off. The AMD neural pass keeps "
+                "processing the picture."), 8.0)
+        return
     if not bool(st.cfg.get("frame_generation", False)):
         return
     if getattr(st, "fg_alerted", False):
@@ -913,6 +952,10 @@ def menu_payload(st) -> dict:
         "skip_static": bool(st.cfg.get("skip_static", False)),
         "frame_generation": bool(st.cfg.get("frame_generation", False)),
         "frame_multiplier": min(4, max(2, int(st.cfg.get("frame_multiplier", 2)))),
+        # Frame generation cannot run on the card this session picked. The menu
+        # draws the switch as unusable and says why, instead of offering a
+        # control that would crash the worker (see FgRequested's guard).
+        "fg_radeon": radeon_present(st),
         # Is the network idling on an unchanged screen right now? The
         # worker says so in its log; without this the menu shows a
         # healthy FPS while nothing is being processed, and the skip

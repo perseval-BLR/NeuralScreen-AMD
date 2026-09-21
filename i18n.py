@@ -1859,12 +1859,16 @@ for _strings in STRINGS.values():
         "fg_on": "DLSS FG ON",
         "fg_off": "DLSS FG OFF",
         "fg_fail": "Frame Generation could not start on this GPU - the switch is back off",
+        "fg_radeon_hint": "Unavailable on a Radeon: Frame Generation runs on an NGX card, which this machine does not have. The AMD neural pass keeps processing the picture.",
+        "fg_radeon": "Frame Generation needs an NGX card and this run is on a Radeon - the switch is off. The AMD neural pass keeps processing the picture.",
         "hk_framegen": "Frame Generation on/off",
     })
 STRINGS["ru"].update({
     "fg_on": "DLSS FG ВКЛ",
     "fg_off": "DLSS FG ВЫКЛ",
     "fg_fail": "Генерация кадров не запустилась на этой видеокарте - переключатель выключен обратно",
+    "fg_radeon_hint": "Недоступно на Radeon: генерация кадров работает на NGX-карте, которой здесь нет. Нейропроход AMD продолжает обрабатывать картинку.",
+    "fg_radeon": "Генерации кадров нужна NGX-карта, а этот запуск идет на Radeon - переключатель выключен. Нейропроход AMD продолжает обрабатывать картинку.",
     "hk_framegen": "Генерация кадров вкл/выкл",
 })
 

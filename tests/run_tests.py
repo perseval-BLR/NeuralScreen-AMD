@@ -169,6 +169,7 @@ ABOUT = {
     "test_rec_indicator.py": "the recording indicator draws only while recording, never in the file",
     "test_bake_menu_position.py": "the baked menu lands where the user saw it, not at the frame centre",
     "test_switch_window_layer.py": "the layer geometry is written when the mode changes, not when the menu closes",
+    "test_amd_framegen_refusal.py": "Frame Generation is refused on a Radeon at the one gate, logged, and shown as unavailable instead of offered",
     "test_reveal_below_panel.py": "the picture is shown below the panel in one guarded operation, not on top of it",
     "test_zorder_decision_log.py": "the z-order guard names what it saw and which branch it took",
     "test_shot_dir.py": "the screenshot folder is configured, persisted and shown on the button",

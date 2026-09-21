@@ -638,6 +638,20 @@ def drain_commands(st) -> bool:
                 # A plain on/off for Frame Generation (user request 15.09).
                 # The same path the menu switch takes, so the config write,
                 # the alert re-arm and the header pair all behave the same.
+                #
+                # Not on a Radeon: there is no NGX to run it, the worker refuses
+                # it outright, and the attempt is what used to crash the session.
+                # The hotkey says so rather than flipping a switch that cannot
+                # come on.
+                if settings_io.radeon_present(st):
+                    print("[main] frame generation: refused - this run is on a "
+                          "Radeon (no NGX)")
+                    st.display.alert(UI_STRINGS[st.lang].get(
+                        "fg_radeon",
+                        "Frame Generation needs an NGX card and this run is on "
+                        "a Radeon - the switch is off. The AMD neural pass "
+                        "keeps processing the picture."), 8.0)
+                    return
                 apply_menu_action(st, ("toggle", "frame_generation"))
                 state = bool(st.cfg.get("frame_generation", False))
                 st.display.menu.set_state({"frame_generation": state})
