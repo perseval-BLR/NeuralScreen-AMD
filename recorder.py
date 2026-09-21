@@ -133,13 +133,28 @@ class VideoRecorder:
         self._encode_error: BaseException | None = None
         self._stop = threading.Event()
         self._container = av.open(path, mode="w")
-        self._stream = self._open_video_stream(width, height, fps)
-        self._stream.width = width
-        # An odd height is rounded up by the encoder (yuv420p needs even
-        # dimensions) and the last row comes out duplicated. One-window mode
-        # makes odd sizes normal - a window with a title bar is 539 high - and
-        # a duplicated bottom row is a better answer than cropping a real one.
-        self._stream.height = height
+        # BOTH dimensions must be even, not just the height.
+        #
+        # yuv420p subsamples chroma 2x2, so an odd width has no valid chroma
+        # column to sit on - and an odd height no row. NVENC tolerates the odd
+        # value (which is why this survived until a Radeon report), but AMF
+        # refuses the FIRST frame with a bare `UNKNOWN` error
+        # (0x4E4B4E55, i.e. "UNKN" in ASCII) and the recording dies with the
+        # empty container the reporter measured: 924 bytes, no frames.
+        #
+        # Measured on a reporter's windowed run: the window was 1059x720 and
+        # the height was already even, so only the width was wrong.
+        #
+        # The frame is cropped to these sizes in _encode_one rather than
+        # rounded up, because the alternative - duplicating the last column -
+        # would need a second full-frame copy per frame, and a single lost
+        # column of an odd-width window is not worth 14 MB of copying.
+        enc_w = width + (width & 1)
+        enc_h = height + (height & 1)
+        self.enc_width, self.enc_height = enc_w, enc_h
+        self._stream = self._open_video_stream(enc_w, enc_h, fps)
+        self._stream.width = enc_w
+        self._stream.height = enc_h
         self._stream.pix_fmt = "yuv420p"
         # MP4 (mov) muxer + nvenc: constant time_base 1/fps, pts is a counter.
         # (The NUT pitfall with time_base != 1/30 does not apply: we write
@@ -460,6 +475,13 @@ class VideoRecorder:
 
     def _encode_one(self, pts: int, rgba: np.ndarray) -> None:
         """The encoding proper - only from the _encode_loop thread."""
+        # The stream is opened at even dimensions (see __init__); a frame one
+        # pixel wider or taller is cropped to match rather than passed on.
+        # Handing the encoder a frame of a different size than its own is how
+        # AMF answers with a bare UNKNOWN and aborts the recording, and the
+        # odd case is normal: a borderless window measures 1059 px.
+        if rgba.shape[1] != self.enc_width or rgba.shape[0] != self.enc_height:
+            rgba = rgba[:self.enc_height, :self.enc_width]
         frame = av.VideoFrame.from_ndarray(rgba, format="rgba")
         # The colour tags are MANDATORY on the frame, not only on the stream:
         # when converting RGBA->yuv420p swscale takes the matrix from the frame,

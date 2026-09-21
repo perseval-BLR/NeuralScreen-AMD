@@ -161,6 +161,8 @@ ABOUT = {
     "test_out_status.py": "0x00000000 is a skipped frame, only 0xBAD00000 raises",
     "test_odd_frame_size.py": "a frame whose row pitch needs padding survives",
     "test_recorder_audio.py": "the audio track keeps up with the video",
+    "test_recorder_even_size.py": "the recorder opens at even dimensions, so a codec that requires yuv420p cannot abort on the first frame",
+    "test_recorder_even_size_live.py": "an odd-width recording encodes real frames and reads back, where the reporter got a 924-byte file",
     "test_recorder_fallback.py": "the NVENC codec chain falls back AV1->HEVC->H.264",
     "test_rec_indicator.py": "the recording indicator draws only while recording, never in the file",
     "test_bake_menu_position.py": "the baked menu lands where the user saw it, not at the frame centre",
