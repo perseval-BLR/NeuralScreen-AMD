@@ -255,7 +255,15 @@ def main() -> int:
     if "DispatchNet" not in fsr_h or "DispatchUpscale" not in fsr_h:
         failures.append("the two dispatches are not separate - A must carry "
                         "motion vectors and B must not")
-    if fsr_c.count("motionVectors = ffxApiGetResourceDX12(nullptr)") == 0:
+    # B's vectors are a nullable parameter now (NS_AMD_UPSCALE_MV=1 binds a
+    # surface, the default passes null); test_amd_upscale_mv_knob.py locks that
+    # the surface exists only under the arm. What stays banned is B binding a
+    # fixed resource on every path.
+    # Read in B's own body: A binds `motion` too, so a file-wide search would
+    # pass whatever B did.
+    b_body = fsr_c[fsr_c.find("Upscaler::DispatchUpscale("):]
+    if (b_body.count("motionVectors = ffxApiGetResourceDX12(nullptr)") == 0 and
+            b_body.count("motionVectors = ffxApiGetResourceDX12(motion, ") == 0):
         failures.append("the upscale dispatch binds motion vectors - the "
                         "runtime would run the network on it as well")
     if "UseFsrInputs) = 1" not in runtime_src:

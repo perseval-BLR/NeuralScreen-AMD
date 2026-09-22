@@ -116,8 +116,16 @@ public:
     // fix. The default stays exactly as it shipped until a reporter's frame
     // says otherwise - a guess that silently changes the picture for everyone
     // is how a one-variable test turns into a regression.
+    //
+    // `motion` is null on the shipped path and a surface of B's own under
+    // `NS_AMD_UPSCALE_MV=1`. The motion vectors are the one input of B that
+    // ffx_upscale.h does not mark optional, and B's output alternates with
+    // complementary halves on two different upscaler paths, so whether they
+    // are bound is the next single variable. motionVectorScale stays {0, 0}
+    // in both arms, so the surface's contents never reach the result.
     bool DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
                          ID3D12Resource *depth, ID3D12Resource *exposure,
+                         ID3D12Resource *motion,
                          ID3D12Resource *out,
                          float frame_ms, bool reset, std::string &why);
 

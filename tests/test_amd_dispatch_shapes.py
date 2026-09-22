@@ -96,11 +96,17 @@ def main() -> int:
     if not up:
         failures.append("DispatchUpscale could not be read")
     else:
-        if not re.search(r"d\.motionVectors\s*=\s*ffxApiGetResourceDX12\(\s*nullptr\s*\)", up):
+        # B's vectors come from its own `motion` parameter, which the bridge
+        # passes as null unless NS_AMD_UPSCALE_MV=1 (that arm and its default
+        # are locked by test_amd_upscale_mv_knob.py). What must never happen is
+        # B binding A's surface or any fixed resource: then the runtime would
+        # follow it on the shipped path and charge the network for the upscale.
+        mv = re.search(r"d\.motionVectors\s*=\s*ffxApiGetResourceDX12\(\s*(\w+)", up)
+        if not mv or mv.group(1) not in ("nullptr", "motion"):
             failures.append(
-                "dispatch B binds a motion resource - the runtime would follow "
-                "it and charge the network for the upscale, which is the "
-                "opposite of the two-dispatch design")
+                "dispatch B binds a motion resource other than its nullable "
+                "parameter - the runtime would follow it and charge the network "
+                "for the upscale, which is the opposite of the two-dispatch design")
         if not re.search(r"d\.renderSize\s*=\s*\{\s*work_w_,\s*work_h_\s*\}", up) or \
            not re.search(r"d\.upscaleSize\s*=\s*\{\s*out_w_,\s*out_h_\s*\}", up):
             failures.append(

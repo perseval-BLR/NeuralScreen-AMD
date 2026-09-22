@@ -56,6 +56,11 @@ struct AmdState
     amd_fsr::Upscaler fsr;
     //: The display-resolution surface FSR upscales into, at work != output.
     ID3D12Resource *up_out = nullptr;
+    //: The motion-vector surface dispatch B is handed under
+    //: NS_AMD_UPSCALE_MV=1, and null otherwise (the shipped arm). R16G16F at
+    //: the work extent, never written: B's motionVectorScale is {0, 0}, so the
+    //: runtime multiplies whatever it holds by zero. See AmdUpscaleMvArm.
+    ID3D12Resource *up_motion = nullptr;
     //: Set once the contexts exist for the current extents.
     bool fsr_ready = false;
     //: Frames the engine actually took (the runtime's own counter, read back
@@ -200,6 +205,8 @@ struct AmdState
     //: one-variable test whose arm is not named in the log is two runs that are
     //: secretly the same - the same reason NS_AMD_INTEROP announces itself.
     bool up_exposure_logged = false;
+    //: The same, for the upscale dispatch's motion-vector arm.
+    bool up_motion_logged = false;
 
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
@@ -534,8 +541,39 @@ struct AmdSurfaceSpec
     bool     is_half;       // 8-byte vs 4-byte pixel when computing the pitch
 };
 
+//: What the colour channels of a half-float surface ARE, counted from the raw
+//: bits, beside the mean.
+//:
+//: The mean cannot say it. AmdMeanFromHalf decodes NaN as 0 and infinity as 1
+//: so that one bad pixel cannot swallow the frame's number - which also means
+//: a surface full of NaN reads exactly 0.0000, the same as a black one, and a
+//: mean of 64,000 cannot say whether that is 98% of the pixels near the
+//: ceiling or a few at infinity. The flicker report rests on exactly those two
+//: readings (a hard 0.0000 on one machine, ~64,000 on the other), so they are
+//: counted here instead of inferred. The mean is left as it was, so a new log
+//: still compares with every old one.
+//:
+//: `huge` is a finite value at or above 1024 (exponent field >= 25): far above
+//: anything the pass produces in linear light, and it catches the ~64,000
+//: saturation without a float comparison.
+struct AmdSurfaceComposition
+{
+    uint64_t n = 0, nan = 0, inf = 0, zero = 0, huge = 0;
+};
+
+static void AmdClassifyHalf(uint16_t hv, AmdSurfaceComposition &c)
+{
+    const uint32_t expo = (uint32_t)(hv >> 10) & 0x1Fu;
+    const uint32_t mant = (uint32_t)hv & 0x3FFu;
+    ++c.n;
+    if (expo == 0x1F) { if (mant) ++c.nan; else ++c.inf; }
+    else if (expo == 0 && mant == 0) ++c.zero;      // +0 and -0
+    else if (expo >= 25) ++c.huge;
+}
+
 static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
-                             const AmdSurfaceSpec &spec, float *out_mean)
+                             const AmdSurfaceSpec &spec, float *out_mean,
+                             AmdSurfaceComposition *comp = nullptr)
 {
     if (src == nullptr || spec.w < 8 || spec.h < 8) return false;
     const UINT mw = spec.w, mh = spec.h;
@@ -728,6 +766,7 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
         }
         double sum = 0.0;
         uint64_t n = 0;
+        AmdSurfaceComposition counted;
         // The two formats need two readers: the dispatch surfaces are half
         // floats, the captured frame is 8-bit UNORM. Reading one as the other
         // would report a number that looks plausible and means nothing - the
@@ -741,7 +780,10 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
                 {
                     const uint16_t *px = row + (size_t)x * 4;
                     for (UINT c = 0; c < 3; ++c)          // colour only, like the engine
+                    {
                         sum += AmdMeanFromHalf(px[c]);
+                        AmdClassifyHalf(px[c], counted);
+                    }
                     n += 3;
                 }
             }
@@ -763,6 +805,9 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
         D3D12_RANGE none{ 0, 0 };
         g_amd.probe_rb->Unmap(0, &none);
         *out_mean = n ? (float)(sum / (double)n) : 0.0f;
+        // Only a half-float surface has these categories; an RGBA8 frame
+        // leaves the caller's struct untouched rather than reporting zeros.
+        if (comp != nullptr && spec.is_half) *comp = counted;
         ok = true;
     }
     return ok;
@@ -771,7 +816,7 @@ static bool AmdMeasureSurface(ID3D12Resource *src, D3D12_RESOURCE_STATES state,
 static void AmdReleaseResources()
 {
     auto drop = [](ID3D12Resource *&r) { if (r != nullptr) { r->Release(); r = nullptr; } };
-    drop(g_amd.net); drop(g_amd.fsr_in); drop(g_amd.up_out);
+    drop(g_amd.net); drop(g_amd.fsr_in); drop(g_amd.up_out); drop(g_amd.up_motion);
     drop(g_amd.probe_rb); g_amd.probe_pitch = 0;
     drop(g_amd.motion); drop(g_amd.depth); drop(g_amd.exposure);
     // The exposure staging goes with the texture it feeds: both are rebuilt
@@ -1316,6 +1361,33 @@ static float AmdExposureForEngine()
 // untouched. The comment was describing an operation that was never written;
 // corrected rather than implemented, because the host that produces a picture
 // does not do it either.
+// Whether dispatch B is handed a motion-vector surface (NS_AMD_UPSCALE_MV=1)
+// or null, which is what shipped. One variable, off by default.
+//
+// Why this is the variable: B's output alternates on both reporters' machines
+// with a flat input, and the pairs are complementary - the fraction of the
+// surface that is wrong on one frame is the fraction that is right on the next
+// (1664x936: 100% / 0%, 1792x1006: 75% / 25%, 2496x1356: 99.94% / 0.04%). So B
+// rewrites every pixel on every frame and the rewrite is wrong on alternate
+// frames. It fails the same way on an RX 9070 XT and on an RX 7900 XTX, whose
+// FFX upscaler DLL takes different paths, so the suspect is what WE hand B
+// rather than one implementation. Of B's inputs, the motion vectors are the one
+// ffx_upscale.h does not mark optional (exposure, reactive and transparency
+// are), and B passes null.
+//
+// What it costs: the runtime picks the dispatch it follows by "has motion
+// vectors bound", so with this arm on it may follow B instead of A, or both.
+// The runtime's own log says which (`staging ready: colour <out> ... motion
+// <work>` would be B), and that is a result, not a side effect to hide.
+static bool AmdUpscaleMvArm()
+{
+    static const bool on = [] {
+        char v[8] = {};
+        return GetEnvironmentVariableA("NS_AMD_UPSCALE_MV", v, sizeof(v)) > 0 && v[0] == '1';
+    }();
+    return on;
+}
+
 static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
 {
     if (g_amd.resources_ready && g_amd.net_w == net_w && g_amd.net_h == net_h &&
@@ -1376,8 +1448,17 @@ static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
         // frame's round trip returns it there.
         g_amd.up_out = AmdMakeTex(out_w, out_h, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS, true);
+    // B's own motion surface, under the arm only. At the work extent because B
+    // declares renderSize = work and its vectors are render-resolution (no
+    // display-resolution flag). Its own resource rather than `motion`: that
+    // one carries A's real vectors, and handing it to B would change what the
+    // vectors say as well as whether they exist - two variables.
+    if ((out_w != net_w || out_h != net_h) && AmdUpscaleMvArm())
+        g_amd.up_motion = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R16G16_FLOAT,
+                                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, true);
     if (g_amd.net == nullptr || g_amd.motion == nullptr || g_amd.fsr_in == nullptr ||
-        ((out_w != net_w || out_h != net_h) && g_amd.up_out == nullptr))
+        ((out_w != net_w || out_h != net_h) && g_amd.up_out == nullptr) ||
+        ((out_w != net_w || out_h != net_h) && AmdUpscaleMvArm() && g_amd.up_motion == nullptr))
     { Log("[amd] engine surface creation failed at %ux%u", net_w, net_h); AmdReleaseResources(); return false; }
     if (g_amd.depth == nullptr)
         g_amd.depth = AmdMakeTex(net_w, net_h, DXGI_FORMAT_R32_FLOAT,
@@ -1906,8 +1987,22 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
                             : "not bound (the default) - set "
                               "NS_AMD_UPSCALE_EXPOSURE=1 to test binding it");
         }
+        if (!g_amd.up_motion_logged)
+        {
+            g_amd.up_motion_logged = true;
+            Log("[amd] the upscale dispatch's motion vectors: %s",
+                g_amd.up_motion != nullptr
+                    ? "bound to a surface of its own at the work extent, scale 0 "
+                      "(NS_AMD_UPSCALE_MV=1) - the runtime may now follow this "
+                      "dispatch; its log's staging line says which it took"
+                    : "null (the default) - set NS_AMD_UPSCALE_MV=1 to test "
+                      "binding them");
+        }
+        // g_amd.up_motion is null unless the arm is on (it is only created
+        // under it), so the default call is the one that shipped.
         if (!g_amd.fsr.DispatchUpscale(h.list, g_amd.net, g_amd.depth,
                                        up_exposure ? g_amd.exposure : nullptr,
+                                       g_amd.up_motion,
                                        g_amd.up_out, frame_ms, reset != 0, why)) {
             Log("[amd] %s", why.c_str());
             ++g_amd.fsr_failures;
@@ -2039,8 +2134,9 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
                                          DXGI_FORMAT_R8G8B8A8_UNORM, false };
         const bool got_conv = AmdMeasureSurface(
             g_amd.fsr_in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, kNetSpec, &conv);
+        AmdSurfaceComposition net_comp, up_comp;
         const bool got_net = AmdMeasureSurface(
-            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kNetSpec, &netm);
+            g_amd.net, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, kNetSpec, &netm, &net_comp);
         const bool got_frame = v.color.tex != nullptr && AmdMeasureSurface(
             v.color.tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, kFrameSpec, &frame);
         // And the FOURTH: the surface the present actually copies from.
@@ -2082,7 +2178,7 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         const bool got_up = g_amd.fsr.Upscaling() && g_amd.up_out != nullptr &&
                             AmdMeasureSurface(
                                 g_amd.up_out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                kUpSpec, &upm);
+                                kUpSpec, &upm, &up_comp);
         if (got_up) g_amd.probe_up_mean = upm;
         if (got_out) g_amd.probe_out_mean = outm;
         if (got_conv) g_amd.probe_conv_mean = conv;
@@ -2130,6 +2226,25 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
                 "dispatch's %.4f) - the surface the composite reads when work != "
                 "display, and the one a 1:1 run does not create",
                 upm, got_net ? netm : -1.0f);
+        // What that mean is made of, with `net` beside it as the control: A
+        // writes `net` on every frame in the same submission, so a category
+        // that appears in the upscale's output and not in `net` was made by B.
+        // Percent of colour channels, from the raw bits (see
+        // AmdSurfaceComposition for why the mean cannot tell these apart).
+        if (got_up && up_comp.n > 0)
+        {
+            auto pct = [](uint64_t k, uint64_t n) {
+                return n ? 100.0 * (double)k / (double)n : -1.0;
+            };
+            Log("[amd] the upscale's own output, what it is made of: NaN %.3f%%, "
+                "inf %.3f%%, exact zero %.3f%%, finite >= 1024 %.3f%% | the "
+                "network surface (control): NaN %.3f%%, inf %.3f%%, exact zero "
+                "%.3f%%, finite >= 1024 %.3f%%",
+                pct(up_comp.nan, up_comp.n), pct(up_comp.inf, up_comp.n),
+                pct(up_comp.zero, up_comp.n), pct(up_comp.huge, up_comp.n),
+                pct(net_comp.nan, net_comp.n), pct(net_comp.inf, net_comp.n),
+                pct(net_comp.zero, net_comp.n), pct(net_comp.huge, net_comp.n));
+        }
     }
 
     // ---- the tick the engine needs ---------------------------------------

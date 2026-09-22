@@ -199,6 +199,7 @@ bool Upscaler::DispatchNet(ID3D12CommandList *list, ID3D12Resource *color,
 
 bool Upscaler::DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
                                ID3D12Resource *depth, ID3D12Resource *exposure,
+                               ID3D12Resource *motion,
                                ID3D12Resource *out,
                                float frame_ms, bool reset, std::string &why) {
     if (ctx_up_.handle == nullptr) { why = "no upscale context"; return false; }
@@ -208,9 +209,12 @@ bool Upscaler::DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
     d.commandList = list;
     d.color = ffxApiGetResourceDX12(net, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.depth = ffxApiGetResourceDX12(depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    // No motion vectors: this is how the runtime knows this dispatch is not
-    // the one to run the network on, so the network is not charged for it.
-    d.motionVectors = ffxApiGetResourceDX12(nullptr);
+    // No motion vectors by default: this is how the runtime knows this
+    // dispatch is not the one to run the network on, so the network is not
+    // charged for it. `motion` is null unless NS_AMD_UPSCALE_MV=1, and
+    // ffxApiGetResourceDX12(nullptr, COMPUTE_READ) is the same value the
+    // default argument gives, so the shipped arm is unchanged.
+    d.motionVectors = ffxApiGetResourceDX12(motion, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.output = ffxApiGetResourceDX12(out, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
     // The 1x1 exposure, or null. See the header for why this is a knob and
     // what measurement put it here: the field is optional in the API, so an

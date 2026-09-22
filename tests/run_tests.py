@@ -172,6 +172,8 @@ ABOUT = {
     "test_amd_framegen_refusal.py": "Frame Generation is refused on a Radeon at the one gate, logged, and shown as unavailable instead of offered",
     "test_probe_conditions.py": "the per-frame probe prints the condition its value was taken under",
     "test_upscale_exposure_knob.py": "the upscale exposure is one variable, off by default, and names its arm",
+    "test_amd_upscale_mv_knob.py": "the upscale's motion vectors are one nullable variable, created only under NS_AMD_UPSCALE_MV=1, and named",
+    "test_amd_probe_composition.py": "the probe counts NaN, infinity, exact zero and >= 1024 from the raw bits of the upscale output and net",
     "test_foreign_window_rule.py": "shell chrome and our own windows are not strangers that covered us",
     "test_probe_launcher.py": "the per-frame probe ships as a one-click launcher, so a reporter never sets the variable by hand",
     "test_reveal_below_panel.py": "the picture is shown below the panel in one guarded operation, not on top of it",
