@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.3.20"
+VERSION = "0.3.21"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
@@ -44,6 +44,9 @@ extra = [
     # what one reporter could not do and asked about twice. Named in the reply,
     # double-clicked: that is the whole instruction.
     "NeuralScreen-probe.vbs",
+    # The same probe with the one upscale arm under test (NS_AMD_UPSCALE_MV=1).
+    # A second double-click rather than a variable, for the same reason.
+    "NeuralScreen-probe-mv.vbs",
     "README.ru.md",
     "native/nvngx.dll",
     # The module the NGX calls leave from. Its file name is what the

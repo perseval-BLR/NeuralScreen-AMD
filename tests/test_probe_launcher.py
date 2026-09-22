@@ -43,11 +43,17 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
+#: Each launcher and the EXACT set of variables it sets. The probe-mv one sets
+#: two on purpose: the per-frame probe is the measurement and NS_AMD_UPSCALE_MV
+#: is the one arm under test, and an arm without the measurement says nothing.
+#: What stays banned is a launcher setting anything outside its own set.
 LAUNCHERS = {
-    "NeuralScreen.vbs": None,
-    "NeuralScreen-diag.vbs": "NS_PHASE",
-    "NeuralScreen-probe.vbs": "NS_AMD_PROBE_EACH",
+    "NeuralScreen.vbs": (),
+    "NeuralScreen-diag.vbs": ("NS_PHASE",),
+    "NeuralScreen-probe.vbs": ("NS_AMD_PROBE_EACH",),
+    "NeuralScreen-probe-mv.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV"),
 }
+ALL_VARS = sorted({v for vs in LAUNCHERS.values() for v in vs})
 BUILD = BASE / "build_release_zip.py"
 AUTOCHECK = BASE / "tests" / "autocheck.py"
 
@@ -56,7 +62,7 @@ def main() -> int:
     failures: list[str] = []
 
     # --- 1/2/5. each launcher sets its own variable, and only its own -------
-    for name, var in LAUNCHERS.items():
+    for name, want in LAUNCHERS.items():
         path = BASE / name
         if not path.is_file():
             failures.append(f"{name} is missing")
@@ -66,21 +72,16 @@ def main() -> int:
         # the Environment assignment itself, then compare the variable NAME.
         set_vars = re.findall(r'shell\.Environment\("Process"\)\("([^"]+)"\)\s*=\s*"1"',
                               src)
-        if var is None:
-            if set_vars:
-                failures.append(
-                    f"{name} is the plain launcher but sets {set_vars} - a "
-                    "diagnostic mode nobody asked for")
-        else:
-            if var not in set_vars:
-                failures.append(
-                    f"{name} does not set {var} - it is the whole reason the "
-                    f"file exists (sets: {set_vars or 'nothing'})")
-            extra = [v for v in set_vars if v != var]
-            if extra:
-                failures.append(
-                    f"{name} also sets {extra} - two diagnostic modes in one "
-                    "run make a log that says two things at once")
+        missing = [v for v in want if v not in set_vars]
+        if missing:
+            failures.append(
+                f"{name} does not set {missing} - that is the reason the file "
+                f"exists (sets: {set_vars or 'nothing'})")
+        extra = [v for v in set_vars if v not in want]
+        if extra:
+            failures.append(
+                f"{name} also sets {extra} - a mode nobody asked for, and a log "
+                "that says two things at once")
         # The pre-flight checks the other launchers carry.
         #
         # By MECHANISM, not by name: searching for the bare word "nvngx.dll"
@@ -107,10 +108,11 @@ def main() -> int:
     bridge = BASE / "native" / "amd" / "amd_bridge.inl"
     if bridge.is_file():
         b = bridge.read_text(encoding="utf-8", errors="replace")
-        if 'GetEnvironmentVariableA("NS_AMD_PROBE_EACH"' not in b:
-            failures.append(
-                "the bridge no longer reads NS_AMD_PROBE_EACH - the launcher "
-                "would set a variable nothing consumes")
+        for var in ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV"):
+            if f'GetEnvironmentVariableA("{var}"' not in b:
+                failures.append(
+                    f"the bridge no longer reads {var} - a launcher would set a "
+                    "variable nothing consumes")
 
     # --- 3/4. it ships, and the build fails without it ---------------------
     for path, label in ((BUILD, "build_release_zip.py"),
@@ -119,10 +121,11 @@ def main() -> int:
             failures.append(f"{label} is missing")
             continue
         src = path.read_text(encoding="utf-8", errors="replace")
-        if "NeuralScreen-probe.vbs" not in src:
-            failures.append(
-                f"{label} does not name NeuralScreen-probe.vbs - a launcher "
-                "the reporter cannot get is no answer")
+        for launcher in ("NeuralScreen-probe.vbs", "NeuralScreen-probe-mv.vbs"):
+            if f'"{launcher}"' not in src:
+                failures.append(
+                    f"{label} does not name {launcher} - a launcher the "
+                    "reporter cannot get is no answer")
 
     # --- 6. the variable actually REACHES the launched process ------------
     #
@@ -166,16 +169,14 @@ def behaviour() -> list:
             "import os, sys\n"
             "with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),\n"
             "                       'seen.txt'), 'w') as f:\n"
-            "    f.write(repr(os.environ.get('NS_AMD_PROBE_EACH')))\n"
-            "    f.write('|')\n"
-            "    f.write(repr(os.environ.get('NS_PHASE')))\n",
+            f"    f.write('|'.join(repr(os.environ.get(v)) for v in {ALL_VARS!r}))\n",
             encoding="utf-8", newline="")
 
         env = dict(os.environ)
         env["NEURALSCREEN_PYTHON"] = str(runtime)
-        # The parent must not carry either variable, or the child would inherit
+        # The parent must not carry any of them, or the child would inherit
         # it and this check would pass with the launcher doing nothing at all.
-        for var in ("NS_AMD_PROBE_EACH", "NS_PHASE"):
+        for var in ALL_VARS:
             env.pop(var, None)
 
         for name in LAUNCHERS:
@@ -197,10 +198,9 @@ def behaviour() -> list:
             if not seen.exists():
                 problems.append(f"{name} never started main.py")
                 continue
-            probe, phase = seen.read_text(encoding="utf-8").split("|", 1)
-            got = {"NS_AMD_PROBE_EACH": probe, "NS_PHASE": phase}
-            for var in ("NS_AMD_PROBE_EACH", "NS_PHASE"):
-                want = "'1'" if var == LAUNCHERS[name] else "None"
+            got = dict(zip(ALL_VARS, seen.read_text(encoding="utf-8").split("|")))
+            for var in ALL_VARS:
+                want = "'1'" if var in LAUNCHERS[name] else "None"
                 if got[var] != want:
                     problems.append(
                         f"{name}: the child inherited {var}={got[var]}, "

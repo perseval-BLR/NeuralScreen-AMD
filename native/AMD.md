@@ -217,6 +217,17 @@ diagnosis run, not for playing. The probe's lines land in `NeuralScreen.log`
 with everything else, so the usual **Create diagnostic package** button carries
 them.
 
+**If you were asked for the second run, with the motion-vector arm:**
+double-click **`NeuralScreen-probe-mv.vbs`**. It is `NeuralScreen-probe.vbs`
+plus `NS_AMD_UPSCALE_MV=1`: the FSR upscale dispatch (work to display) is
+handed a motion-vector surface of its own instead of none, with the vector
+scale left at zero, so the only thing that changes is whether one is bound.
+The log names the arm once (`the upscale dispatch's motion vectors: ...`).
+Because the runtime follows the dispatch that has motion vectors, this arm may
+make it follow the upscale instead; its own log's `staging ready` line says
+which one it took. Run it after a plain probe run with nothing else changed.
+
+
 **If the program disappears or the settings will not open:** that is a crash,
 not a silent exit, and the report says so. `NeuralScreen.log` gets a line like
 
