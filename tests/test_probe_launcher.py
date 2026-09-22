@@ -43,15 +43,18 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-#: Each launcher and the EXACT set of variables it sets. The probe-mv one sets
-#: two on purpose: the per-frame probe is the measurement and NS_AMD_UPSCALE_MV
-#: is the one arm under test, and an arm without the measurement says nothing.
+#: Each launcher and the EXACT set of variables it sets. The probe-private and
+#: probe-mv ones set more than one on purpose: the per-frame probe is the
+#: measurement, and the two differ from each other in exactly NS_AMD_UPSCALE_MV
+#: - the one arm under test, isolated from the runtime by NS_AMD_UPSCALE_PRIVATE.
 #: What stays banned is a launcher setting anything outside its own set.
 LAUNCHERS = {
     "NeuralScreen.vbs": (),
     "NeuralScreen-diag.vbs": ("NS_PHASE",),
     "NeuralScreen-probe.vbs": ("NS_AMD_PROBE_EACH",),
-    "NeuralScreen-probe-mv.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV"),
+    "NeuralScreen-probe-private.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_PRIVATE"),
+    "NeuralScreen-probe-mv.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_PRIVATE",
+                                  "NS_AMD_UPSCALE_MV"),
 }
 ALL_VARS = sorted({v for vs in LAUNCHERS.values() for v in vs})
 BUILD = BASE / "build_release_zip.py"
@@ -108,7 +111,7 @@ def main() -> int:
     bridge = BASE / "native" / "amd" / "amd_bridge.inl"
     if bridge.is_file():
         b = bridge.read_text(encoding="utf-8", errors="replace")
-        for var in ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV"):
+        for var in ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV", "NS_AMD_UPSCALE_PRIVATE"):
             if f'GetEnvironmentVariableA("{var}"' not in b:
                 failures.append(
                     f"the bridge no longer reads {var} - a launcher would set a "
@@ -121,7 +124,8 @@ def main() -> int:
             failures.append(f"{label} is missing")
             continue
         src = path.read_text(encoding="utf-8", errors="replace")
-        for launcher in ("NeuralScreen-probe.vbs", "NeuralScreen-probe-mv.vbs"):
+        for launcher in ("NeuralScreen-probe.vbs", "NeuralScreen-probe-private.vbs",
+                         "NeuralScreen-probe-mv.vbs"):
             if f'"{launcher}"' not in src:
                 failures.append(
                     f"{label} does not name {launcher} - a launcher the "

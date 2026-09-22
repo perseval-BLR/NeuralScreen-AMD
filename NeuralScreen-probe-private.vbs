@@ -1,20 +1,12 @@
-' NeuralScreen-probe-mv.vbs - the per-frame probe with the upscale's motion-vector arm,
-' run on a private copy of the upscaler
-' (NS_AMD_PROBE_EACH=1, NS_AMD_UPSCALE_PRIVATE=1, NS_AMD_UPSCALE_MV=1)
+' NeuralScreen-probe-private.vbs - the per-frame probe with the upscale on a
+' private copy of the upscaler (NS_AMD_PROBE_EACH=1, NS_AMD_UPSCALE_PRIVATE=1)
 '
-' Why: the upscale's output goes wrong on every other frame while its input
-' is flat, on two different Radeon generations, and the frame after a history
-' reset is always the first bad one. The motion vectors are the one input of
-' that dispatch the FidelityFX API does not mark optional, and it has always
-' been given none.
-'
-' v0.3.21 bound them on the shared upscaler, and the neural runtime - which
-' follows the dispatch that has motion vectors - went into a staging re-create
-' loop, so that run measured the loop as well as the vectors. Here the upscale
-' runs on a private copy of the same DLL that the runtime's hooks are not in,
-' and NeuralScreen-probe-private.vbs is the same without the vectors: the two
-' runs differ in exactly one thing. A test, not a fix. Slow picture, like the
-' other probe launchers: a diagnosis, not a way to play.
+' The control for NeuralScreen-probe-mv.vbs. The neural runtime hooks the
+' upscaler DLL it finds; here the upscale step runs on a second copy of the
+' same file that it never hooked, so the runtime does not see that dispatch at
+' all. Nothing else changes. If this run alone changes the flicker, the runtime
+' seeing the upscale was part of it; if not, the -mv run isolates the vectors.
+' A test, not a fix. Slow picture: a diagnosis, not a way to play.
 
 Option Explicit
 
@@ -82,14 +74,11 @@ End If
 ' its own startup, so it has to be in place before the worker is spawned.
 shell.Environment("Process")("NS_AMD_PROBE_EACH") = "1"
 
-' --- The arm under test: the upscale dispatch gets motion vectors ---
+' --- The arm under test: the upscale on a private copy of the upscaler ---
 '
-' Read by the worker once, when it first builds its surfaces. The worker's log
-' names the arm ("the upscale dispatch's motion vectors: bound ...").
-' The upscale on a private copy of the upscaler DLL, so the runtime never sees
-' it (the worker's log says whether the copy loaded).
+' The worker's log says whether the copy loaded ("the upscale dispatch's module:
+' ...").
 shell.Environment("Process")("NS_AMD_UPSCALE_PRIVATE") = "1"
-shell.Environment("Process")("NS_AMD_UPSCALE_MV") = "1"
 
 ' --- Launch with no window (window style 0), without waiting ---
 Dim extra, arg, q

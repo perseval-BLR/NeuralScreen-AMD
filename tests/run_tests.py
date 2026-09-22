@@ -173,6 +173,8 @@ ABOUT = {
     "test_probe_conditions.py": "the per-frame probe prints the condition its value was taken under",
     "test_upscale_exposure_knob.py": "the upscale exposure is one variable, off by default, and names its arm",
     "test_amd_upscale_mv_knob.py": "the upscale's motion vectors are one nullable variable, created only under NS_AMD_UPSCALE_MV=1, and named",
+    "test_amd_fsr_setup_watch.py": "each ffxCreateContext is named before and after, and a setup that stalls logs the step it is stuck in",
+    "test_amd_upscale_private_arm.py": "the upscale can run on a private copy of the upscaler, same file and name, only under NS_AMD_UPSCALE_PRIVATE=1, and the arm that ran is named",
     "test_amd_probe_composition.py": "the probe counts NaN, infinity, exact zero and >= 1024 from the raw bits of the upscale output and net",
     "test_foreign_window_rule.py": "shell chrome and our own windows are not strangers that covered us",
     "test_probe_launcher.py": "the per-frame probe ships as a one-click launcher, so a reporter never sets the variable by hand",

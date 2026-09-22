@@ -62,6 +62,11 @@ struct Context {
     void *handle = nullptr;
 };
 
+// Told the name of each step of the context setup, before it starts and after
+// it returns. This file has no log of its own; the worker passes a function
+// that writes the line and remembers the step for its stall watch.
+using StepFn = void (*)(const char *step);
+
 class Upscaler {
 public:
     ~Upscaler();
@@ -72,10 +77,33 @@ public:
 
     // Creates the two contexts. `upscaling` is false when work == output,
     // and then only the network context exists (there is nothing to scale).
+    // `step` may be null. When it is not, every ffxCreateContext call is
+    // bracketed by two calls naming it, so a setup that never returns (seen on
+    // an RX 9070 XT: the worker stopped between its surfaces and its contexts,
+    // six launches in a row) leaves the last step it entered in the log.
     bool CreateContexts(ID3D12Device *device, UINT work_w, UINT work_h,
-                        UINT out_w, UINT out_h, std::string &why);
+                        UINT out_w, UINT out_h, std::string &why,
+                        StepFn step = nullptr);
 
     void ReleaseContexts();
+
+    // Dispatch B on a module of its own (NS_AMD_UPSCALE_PRIVATE=1). The runtime
+    // hooks ffxCreateContext/ffxDispatch in the upscaler module it found, and
+    // picks the dispatch it processes by "has motion vectors" - so B with
+    // vectors on the SHARED module put it into a staging re-create loop (80
+    // re-creations, 4 network jobs on a 7900 XTX), and the motion-vector test
+    // measured that loop as well as the vectors. A second copy of the same
+    // file, loaded from a private folder, is a separate image the hooks were
+    // never installed in, so B can carry vectors without the runtime seeing it.
+    //
+    // Same file name on purpose, only the folder differs: a driver that
+    // recognises the upscaler by name would otherwise run B down a different
+    // path and the arm would change two things. Must be called after Load.
+    // Returns false (and B stays on the shared module) when the copy cannot be
+    // made or the loader hands back the shared module.
+    bool LoadPrivateB(std::string &why);
+    bool PrivateB() const { return private_b_; }
+    const std::wstring &PrivateBPath() const { return private_b_path_; }
 
     bool Ready() const { return api_.module != nullptr; }
     bool ContextsReady() const { return ctx_net_.handle != nullptr; }
@@ -130,7 +158,14 @@ public:
                          float frame_ms, bool reset, std::string &why);
 
 private:
+    // The module B's context is created, dispatched and destroyed through:
+    // the private copy under the arm, the shared module otherwise.
+    const Api &ApiB() const { return private_b_ ? api_b_ : api_; }
+
     Api api_;
+    Api api_b_;          // the private copy, when LoadPrivateB succeeded
+    bool private_b_ = false;
+    std::wstring private_b_path_;
     Context ctx_net_;    // A
     Context ctx_up_;     // B
     bool upscaling_ = false;

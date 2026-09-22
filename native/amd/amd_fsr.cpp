@@ -79,8 +79,72 @@ bool Upscaler::Load(const std::wstring &dir, std::string &why) {
     return true;
 }
 
+bool Upscaler::LoadPrivateB(std::string &why) {
+    if (private_b_) return true;
+    if (api_.module == nullptr) { why = "the shared upscaler is not loaded"; return false; }
+
+    // The file the shared module was loaded from - the one to copy, so both
+    // modules are byte-identical and differ only in which image the hooks are in.
+    wchar_t src[MAX_PATH] = {};
+    const DWORD n = GetModuleFileNameW(static_cast<HMODULE>(api_.module), src, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) { why = "cannot read the shared upscaler's path"; return false; }
+
+    wchar_t tmp[MAX_PATH] = {};
+    const DWORD tn = GetTempPathW(MAX_PATH, tmp);
+    if (tn == 0 || tn >= MAX_PATH) { why = "no temp folder"; return false; }
+    const std::wstring dir = std::wstring(tmp) + L"NeuralScreen-AMD-upscale-b";
+    CreateDirectoryW(dir.c_str(), nullptr);   // an existing folder is fine
+    const std::wstring dst = dir + L"\\" + kUpscalerName;
+
+    // A copy left by an earlier run may be locked by a process still holding
+    // it; that copy is reused only if it is the same size as the source.
+    if (!CopyFileW(src, dst.c_str(), FALSE)) {
+        WIN32_FILE_ATTRIBUTE_DATA a{}, b{};
+        if (!GetFileAttributesExW(src, GetFileExInfoStandard, &a) ||
+            !GetFileAttributesExW(dst.c_str(), GetFileExInfoStandard, &b) ||
+            a.nFileSizeLow != b.nFileSizeLow || a.nFileSizeHigh != b.nFileSizeHigh) {
+            why = "cannot copy the upscaler to the private folder (error " +
+                  std::to_string(GetLastError()) + ")";
+            return false;
+        }
+    }
+
+    // A full path: the loader then maps this file as its own image even though
+    // a module of the same name is already loaded.
+    HMODULE mod = LoadLibraryExW(dst.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (mod == nullptr) {
+        why = "the private copy did not load (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    if (mod == static_cast<HMODULE>(api_.module)) {
+        // The loader resolved it to the module already mapped: B would be on
+        // the hooked image after all, and the arm would be a lie.
+        why = "the loader returned the shared module instead of a second image";
+        return false;
+    }
+    Api b;
+    b.create = reinterpret_cast<int (*)(void **, void *, const void *)>(
+        GetProcAddress(mod, "ffxCreateContext"));
+    b.dispatch = reinterpret_cast<int (*)(void **, const void *)>(
+        GetProcAddress(mod, "ffxDispatch"));
+    b.destroy = reinterpret_cast<int (*)(void **, const void *)>(
+        GetProcAddress(mod, "ffxDestroyContext"));
+    if (b.create == nullptr || b.dispatch == nullptr || b.destroy == nullptr) {
+        why = "the private copy has no FFX entry points";
+        return false;
+    }
+    // Pinned like the shared module (see the destructor): never unloaded.
+    b.module = mod;
+    api_b_ = b;
+    private_b_ = true;
+    private_b_path_ = dst;
+    return true;
+}
+
 bool Upscaler::CreateContexts(ID3D12Device *device, UINT work_w, UINT work_h,
-                              UINT out_w, UINT out_h, std::string &why) {
+                              UINT out_w, UINT out_h, std::string &why,
+                              StepFn step) {
+    const auto say = [step](const char *s) { if (step != nullptr) step(s); };
     if (!Ready()) { why = "the upscaler is not loaded"; return false; }
     if (ctx_net_.handle != nullptr) return true;   // already built
 
@@ -118,7 +182,9 @@ bool Upscaler::CreateContexts(ID3D12Device *device, UINT work_w, UINT work_h,
     net_desc.maxUpscaleSize = { work_w, work_h };
 
     const auto create_fn = reinterpret_cast<CreateFn>(api_.create);
+    say("ffxCreateContext for the network dispatch (A): calling");
     ffxReturnCode_t rc = create_fn(AsCtx(&ctx_net_.handle), &net_desc.header, nullptr);
+    say("ffxCreateContext for the network dispatch (A): returned");
     if (rc != FFX_API_RETURN_OK) {
         ctx_net_.handle = nullptr;
         why = "ffxCreateContext (network) returned " + std::to_string(static_cast<int>(rc));
@@ -135,7 +201,13 @@ bool Upscaler::CreateContexts(ID3D12Device *device, UINT work_w, UINT work_h,
         up_desc.flags = net_desc.flags;
         up_desc.maxRenderSize = { work_w, work_h };
         up_desc.maxUpscaleSize = { out_w, out_h };
-        rc = create_fn(AsCtx(&ctx_up_.handle), &up_desc.header, nullptr);
+        // B through ApiB(): the private copy under NS_AMD_UPSCALE_PRIVATE=1,
+        // the shared module otherwise (then this is create_fn, as shipped).
+        const auto create_b = reinterpret_cast<CreateFn>(ApiB().create);
+        say(private_b_ ? "ffxCreateContext for the upscale dispatch (B, private module): calling"
+                       : "ffxCreateContext for the upscale dispatch (B): calling");
+        rc = create_b(AsCtx(&ctx_up_.handle), &up_desc.header, nullptr);
+        say("ffxCreateContext for the upscale dispatch (B): returned");
         if (rc != FFX_API_RETURN_OK) {
             ctx_up_.handle = nullptr;
             why = "ffxCreateContext (upscale) returned " + std::to_string(static_cast<int>(rc));
@@ -149,7 +221,9 @@ void Upscaler::ReleaseContexts() {
     if (api_.module == nullptr) return;
     const auto destroy_fn = reinterpret_cast<DestroyFn>(api_.destroy);
     if (ctx_net_.handle != nullptr) { destroy_fn(AsCtx(&ctx_net_.handle), nullptr); ctx_net_.handle = nullptr; }
-    if (ctx_up_.handle != nullptr) { destroy_fn(AsCtx(&ctx_up_.handle), nullptr); ctx_up_.handle = nullptr; }
+    // B is destroyed by the module that created it.
+    const auto destroy_b = reinterpret_cast<DestroyFn>(ApiB().destroy);
+    if (ctx_up_.handle != nullptr) { destroy_b(AsCtx(&ctx_up_.handle), nullptr); ctx_up_.handle = nullptr; }
 }
 
 bool Upscaler::DispatchNet(ID3D12CommandList *list, ID3D12Resource *color,
@@ -235,7 +309,7 @@ bool Upscaler::DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
     d.cameraFovAngleVertical = 1.0f;
     d.viewSpaceToMetersFactor = 1.0f;
 
-    const auto dispatch_fn = reinterpret_cast<DispatchFn>(api_.dispatch);
+    const auto dispatch_fn = reinterpret_cast<DispatchFn>(ApiB().dispatch);
     const ffxReturnCode_t rc = dispatch_fn(AsCtx(&ctx_up_.handle), &d.header);
     if (rc != FFX_API_RETURN_OK) {
         why = "ffxDispatch (upscale) returned " + std::to_string(static_cast<int>(rc));

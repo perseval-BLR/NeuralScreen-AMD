@@ -1388,6 +1388,20 @@ static bool AmdUpscaleMvArm()
     return on;
 }
 
+// Whether dispatch B runs on a private copy of the upscaler module
+// (NS_AMD_UPSCALE_PRIVATE=1) or on the one the runtime hooked, which is what
+// shipped. One variable, off by default. See Upscaler::LoadPrivateB for why:
+// with B visible, binding its motion vectors put the runtime into a staging
+// re-create loop, so that test measured the loop as well as the vectors.
+static bool AmdUpscalePrivateArm()
+{
+    static const bool on = [] {
+        char v[8] = {};
+        return GetEnvironmentVariableA("NS_AMD_UPSCALE_PRIVATE", v, sizeof(v)) > 0 && v[0] == '1';
+    }();
+    return on;
+}
+
 static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
 {
     if (g_amd.resources_ready && g_amd.net_w == net_w && g_amd.net_h == net_h &&
@@ -1612,6 +1626,45 @@ static void AmdEngineInitSettled()
     Log("[amd] the retry could not be made (the engine refused the init call)");
 }
 
+// The FSR context setup, step by step, and a watch for a step that never
+// returns.
+//
+// An RX 9070 XT on v0.3.21 stopped six launches in a row between "engine
+// surfaces" and "FSR contexts": no frame, no error, and ten seconds later the
+// program killed the worker. From the log alone the stop could only be
+// narrowed to two calls, and one of them loads a component of the driver. So
+// each ffxCreateContext is named before and after (AmdFsrStep), and a second
+// thread writes the step that is still open if the setup has not returned
+// within kFsrStallMs - well inside the time after which the worker is killed,
+// so the line reaches the log. The watch only reads a pointer and writes a
+// log line; it never touches the setup, and it exits as soon as the setup
+// returns.
+static const DWORD kFsrStallMs = 4000;
+static PVOID volatile g_fsr_step = nullptr;   // a const char *, the open step
+
+static void AmdFsrStep(const char *step)
+{
+    InterlockedExchangePointer(&g_fsr_step, const_cast<char *>(step));
+    Log("[amd] FSR setup: %s", step);
+}
+
+struct AmdStallWatch { HANDLE done; DWORD ms; };
+
+static DWORD WINAPI AmdStallWatchThread(void *p)
+{
+    const AmdStallWatch *w = static_cast<const AmdStallWatch *>(p);
+    if (WaitForSingleObject(w->done, w->ms) == WAIT_TIMEOUT)
+    {
+        const char *open = static_cast<const char *>(
+            InterlockedCompareExchangePointer(&g_fsr_step, nullptr, nullptr));
+        Log("[amd] the FSR context setup has not returned after %lu ms - still in: "
+            "%s (the worker is blocked inside the FidelityFX upscaler or a driver "
+            "component it loads; nothing after this line comes from that thread)",
+            static_cast<unsigned long>(w->ms), open != nullptr ? open : "no step yet");
+    }
+    return 0;
+}
+
 static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
 {
     if (submitted) *submitted = 0;
@@ -1679,7 +1732,19 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
     // and the log says which.
     if (!g_amd.fsr.ContextsReady()) {
         std::string why;
-        if (!g_amd.fsr.CreateContexts(h.dev, nw, nh, cw, ch, why)) {
+        // The watch lives exactly as long as the call: the event is set and
+        // the thread joined before this block leaves, so it never outlives
+        // the struct it reads. If the call never returns, neither does this
+        // frame, and the struct stays valid for the watch's one log line.
+        AmdStallWatch watch{ CreateEventW(nullptr, TRUE, FALSE, nullptr), kFsrStallMs };
+        HANDLE watcher = watch.done != nullptr
+            ? CreateThread(nullptr, 0, AmdStallWatchThread, &watch, 0, nullptr)
+            : nullptr;
+        const bool made = g_amd.fsr.CreateContexts(h.dev, nw, nh, cw, ch, why, AmdFsrStep);
+        if (watch.done != nullptr) SetEvent(watch.done);
+        if (watcher != nullptr) { WaitForSingleObject(watcher, INFINITE); CloseHandle(watcher); }
+        if (watch.done != nullptr) CloseHandle(watch.done);
+        if (!made) {
             Log("[amd] the FidelityFX contexts could not be created: %s", why.c_str());
             g_amd.failed = true;
             return false;
@@ -2665,6 +2730,28 @@ static bool AmdInit()
             return false;
         }
         Log("[amd] FidelityFX upscaler loaded (the dispatch the engine follows)");
+        // One variable, off by default, and the log says which arm RAN - not
+        // which was asked for: a copy that failed to load leaves B on the
+        // shared module, and a run that believes otherwise measures nothing.
+        if (AmdUpscalePrivateArm())
+        {
+            std::string pwhy;
+            if (g_amd.fsr.LoadPrivateB(pwhy))
+                Log("[amd] the upscale dispatch's module: a private copy (%ls) "
+                    "that the runtime's hooks are not in (NS_AMD_UPSCALE_PRIVATE=1) "
+                    "- its log should no longer say it is ignoring a dispatch "
+                    "without motion vectors",
+                    g_amd.fsr.PrivateBPath().c_str());
+            else
+                Log("[amd] the upscale dispatch's module: NS_AMD_UPSCALE_PRIVATE=1 "
+                    "was asked for and did NOT take effect (%s) - B runs on the "
+                    "shared module, so this run is the default arm",
+                    pwhy.c_str());
+        }
+        else
+            Log("[amd] the upscale dispatch's module: shared with the network "
+                "dispatch (the default) - set NS_AMD_UPSCALE_PRIVATE=1 to hide it "
+                "from the runtime");
     }
 
     // The index the loader resolved, kept for the engine-init retry. Both

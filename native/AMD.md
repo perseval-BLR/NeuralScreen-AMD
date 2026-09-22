@@ -217,15 +217,29 @@ diagnosis run, not for playing. The probe's lines land in `NeuralScreen.log`
 with everything else, so the usual **Create diagnostic package** button carries
 them.
 
-**If you were asked for the second run, with the motion-vector arm:**
-double-click **`NeuralScreen-probe-mv.vbs`**. It is `NeuralScreen-probe.vbs`
-plus `NS_AMD_UPSCALE_MV=1`: the FSR upscale dispatch (work to display) is
-handed a motion-vector surface of its own instead of none, with the vector
-scale left at zero, so the only thing that changes is whether one is bound.
-The log names the arm once (`the upscale dispatch's motion vectors: ...`).
-Because the runtime follows the dispatch that has motion vectors, this arm may
-make it follow the upscale instead; its own log's `staging ready` line says
-which one it took. Run it after a plain probe run with nothing else changed.
+**If you were asked for the follow-up runs:** double-click
+**`NeuralScreen-probe-private.vbs`**, then **`NeuralScreen-probe-mv.vbs`**,
+each after a plain `NeuralScreen-probe.vbs` run with nothing else changed.
+
+- `-private` is the probe plus `NS_AMD_UPSCALE_PRIVATE=1`: the FSR upscale
+  dispatch (work to display) runs on a second copy of the same upscaler DLL,
+  loaded from a private temp folder, whose code the runtime never hooked - so
+  the runtime does not see that dispatch at all. The log says whether the copy
+  loaded (`the upscale dispatch's module: ...`); if it did, the runtime's own
+  log no longer says it is ignoring a dispatch without motion vectors.
+- `-mv` adds `NS_AMD_UPSCALE_MV=1` on top: the upscale is handed a
+  motion-vector surface of its own, with the vector scale at zero, so the two
+  runs differ in exactly whether one is bound. In v0.3.21 this launcher bound
+  them on the shared DLL, and the runtime - which follows the dispatch that has
+  motion vectors - went into a staging re-create loop; the private copy is what
+  keeps it out of this test.
+
+**If the program stops before the first frame** (the log ends after
+`engine surfaces at ...` and the worker is restarted): the log now names each
+step of the FSR setup (`FSR setup: ffxCreateContext for ... calling` /
+`returned`), and if a step has not returned after 4 s it says which one is
+still open. Send that log; the last `calling` line without its `returned` is
+the place.
 
 
 **If the program disappears or the settings will not open:** that is a crash,
