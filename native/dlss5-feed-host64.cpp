@@ -2766,6 +2766,42 @@ static void FollowCapturedWindow()
 // answer is yes (both our windows are topmost), so this is zero
 // SetWindowPos calls and no DWM flicker. A borderless game (Cyberpunk)
 // keeps itself on top and would hide the picture forever without this.
+//
+// The shell's own process, asked for once. A taskbar, its flyouts and the
+// desktop are the shell, not a window that took our place.
+//
+// By PROCESS, not by a class list: the flyouts above the taskbar
+// (XamlExplorerHostIslandWindow) are not Shell_TrayWnd, so a list would have to
+// name every one of them and would be wrong again at the next Windows update.
+// Measured on the desktop build: the taskbar raises the picture over the panel
+// and the panel's own guard puts it back 4-25 ms later - one DWM recompose per
+// taskbar use, which is the flash users report.
+static HWND HudWindow();   // defined below; the pid of the panel is its owner
+
+static DWORD ShellProcessId()
+{
+    static DWORD cached = 0;
+    if (cached != 0) return cached;
+    const HWND shell = GetShellWindow();
+    DWORD pid = 0;
+    if (shell != nullptr) GetWindowThreadProcessId(shell, &pid);
+    cached = pid;
+    return pid;
+}
+
+// The process that owns the panel - the client. Its own dialogs and helpers are
+// part of the program the user is driving, not a window that covered us: while
+// our own Save As dialog is open the user is looking at the dialog, and raising
+// the picture over it is a recompose nobody asked for.
+static DWORD HudProcessId()
+{
+    const HWND hud = HudWindow();
+    if (hud == nullptr) return 0;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hud, &pid);
+    return pid;
+}
+
 static void ReassertPresentTopmost()
 {
     if (g_present_hwnd == nullptr) return;
@@ -2786,6 +2822,35 @@ static void ReassertPresentTopmost()
     RECT r;
     if (GetWindowRect(top, &r) && r.right == r.left && r.bottom == r.top)
         return;  // zero-sized (IME, helpers) cannot cover the picture
+    if (!IsWindowVisible(top))
+        return;  // a hidden window cannot cover anything either
+    // Whose window is this? The shell's and the client's own are the desktop
+    // and the program we draw over, not a window that took our place. Without
+    // this the taskbar, its flyouts and our own dialogs each raise the picture
+    // and the client raises the panel back - two SetWindowPos on a state that
+    // was already correct, which is one DWM recompose and reads as a flash.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(top, &pid);
+    const DWORD shell = ShellProcessId();
+    const DWORD client = HudProcessId();
+    const uint32_t self = static_cast<uint32_t>(GetCurrentProcessId());
+    if (pid != 0 && ((shell != 0 && pid == shell) || pid == self ||
+                     (client != 0 && pid == client)))
+    {
+        // Said ONCE per reason, not every 300 frames: a user's log is read by a
+        // person, and this state persists for as long as the taskbar is being
+        // used or a dialog is open.
+        static DWORD last_skip_pid = 0;
+        if (pid != last_skip_pid)
+        {
+            last_skip_pid = pid;
+            Log("[z] present left as is: the top window belongs to %s (pid=%lu) - "
+                "the picture is not raised over the shell or our own program",
+                pid == self ? "this process" : (pid == shell ? "the shell" : "the client"),
+                static_cast<unsigned long>(pid));
+        }
+        return;
+    }
     SetWindowPos(g_present_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }

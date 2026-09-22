@@ -183,6 +183,23 @@ struct AmdState
     //: `net` instead - so the one variable that changed in that test is the
     //: existence of this surface. It is the last unmeasured link.
     float probe_up_mean = -1.0f;
+    //: How many of the probed frames were RESET frames, and how many were
+    //: measured while the upscale existed. Without these, a per-frame line
+    //: cannot be read at all: a value that moves is the whole question, and a
+    //: reset frame or a 1:1 pass is a legitimate reason for it to move. The
+    //: probe printed the value but never the condition it was taken under, so
+    //: a reader could not tell a real alternation from a history reset - the
+    //: instrument answered with one hand and withheld the other.
+    uint64_t probe_reset_frames = 0;
+    uint64_t probe_upscale_frames = 0;
+    //: The last `reset` the dispatch was handed, so the per-frame line can
+    //: carry it: the flag is decided per frame in the host and never reached
+    //: the log at all.
+    int probe_last_reset = -1;
+    //: The upscale dispatch's exposure arm, said out loud once per run. A
+    //: one-variable test whose arm is not named in the log is two runs that are
+    //: secretly the same - the same reason NS_AMD_INTEROP announces itself.
+    bool up_exposure_logged = false;
 
     // The frame's start, read by AmdFrameAccounting. Kept in the state rather
     // than a local because the frame now has two exits and both count.
@@ -1059,6 +1076,19 @@ static void AmdEngineHealth()
             "above come from the passes that succeeded, not from every frame",
             static_cast<unsigned long long>(g_amd.probe_failed),
             static_cast<unsigned long long>(g_amd.probe_frames));
+    // The conditions the means above were taken under, counted for the whole
+    // session rather than per frame. A reset frame legitimately moves every
+    // surface in the chain, and at 1:1 the upscale does not exist: a reader
+    // comparing a mean against a picture needs both totals before treating a
+    // moving value as a defect. Printed only when the probe actually ran.
+    if (g_amd.probe_frames != 0)
+        Log("[amd] probe conditions: %llu of %llu passes were reset frames, "
+            "%llu had the upscale in the path - the means above are from all of "
+            "them, so a value that moves in step with these totals is not an "
+            "alternation",
+            static_cast<unsigned long long>(g_amd.probe_reset_frames),
+            static_cast<unsigned long long>(g_amd.probe_frames),
+            static_cast<unsigned long long>(g_amd.probe_upscale_frames));
     const std::string jobs = last_with("network job");
     if (!jobs.empty()) Log("[amd] the engine's last job: %s", jobs.c_str());
     const std::string frames = last_with("frames ");
@@ -1859,7 +1889,25 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         // up_out needs nothing before the dispatch: it is already writable, and
         // that is what the dispatch declares for its output.
         std::string why;
+        // One variable, one arm. See the header: binding the exposure B has
+        // never been given is a hypothesis with a measurement behind it, so
+        // it stays OFF unless asked for, and the log says which arm ran.
+        static const bool up_exposure = [] {
+            char v[8] = {};
+            return GetEnvironmentVariableA("NS_AMD_UPSCALE_EXPOSURE", v, sizeof(v)) > 0
+                   && v[0] == '1';
+        }();
+        if (!g_amd.up_exposure_logged)
+        {
+            g_amd.up_exposure_logged = true;
+            Log("[amd] the upscale dispatch's exposure: %s",
+                up_exposure ? "bound to the same 1x1 surface as dispatch A "
+                              "(NS_AMD_UPSCALE_EXPOSURE=1)"
+                            : "not bound (the default) - set "
+                              "NS_AMD_UPSCALE_EXPOSURE=1 to test binding it");
+        }
         if (!g_amd.fsr.DispatchUpscale(h.list, g_amd.net, g_amd.depth,
+                                       up_exposure ? g_amd.exposure : nullptr,
                                        g_amd.up_out, frame_ms, reset != 0, why)) {
             Log("[amd] %s", why.c_str());
             ++g_amd.fsr_failures;
@@ -2041,6 +2089,13 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         if (got_net)  g_amd.probe_net_mean = netm;
         if (got_frame) g_amd.probe_frame_mean = frame;
         ++g_amd.probe_frames;
+        // The CONDITION the values above were taken under. Counted here and
+        // printed with the per-frame line, because a mean that moves is the
+        // question being asked and these are the two legitimate reasons for it
+        // to move: a reset frame, and a pass where the upscale does not exist.
+        g_amd.probe_last_reset = reset;
+        if (reset) ++g_amd.probe_reset_frames;
+        if (g_amd.fsr.Upscaling() && g_amd.up_out != nullptr) ++g_amd.probe_upscale_frames;
         if (!got_conv || !got_net) ++g_amd.probe_failed;
         if (got_conv && got_net)
             Log("[amd] what WE hand over: converted input mean %.4f, dispatch output "
@@ -2055,11 +2110,15 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
                 got_net ? "measured" : "not measured");
         // Its own line, because it is the one that answers a per-frame
         // alternation: the values above can be steady while this one is not.
+        // The trailing flag is the CONDITION, not decoration: without it a
+        // reader cannot tell an alternation from a history reset, and the
+        // question this line exists to answer would be unanswerable from it.
         if (got_out)
             Log("[amd] the presented surface, this frame: mean %.4f (native anchor "
-                "%.4f) - a value that alternates frame to frame here is the "
-                "reporter's two states",
-                outm, got_frame ? frame : -1.0f);
+                "%.4f) reset=%d upscale=%s - a value that alternates frame to frame "
+                "here is the reporter's two states",
+                outm, got_frame ? frame : -1.0f, reset,
+                (g_amd.fsr.Upscaling() && g_amd.up_out != nullptr) ? "on" : "off");
         // The upscale's own output, on its own line and in its own place in the
         // chain: it sits BETWEEN the dispatch and the composite, so a value that
         // alternates here with a steady `net` puts the fault in the FSR pass,

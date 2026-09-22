@@ -102,8 +102,23 @@ public:
     // Dispatch B: plain FSR upscale from the network's output to the display
     // resolution, deliberately without motion vectors so the runtime leaves
     // it alone. Only meaningful when Upscaling().
+    //
+    // `exposure` is the SAME 1x1 surface A is handed, and it is a parameter
+    // rather than null for one measured reason. The fifth probe run (22.09)
+    // showed B's output saturated at ~64,000 of a 65,504 half-float ceiling on
+    // every bright frame while its input - A's output - stayed at 0.10-0.42 on
+    // both the bright and the dark frames. So the corruption is made inside B,
+    // and the one field A fills that B does not is this one.
+    //
+    // It is passed as a nullable knob (`NS_AMD_UPSCALE_EXPOSURE=1`), default
+    // off: the field is documented optional and B carries `preExposure = 1.0`,
+    // so binding it is a hypothesis with a measurement behind it, not a proven
+    // fix. The default stays exactly as it shipped until a reporter's frame
+    // says otherwise - a guess that silently changes the picture for everyone
+    // is how a one-variable test turns into a regression.
     bool DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
-                         ID3D12Resource *depth, ID3D12Resource *out,
+                         ID3D12Resource *depth, ID3D12Resource *exposure,
+                         ID3D12Resource *out,
                          float frame_ms, bool reset, std::string &why);
 
 private:

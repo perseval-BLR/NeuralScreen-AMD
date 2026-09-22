@@ -198,7 +198,8 @@ bool Upscaler::DispatchNet(ID3D12CommandList *list, ID3D12Resource *color,
 }
 
 bool Upscaler::DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
-                               ID3D12Resource *depth, ID3D12Resource *out,
+                               ID3D12Resource *depth, ID3D12Resource *exposure,
+                               ID3D12Resource *out,
                                float frame_ms, bool reset, std::string &why) {
     if (ctx_up_.handle == nullptr) { why = "no upscale context"; return false; }
 
@@ -211,6 +212,11 @@ bool Upscaler::DispatchUpscale(ID3D12CommandList *list, ID3D12Resource *net,
     // the one to run the network on, so the network is not charged for it.
     d.motionVectors = ffxApiGetResourceDX12(nullptr);
     d.output = ffxApiGetResourceDX12(out, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    // The 1x1 exposure, or null. See the header for why this is a knob and
+    // what measurement put it here: the field is optional in the API, so an
+    // unset one is legal for both arms of the test - which is exactly what
+    // makes it usable as one variable.
+    d.exposure = ffxApiGetResourceDX12(exposure, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.jitterOffset = { 0.0f, 0.0f };
     d.motionVectorScale = { 0.0f, 0.0f };
     d.renderSize = { work_w_, work_h_ };
