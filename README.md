@@ -16,6 +16,7 @@
 > The logs are written always, with nothing to turn on: every refusal names
 > itself (`native/AMD.md` explains each line), and even "nothing worked" is a
 > result - the log shows exactly where it stopped.
+> **Flicker, and asked to run the per-frame probe?** Double-click **`NeuralScreen-probe.vbs`** beside the program instead of the usual launcher: the surface probe is then read on *every* frame instead of every 300th, which is what a short diagnostic run needs. The picture runs slowly while it does (a full GPU-to-CPU readback), so it is one diagnosis run, not a way to play; the lines land in `NeuralScreen.log` and the usual package carries them.
 
 **The aim: DLSS 5-class neural rendering on an AMD Radeon, over the whole
 Windows desktop.** The network is the same one DLSS 5 games use; on a Radeon

@@ -207,6 +207,16 @@ never appears.
 What it does not do: it never uploads anything by itself. The ZIP lands in a
 `diagnostics` folder next to the program and stays there until you send it.
 
+**If you were asked to run the per-frame probe:** double-click
+**`NeuralScreen-probe.vbs`** in the program folder instead of the usual
+launcher. It starts the program with the surface probe read on *every* frame
+rather than every 300th, which is what a short diagnostic run needs - at one
+read per 300 frames a 200-frame run never fires once. The picture runs slowly
+while it does this (the readback is a full GPU-to-CPU sync), so it is for one
+diagnosis run, not for playing. The probe's lines land in `NeuralScreen.log`
+with everything else, so the usual **Create diagnostic package** button carries
+them.
+
 **If the program disappears or the settings will not open:** that is a crash,
 not a silent exit, and the report says so. `NeuralScreen.log` gets a line like
 
