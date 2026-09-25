@@ -55,6 +55,7 @@ LAUNCHERS = {
     "NeuralScreen-probe-private.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_PRIVATE"),
     "NeuralScreen-probe-mv.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_PRIVATE",
                                   "NS_AMD_UPSCALE_MV"),
+    "NeuralScreen-probe-mv-shared.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV"),
 }
 ALL_VARS = sorted({v for vs in LAUNCHERS.values() for v in vs})
 BUILD = BASE / "build_release_zip.py"
@@ -63,6 +64,24 @@ AUTOCHECK = BASE / "tests" / "autocheck.py"
 
 def main() -> int:
     failures: list[str] = []
+
+    # --- 0. the set is the DISK's set --------------------------------------
+    #
+    # Everything below iterates LAUNCHERS, so a launcher added to the project
+    # and not added here is a file no check ever touches - which is how the
+    # isolation launcher came in: the suite was green while it was untested, and
+    # only the mutation run showed it (dropping it from this table changed
+    # nothing). Read the directory instead: every launcher that ships must be
+    # listed, and every listed one must exist.
+    on_disk = {p.name for p in BASE.glob("NeuralScreen*.vbs")}
+    unlisted = sorted(on_disk - set(LAUNCHERS))
+    if unlisted:
+        failures.append(
+            f"launcher(s) on disk and not in this test: {unlisted} - an entry "
+            "here is what makes the checks below run against them")
+    absent = sorted(set(LAUNCHERS) - on_disk)
+    if absent:
+        failures.append(f"listed but missing from disk: {absent}")
 
     # --- 1/2/5. each launcher sets its own variable, and only its own -------
     for name, want in LAUNCHERS.items():
@@ -118,18 +137,25 @@ def main() -> int:
                     "variable nothing consumes")
 
     # --- 3/4. it ships, and the build fails without it ---------------------
+    #
+    # The list comes from LAUNCHERS, not from a second hand-written tuple: two
+    # lists drift, and the one that drifts silently is the one nobody reads
+    # (this check used to name three launchers while four existed).
     for path, label in ((BUILD, "build_release_zip.py"),
                         (AUTOCHECK, "tests/autocheck.py")):
         if not path.is_file():
             failures.append(f"{label} is missing")
             continue
         src = path.read_text(encoding="utf-8", errors="replace")
-        for launcher in ("NeuralScreen-probe.vbs", "NeuralScreen-probe-private.vbs",
-                         "NeuralScreen-probe-mv.vbs"):
+        # Every probe launcher, derived from the table above rather than
+        # re-listed: two lists drift, and the one that drifts silently is the
+        # one nobody reads (this check used to name three while four existed).
+        for launcher in sorted(n for n in LAUNCHERS if "probe" in n):
             if f'"{launcher}"' not in src:
                 failures.append(
-                    f"{label} does not name {launcher} - a launcher the "
-                    "reporter cannot get is no answer")
+                    f"{label} does not name {launcher} - it is in this test's "
+                    "table but not in the release path, so the reporter who "
+                    "needs it cannot get it")
 
     # --- 6. the variable actually REACHES the launched process ------------
     #

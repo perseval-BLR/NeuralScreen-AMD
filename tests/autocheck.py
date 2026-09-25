@@ -221,6 +221,7 @@ def zip_integrity():
         "README.md", "README.ru.md", "NeuralScreen.vbs", "NeuralScreen.bat",
         "NeuralScreen-diag.vbs", "NeuralScreen-probe.vbs",
         "NeuralScreen-probe-private.vbs", "NeuralScreen-probe-mv.vbs",
+        "NeuralScreen-probe-mv-shared.vbs",
         "native/nvngx.dll", "native/nvngx_dlssnr.dll",
         # Neural Rendering does not start without it: the NGX calls
         # have to leave a module whose path carries "nvngx.dll".

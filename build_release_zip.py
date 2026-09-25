@@ -45,10 +45,13 @@ extra = [
     # double-clicked: that is the whole instruction.
     "NeuralScreen-probe.vbs",
     # The same probe with the upscale on a private copy of the upscaler (the
-    # control), and with motion vectors on top of that (the arm under test).
-    # Double-clicks rather than variables, for the same reason.
+    # control), with motion vectors on top of that (the arm under test), and
+    # with the vectors on the SHARED module - the one combination that isolates
+    # the vectors from the private copy, asked for by the reporter who ran the
+    # other three. Double-clicks rather than variables, for the same reason.
     "NeuralScreen-probe-private.vbs",
     "NeuralScreen-probe-mv.vbs",
+    "NeuralScreen-probe-mv-shared.vbs",
     "README.ru.md",
     "native/nvngx.dll",
     # The module the NGX calls leave from. Its file name is what the
