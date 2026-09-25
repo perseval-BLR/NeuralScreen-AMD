@@ -1,21 +1,28 @@
-' NeuralScreen-probe-mv.vbs - the per-frame probe with the upscale's motion-vector arm,
-' run on a private copy of the upscaler
-' (NS_AMD_PROBE_EACH=1, NS_AMD_UPSCALE_PRIVATE=1, NS_AMD_UPSCALE_MV=1)
+' NeuralScreen-probe-shared.vbs - the per-frame probe with the private copy OFF
+' (NS_AMD_PROBE_EACH=1, NS_AMD_UPSCALE_PRIVATE=0)
 '
-' Why: the upscale's output goes wrong on every other frame while its input
-' is flat, on two different Radeon generations, and the frame after a history
-' reset is always the first bad one. The motion vectors are the one input of
-' that dispatch the FidelityFX API does not mark optional, and it has always
-' been given none.
+' The other half of the A/B, and the honest version of a launcher that used to
+' exist as probe-private: the private copy is now the SHIPPED DEFAULT, so asking
+' for it proves nothing. This one turns it off and returns the upscale dispatch
+' to the module the runtime hooked.
 '
-' v0.3.21 bound them on the shared upscaler, and the neural runtime - which
-' follows the dispatch that has motion vectors - went into a staging re-create
-' loop, so that run measured the loop as well as the vectors. Here the upscale
-' runs on a private copy of the same DLL that the runtime's hooks are not in,
-' and NeuralScreen-probe-private.vbs is the same without the vectors: the two
-' runs differ in exactly one thing. A test, not a fix. Slow picture, like the
-' other probe launchers: a diagnosis, not a way to play.
-
+' The motion vectors are refused on this path by the build itself - vectors on a
+' dispatch the runtime can see make it re-create its staging on every switch
+' (92 re-creations for 1 engine job over 54 frames, measured on a 7900 XTX),
+' which measures the loop instead of the picture. So this run is the OLD
+' picture: no flicker fix, not a broken one.
+'
+' Why this file exists at all: the probe is the instrument that says WHICH
+' surface carries a defect, and asking a reporter to set an environment
+' variable by hand is asking a question most of them cannot answer. One of
+' them said so plainly - "I have no experience with coding, and I don't know
+' how to set the NS_AMD_PROBE_EACH=1 environment variable" - after being asked
+' twice. A launcher named in the reply, double-clicked, is the whole
+' instruction.
+'
+' Use it for ONE run, while the defect is visible. The readback is a full
+' GPU-to-CPU sync, so the picture runs slowly: this is a diagnosis, not a way
+' to play.
 Option Explicit
 
 Dim fso, shell, dir, py, nvruntime, devpython
@@ -75,21 +82,13 @@ If Not fso.FileExists(dir & "\native\nvngx.dll") Then
     WScript.Quit 1
 End If
 
-' --- Diagnostic mode: the probe reports on every frame ---
-'
-' The variable is set in the LAUNCHED PROCESS's environment, which main.py and
-' then the worker inherit - the probe reads it with GetEnvironmentVariableA at
-' its own startup, so it has to be in place before the worker is spawned.
-shell.Environment("Process")("NS_AMD_PROBE_EACH") = "1"
 
-' --- The arm under test: the upscale dispatch gets motion vectors ---
+' --- The arm under test: the private copy OFF ---
 '
-' Read by the worker once, when it first builds its surfaces. The worker's log
-' names the arm ("the upscale dispatch's motion vectors: bound ...").
-' The upscale on a private copy of the upscaler DLL, so the runtime never sees
-' it (the worker's log says whether the copy loaded).
-shell.Environment("Process")("NS_AMD_UPSCALE_PRIVATE") = "1"
-shell.Environment("Process")("NS_AMD_UPSCALE_MV") = "1"
+' The vectors follow the copy automatically (the build gates them on it), so
+' there is nothing else to set here.
+shell.Environment("Process")("NS_AMD_PROBE_EACH") = "1"
+shell.Environment("Process")("NS_AMD_UPSCALE_PRIVATE") = "0"
 
 ' --- Launch with no window (window style 0), without waiting ---
 Dim extra, arg, q

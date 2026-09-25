@@ -1,19 +1,24 @@
-"""Dispatch B can run on a private copy of the upscaler: one variable, off by default, named.
+"""Dispatch B runs on a private copy of the upscaler: the SHIPPED DEFAULT.
 
 WHY THIS EXISTS
 ---------------
-v0.3.21 bound motion vectors to dispatch B (NS_AMD_UPSCALE_MV=1). On a
-7900 XTX (#3, 22.09) that run showed no corruption at all - including the four
-warm-up frames, which on the default arm alternate 0% / 83.8% at >= 1024 - but
-the runtime, which picks the dispatch it processes by "has motion vectors",
-stopped ignoring B and re-created its staging 80 times for 4 network jobs. So
-the test measured that loop as well as the vectors.
+v0.3.21 bound motion vectors to dispatch B. On a 7900 XTX (#3, 22.09) that run
+showed no corruption at all - including the four warm-up frames, which on the
+default arm alternate 0% / 83.8% at >= 1024 - but the runtime, which picks the
+dispatch it processes by "has motion vectors", stopped ignoring B and
+re-created its staging 80 times for 4 network jobs. So the test measured that
+loop as well as the vectors.
 
 The runtime hooks ffxCreateContext / ffxDispatch inside the upscaler module it
 found. A second copy of the same file, loaded by full path from a private
 folder, is a separate image (checked on the bench: distinct handle, distinct
 ffxDispatch address) whose code the hooks were never written into. B on that
-image can carry motion vectors without the runtime seeing B at all.
+image can carry motion vectors without the runtime seeing B at all - and that
+is now load-bearing rather than an A/B: the reporter's five runs on 25.09
+isolated the vectors as the fix (private alone 92 of 98 frames corrupted,
+private + vectors 0 of 126), and the vectors cannot be bound unless B is out of
+the runtime's sight. So this copy IS the fix's precondition, and it is ON
+unless NS_AMD_UPSCALE_PRIVATE=0.
 
 WHAT THIS LOCKS
 ---------------
@@ -25,10 +30,12 @@ WHAT THIS LOCKS
    would be on the hooked image and the log would lie.
 3. B's context is created, dispatched and destroyed through ApiB(); A's only
    through the shared module. ApiB() is the shared module unless the copy
-   loaded, so the default is what shipped.
-4. The arm is NS_AMD_UPSCALE_PRIVATE, exactly "1", and LoadPrivateB is called
-   only under it.
-5. The log names the arm that RAN, including a requested arm that failed.
+   loaded, so a failed copy degrades to the old picture and never to a broken
+   one.
+4. The arm is NS_AMD_UPSCALE_PRIVATE, and only the literal "0" turns it off;
+   LoadPrivateB is called only under it.
+5. The log names the arm that RAN, including a requested arm that failed - and
+   that matters more now, because a failed copy turns the flicker fix off.
 
 Run:  runtime\\python.exe tests/test_amd_upscale_private_arm.py
 """
@@ -127,15 +134,20 @@ def main() -> int:
     if "reinterpret_cast<DispatchFn>(api_.dispatch)" not in dn:
         failures.append("A is not dispatched through the shared module - the runtime would lose it")
 
-    # --- 4. the arm, exactly "1", and the only caller is under it ------------
+    # --- 4. the arm: default ON, exactly "0" turns it off --------------------
     arm = body_of(br, "static bool AmdUpscalePrivateArm(")
     if not arm:
         failures.append("no AmdUpscalePrivateArm()")
     else:
         if 'GetEnvironmentVariableA("NS_AMD_UPSCALE_PRIVATE"' not in arm:
             failures.append("the arm does not read NS_AMD_UPSCALE_PRIVATE")
-        if "v[0] == '1'" not in arm:
-            failures.append("the arm does not require the value to be exactly 1")
+        # The copy is the SHIPPED DEFAULT now: it is what lets B carry the
+        # motion vectors that fix the flicker, so an unset variable must leave
+        # it ON.
+        if not re.search(r"sizeof\(v\)\)\s*==\s*0\s*\|\|\s*v\[0\]\s*!=\s*'0'", arm):
+            failures.append(
+                "the private copy is not the default - an unset "
+                "NS_AMD_UPSCALE_PRIVATE must leave it ON (only =0 turns it off)")
     calls = [m.start() for m in re.finditer(r"\bLoadPrivateB\(", br)]
     if len(calls) != 1:
         failures.append(f"LoadPrivateB is called {len(calls)} times in the bridge, expected once")
@@ -149,9 +161,9 @@ def main() -> int:
     # --- 5. the log names the arm that ran -----------------------------------
     fb = flat(br)
     for needle, why in (
-        ("the upscale dispatch's module: a private copy (%ls)", "the success arm"),
-        ("was asked for and did NOT take effect (%s)", "the requested-but-failed arm"),
-        ("the upscale dispatch's module: shared with the network", "the default arm"),
+        ("the upscale dispatch's module: a private copy (%ls)", "the shipped arm"),
+        ("a private copy was ", "the requested-but-failed arm"),
+        ("the upscale dispatch's module: shared with the network", "the opted-out arm"),
     ):
         if needle not in fb:
             failures.append(f"the log does not name {why}")

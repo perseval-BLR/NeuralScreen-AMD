@@ -17,7 +17,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 os.chdir(BASE)
 
-VERSION = "0.3.23"
+VERSION = "0.3.24"
 # This build is the AMD one: the pass runs on a Radeon through a third-party
 # runtime the user prepares (native/AMD.md). The NVIDIA path stays in the
 # binary for hybrid machines, and the bundled nvngx_dlssnr.dll is still the
@@ -44,14 +44,13 @@ extra = [
     # what one reporter could not do and asked about twice. Named in the reply,
     # double-clicked: that is the whole instruction.
     "NeuralScreen-probe.vbs",
-    # The same probe with the upscale on a private copy of the upscaler (the
-    # control), with motion vectors on top of that (the arm under test), and
-    # with the vectors on the SHARED module - the one combination that isolates
-    # the vectors from the private copy, asked for by the reporter who ran the
-    # other three. Double-clicks rather than variables, for the same reason.
-    "NeuralScreen-probe-private.vbs",
-    "NeuralScreen-probe-mv.vbs",
-    "NeuralScreen-probe-mv-shared.vbs",
+    # The A/B pair against that default, one variable each: the first takes
+    # the motion vectors away (the alternating output comes back - the defect),
+    # the second puts the upscale back on the module the runtime hooked (the
+    # vectors are refused there by the build, and the picture is the old one).
+    # Double-clicks rather than variables, for the same reason.
+    "NeuralScreen-probe-mv-off.vbs",
+    "NeuralScreen-probe-shared.vbs",
     "README.ru.md",
     "native/nvngx.dll",
     # The module the NGX calls leave from. Its file name is what the

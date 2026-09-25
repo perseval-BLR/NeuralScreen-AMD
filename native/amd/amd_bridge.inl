@@ -1361,45 +1361,68 @@ static float AmdExposureForEngine()
 // untouched. The comment was describing an operation that was never written;
 // corrected rather than implemented, because the host that produces a picture
 // does not do it either.
-// Whether dispatch B is handed a motion-vector surface (NS_AMD_UPSCALE_MV=1)
-// or null, which is what shipped. One variable, off by default.
+// Whether dispatch B is handed a motion-vector surface, or null.
 //
-// Why this is the variable: B's output alternates on both reporters' machines
-// with a flat input, and the pairs are complementary - the fraction of the
-// surface that is wrong on one frame is the fraction that is right on the next
-// (1664x936: 100% / 0%, 1792x1006: 75% / 25%, 2496x1356: 99.94% / 0.04%). So B
-// rewrites every pixel on every frame and the rewrite is wrong on alternate
-// frames. It fails the same way on an RX 9070 XT and on an RX 7900 XTX, whose
-// FFX upscaler DLL takes different paths, so the suspect is what WE hand B
-// rather than one implementation. Of B's inputs, the motion vectors are the one
-// ffx_upscale.h does not mark optional (exposure, reactive and transparency
-// are), and B passes null.
+// SHIPPED DEFAULT: BOUND. This is the fix, and it is the one input change that
+// was isolated to a single variable on a healthy run:
 //
-// What it costs: the runtime picks the dispatch it follows by "has motion
-// vectors bound", so with this arm on it may follow B instead of A, or both.
-// The runtime's own log says which (`staging ready: colour <out> ... motion
-// <work>` would be B), and that is a result, not a side effect to hide.
+//   private alone (no vectors)  92 of 98 frames carry a value >= 1024, flickers
+//   private + vectors            0 of 126                          , no flicker
+//
+// Both runs healthy (0 staging re-creations, 55 engine jobs over 60 frames), so
+// the vectors are the active ingredient rather than a second thing changed at
+// once. B's output alternates with a flat input and the halves are
+// complementary (1664x936: 100% / 0%, 1792x1006: 75% / 25%, 2496x1356: 99.94%
+// / 0.04%), and of B's inputs the vectors are the one ffx_upscale.h does not
+// mark optional while B was passed null.
+//
+// THE GATE BELOW IS NOT OPTIONAL. The runtime picks the dispatch it processes
+// by "has motion vectors bound", and there is no ini key for that choice - the
+// full v0.2.17 surface is Enabled LocalTone LocalStructure SkinStructure
+// UseAutoMask ToneChannels Scale Temporal Tonemap UseFsrInputs UseDepth Interop
+// Inline InlineWaitMs HipDevice, and the rule itself is hard-coded:
+//
+//   ignoring upscaler dispatches without motion vectors (the game runs a second
+//   context; Spider-Man does); following the one with motion vectors
+//
+// So vectors on a B the runtime CAN see make it follow both dispatches and
+// re-create its staging on every switch: 92 re-creations for 1 engine job over
+// 54 frames on a 7900 XTX, which measures the loop and not the vectors. Binding
+// them is therefore allowed only while B is out of the runtime's sight, i.e.
+// only when the private copy is in force - whatever the variable says.
+//
+// NS_AMD_UPSCALE_MV=0 restores the original defect for an A/B.
 static bool AmdUpscaleMvArm()
 {
-    static const bool on = [] {
+    static const bool asked = [] {
         char v[8] = {};
-        return GetEnvironmentVariableA("NS_AMD_UPSCALE_MV", v, sizeof(v)) > 0 && v[0] == '1';
+        return GetEnvironmentVariableA("NS_AMD_UPSCALE_MV", v, sizeof(v)) == 0 || v[0] != '0';
     }();
-    return on;
+    return asked && g_amd.fsr.PrivateB();
 }
 
-// Whether dispatch B runs on a private copy of the upscaler module
-// (NS_AMD_UPSCALE_PRIVATE=1) or on the one the runtime hooked, which is what
-// shipped. One variable, off by default. See Upscaler::LoadPrivateB for why:
-// with B visible, binding its motion vectors put the runtime into a staging
-// re-create loop, so that test measured the loop as well as the vectors.
+// Whether dispatch B runs on a private copy of the upscaler module.
+//
+// SHIPPED DEFAULT: PRIVATE COPY. It was the A/B arm and it is now the shipping
+// path, because it is what makes the flicker fix possible at all: while B sits
+// on the module the runtime hooked, the runtime can see B, and the only way to
+// keep it from following B is to hand B no motion vectors - which is the defect
+// (0 of 126 vs 92 of 98 corrupted frames, see AmdUpscaleMvArm). A separate
+// image, loaded from its own folder, is one the hooks were never installed in,
+// so B can carry the vectors the network needs while the runtime goes on
+// following A alone.
+//
+// NS_AMD_UPSCALE_PRIVATE=0 goes back to the shared module. That combination is
+// safe by construction rather than by discipline: AmdUpscaleMvArm() refuses to
+// bind the vectors unless PrivateB() is true, so turning the copy off cannot
+// recreate the staging re-create loop - it only restores the old picture.
 static bool AmdUpscalePrivateArm()
 {
-    static const bool on = [] {
+    static const bool asked = [] {
         char v[8] = {};
-        return GetEnvironmentVariableA("NS_AMD_UPSCALE_PRIVATE", v, sizeof(v)) > 0 && v[0] == '1';
+        return GetEnvironmentVariableA("NS_AMD_UPSCALE_PRIVATE", v, sizeof(v)) == 0 || v[0] != '0';
     }();
-    return on;
+    return asked;
 }
 
 static bool AmdEnsureResources(UINT net_w, UINT net_h, UINT out_w, UINT out_h)
@@ -2055,16 +2078,29 @@ static bool AmdEvaluateVideo(VideoState &v, int reset, UINT64 *submitted)
         if (!g_amd.up_motion_logged)
         {
             g_amd.up_motion_logged = true;
+            // The line names what RAN, and it has to: whether the vectors are
+            // bound is not the variable any more (AmdUpscaleMvArm gates them on
+            // the private copy), so a reader who saw the request in a command
+            // line and this line saying otherwise needs to be told which of the
+            // two took effect. A null surface here means either the arm was
+            // refused by that gate or the copy failed to load - and the module
+            // line above says which of those.
             Log("[amd] the upscale dispatch's motion vectors: %s",
                 g_amd.up_motion != nullptr
                     ? "bound to a surface of its own at the work extent, scale 0 "
-                      "(NS_AMD_UPSCALE_MV=1) - the runtime may now follow this "
-                      "dispatch; its log's staging line says which it took"
-                    : "null (the default) - set NS_AMD_UPSCALE_MV=1 to test "
-                      "binding them");
+                      "- the shipped default; B is on its own module, so the "
+                      "runtime follows A alone"
+                    : (g_amd.fsr.PrivateB()
+                           ? "null (NS_AMD_UPSCALE_MV=0): the alternating output "
+                             "of B is the known defect this build fixes"
+                           : "null because B is on the SHARED module (the "
+                             "private copy is off or did not load) - binding "
+                             "vectors there is what drives the runtime's "
+                             "staging re-create loop, so they are refused"));
         }
-        // g_amd.up_motion is null unless the arm is on (it is only created
-        // under it), so the default call is the one that shipped.
+        // g_amd.up_motion exists only under AmdUpscaleMvArm() (which itself
+        // requires the private copy), so the surface is created exactly when it
+        // is safe to bind.
         if (!g_amd.fsr.DispatchUpscale(h.list, g_amd.net, g_amd.depth,
                                        up_exposure ? g_amd.exposure : nullptr,
                                        g_amd.up_motion,
@@ -2730,28 +2766,32 @@ static bool AmdInit()
             return false;
         }
         Log("[amd] FidelityFX upscaler loaded (the dispatch the engine follows)");
-        // One variable, off by default, and the log says which arm RAN - not
-        // which was asked for: a copy that failed to load leaves B on the
-        // shared module, and a run that believes otherwise measures nothing.
+        // The log says which arm RAN - not which was asked for. That distinction
+        // matters more now: the private copy is the shipped default and the
+        // motion vectors are gated on it, so a copy that failed to load does not
+        // just change the module - it silently turns the flicker fix off. A run
+        // that believes otherwise measures nothing.
         if (AmdUpscalePrivateArm())
         {
             std::string pwhy;
             if (g_amd.fsr.LoadPrivateB(pwhy))
                 Log("[amd] the upscale dispatch's module: a private copy (%ls) "
-                    "that the runtime's hooks are not in (NS_AMD_UPSCALE_PRIVATE=1) "
-                    "- its log should no longer say it is ignoring a dispatch "
-                    "without motion vectors",
+                    "that the runtime's hooks are not in - the shipped default, "
+                    "and what lets B carry motion vectors without the runtime "
+                    "following it",
                     g_amd.fsr.PrivateBPath().c_str());
             else
-                Log("[amd] the upscale dispatch's module: NS_AMD_UPSCALE_PRIVATE=1 "
-                    "was asked for and did NOT take effect (%s) - B runs on the "
-                    "shared module, so this run is the default arm",
+                Log("[amd] the upscale dispatch's module: a private copy was "
+                    "asked for and did NOT take effect (%s) - B runs on the "
+                    "shared module, so the motion vectors are refused and the "
+                    "picture is the old one",
                     pwhy.c_str());
         }
         else
             Log("[amd] the upscale dispatch's module: shared with the network "
-                "dispatch (the default) - set NS_AMD_UPSCALE_PRIVATE=1 to hide it "
-                "from the runtime");
+                "dispatch (NS_AMD_UPSCALE_PRIVATE=0) - B is visible to the "
+                "runtime, so the motion vectors are refused and the picture is "
+                "the old one");
     }
 
     // The index the loader resolved, kept for the engine-init retry. Both

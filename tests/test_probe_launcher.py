@@ -43,19 +43,24 @@ import sys
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-#: Each launcher and the EXACT set of variables it sets. The probe-private and
-#: probe-mv ones set more than one on purpose: the per-frame probe is the
-#: measurement, and the two differ from each other in exactly NS_AMD_UPSCALE_MV
-#: - the one arm under test, isolated from the runtime by NS_AMD_UPSCALE_PRIVATE.
+#: Each launcher and the EXACT set of variables it sets, WITH the value it sets
+#: them to. The value is part of the contract now, not a detail: since v0.3.24
+#: the private copy and the motion vectors are ON by default, so a launcher that
+#: A/Bs against that default has to write "0" - and a test that only checked the
+#: name would pass on a launcher that quietly switched the fix back on.
 #: What stays banned is a launcher setting anything outside its own set.
 LAUNCHERS = {
-    "NeuralScreen.vbs": (),
-    "NeuralScreen-diag.vbs": ("NS_PHASE",),
-    "NeuralScreen-probe.vbs": ("NS_AMD_PROBE_EACH",),
-    "NeuralScreen-probe-private.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_PRIVATE"),
-    "NeuralScreen-probe-mv.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_PRIVATE",
-                                  "NS_AMD_UPSCALE_MV"),
-    "NeuralScreen-probe-mv-shared.vbs": ("NS_AMD_PROBE_EACH", "NS_AMD_UPSCALE_MV"),
+    "NeuralScreen.vbs": {},
+    "NeuralScreen-diag.vbs": {"NS_PHASE": "1"},
+    # The shipped default: per-frame probe, and nothing switched off. Because
+    # both arms are ON by default, this launcher IS the fixed configuration -
+    # the older -private and -mv launchers asked for what everyone now gets and
+    # were retired rather than kept as files that prove nothing.
+    "NeuralScreen-probe.vbs": {"NS_AMD_PROBE_EACH": "1"},
+    # The A/B pair, one variable each against that default.
+    "NeuralScreen-probe-mv-off.vbs": {"NS_AMD_PROBE_EACH": "1", "NS_AMD_UPSCALE_MV": "0"},
+    "NeuralScreen-probe-shared.vbs": {"NS_AMD_PROBE_EACH": "1",
+                                      "NS_AMD_UPSCALE_PRIVATE": "0"},
 }
 ALL_VARS = sorted({v for vs in LAUNCHERS.values() for v in vs})
 BUILD = BASE / "build_release_zip.py"
@@ -91,10 +96,10 @@ def main() -> int:
             continue
         src = path.read_text(encoding="utf-8", errors="replace")
         # The apostrophe comment marker makes ' in prose dangerous here: read
-        # the Environment assignment itself, then compare the variable NAME.
-        set_vars = re.findall(r'shell\.Environment\("Process"\)\("([^"]+)"\)\s*=\s*"1"',
-                              src)
-        missing = [v for v in want if v not in set_vars]
+        # the Environment assignment itself, then compare name AND value.
+        set_vars = dict(re.findall(
+            r'shell\.Environment\("Process"\)\("([^"]+)"\)\s*=\s*"([^"]*)"', src))
+        missing = [f"{v}={val}" for v, val in want.items() if set_vars.get(v) != val]
         if missing:
             failures.append(
                 f"{name} does not set {missing} - that is the reason the file "
@@ -230,12 +235,14 @@ def behaviour() -> list:
                 continue
             got = dict(zip(ALL_VARS, seen.read_text(encoding="utf-8").split("|")))
             for var in ALL_VARS:
-                want = "'1'" if var in LAUNCHERS[name] else "None"
+                # The launcher's own value, or None when it must not touch it.
+                want = repr(LAUNCHERS[name][var]) if var in LAUNCHERS[name] else "None"
                 if got[var] != want:
                     problems.append(
                         f"{name}: the child inherited {var}={got[var]}, "
                         f"expected {want} - the variable is set in the wrong "
-                        "scope, so the worker never sees it")
+                        "scope, or with the wrong value, so the worker does not "
+                        "see what the launcher promised")
     finally:
         shutil.rmtree(sandbox, ignore_errors=True)
     return problems

@@ -1,4 +1,4 @@
-"""The upscale dispatch's motion vectors are one variable, off by default, and named.
+"""The upscale dispatch's motion vectors are gated on the private copy.
 
 WHY THIS EXISTS
 ---------------
@@ -15,22 +15,38 @@ So B rewrites every pixel every frame, and the rewrite is wrong on alternate
 frames. It fails the same way on two cards whose FFX upscaler DLL takes
 different paths, which points at what we hand B rather than at one
 implementation. Of B's inputs, the motion vectors are the one ffx_upscale.h does
-not mark optional, and B passes null. That makes "bound or null" the next single
-variable - a hypothesis, NOT a fix.
+not mark optional, and B passed null.
+
+The isolation came from the reporter's five runs on 25.09 (issue #3), all on a
+7900 XTX with the same window and work scale:
+
+    private, no vectors   92 of 98 frames carry a value >= 1024, flickers
+    private + vectors      0 of 126,                            no flicker
+
+Both runs are HEALTHY - 0 staging re-creations, 55 engine jobs over 60 frames -
+so the vectors are the active ingredient and not a second thing changed at once.
+They are now the SHIPPED DEFAULT, so binding them is no longer the variable.
 
 WHAT THIS LOCKS
 ---------------
 1. One variable: B's motionVectors come from a nullable parameter, and nothing
    else in B's descriptor reads it. motionVectorScale stays {0, 0}, so the
    surface's contents never reach the result.
-2. Off by default: the surface B is handed is created ONLY under
-   NS_AMD_UPSCALE_MV=1 (value exactly 1), so the default call passes null - the
-   descriptor that shipped.
+2. THE GATE. The vectors may be bound ONLY while the private copy is in force.
+   The runtime picks the dispatch it processes by "has motion vectors" and there
+   is no ini key for that choice (the whole v0.2.17 surface is Enabled LocalTone
+   LocalStructure SkinStructure UseAutoMask ToneChannels Scale Temporal Tonemap
+   UseFsrInputs UseDepth Interop Inline InlineWaitMs HipDevice), so vectors on a
+   B the runtime can see make it follow both and re-create staging on every
+   switch - measured: 92 re-creations for 1 engine job over 54 frames. This is
+   the one property that cannot be left to a comment.
 3. It is B's OWN surface, not A's `motion`: A's carries real vectors, and
    handing it over would change what the vectors say as well as whether they
    exist.
-4. The arm is named in the log, once per run.
-5. The surface is released with the others, so a resize cannot leak it or hand
+4. The surface exists only under AmdUpscaleMvArm(), i.e. never on a run where
+   the copy failed to load.
+5. The line names what RAN, and a refused arm says why.
+6. The surface is released with the others, so a resize cannot leak it or hand
    B a surface of the old extent.
 
 Run:  runtime\\python.exe tests/test_amd_upscale_mv_knob.py
@@ -69,6 +85,10 @@ def body_of(code: str, signature: str) -> str:
     return ""
 
 
+def flat(s: str) -> str:
+    return re.sub(r"\s+", " ", s)
+
+
 def main() -> int:
     failures: list[str] = []
     for p in (FSR, BRIDGE):
@@ -96,15 +116,29 @@ def main() -> int:
                 "B's motionVectorScale is no longer {0, 0} - the surface's contents "
                 "would reach the result and the arm would test two things")
 
-    # --- 2. the surface exists only under the arm --------------------------
+    # --- 2. the gate: vectors only while B is out of the runtime's sight -----
     arm = body_of(br, "static bool AmdUpscaleMvArm(")
     if not arm:
         failures.append("no AmdUpscaleMvArm()")
     else:
         if 'GetEnvironmentVariableA("NS_AMD_UPSCALE_MV"' not in arm:
             failures.append("AmdUpscaleMvArm does not read NS_AMD_UPSCALE_MV")
-        if "v[0] == '1'" not in arm:
-            failures.append("the arm does not require the value to be exactly 1")
+        # Default BOUND: an unset variable must not disable the fix that shipped.
+        if not re.search(r"sizeof\(v\)\)\s*==\s*0\s*\|\|\s*v\[0\]\s*!=\s*'0'", arm):
+            failures.append(
+                "the arm is not bound by default - an unset NS_AMD_UPSCALE_MV "
+                "must leave the shipped fix ON (only =0 turns it off)")
+        # THE GATE. Without it, vectors on a visible B put the runtime into the
+        # staging re-create loop and the run measures the loop, not the fix.
+        if "g_amd.fsr.PrivateB()" not in arm:
+            failures.append(
+                "the arm does not require the private copy - vectors on a B the "
+                "runtime can see drive its staging re-create loop (92 "
+                "re-creations for 1 engine job over 54 frames)")
+        if not re.search(r"return\s+asked\s*&&\s*g_amd\.fsr\.PrivateB\(\)\s*;", flat(arm)):
+            failures.append(
+                "the gate is not the arm's RESULT - a variable checked anywhere "
+                "else can be bypassed by the call site")
     assigns = [m.start() for m in re.finditer(r"g_amd\.up_motion\s*=(?!=)", br)]
     if len(assigns) != 1:
         failures.append(f"g_amd.up_motion is assigned {len(assigns)} times, expected once "
@@ -115,8 +149,7 @@ def main() -> int:
         if not re.search(r"if\s*\(.*AmdUpscaleMvArm\(\)", guard, re.S):
             failures.append(
                 "g_amd.up_motion is created without the AmdUpscaleMvArm() guard - "
-                "the default call would bind vectors and change every reporter's "
-                "picture")
+                "and that guard is what carries the private-copy gate")
 
     # --- 3. B's own surface, passed as the motion argument -----------------
     call = re.search(r"g_amd\.fsr\.DispatchUpscale\((.*?)\)\)", br, re.S)

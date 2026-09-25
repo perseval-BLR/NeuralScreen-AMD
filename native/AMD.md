@@ -217,22 +217,29 @@ diagnosis run, not for playing. The probe's lines land in `NeuralScreen.log`
 with everything else, so the usual **Create diagnostic package** button carries
 them.
 
-**If you were asked for the follow-up runs:** double-click
-**`NeuralScreen-probe-private.vbs`**, then **`NeuralScreen-probe-mv.vbs`**,
+**If you were asked for the A/B runs:** double-click
+**`NeuralScreen-probe-mv-off.vbs`**, then **`NeuralScreen-probe-shared.vbs`**,
 each after a plain `NeuralScreen-probe.vbs` run with nothing else changed.
 
-- `-private` is the probe plus `NS_AMD_UPSCALE_PRIVATE=1`: the FSR upscale
-  dispatch (work to display) runs on a second copy of the same upscaler DLL,
-  loaded from a private temp folder, whose code the runtime never hooked - so
-  the runtime does not see that dispatch at all. The log says whether the copy
-  loaded (`the upscale dispatch's module: ...`); if it did, the runtime's own
-  log no longer says it is ignoring a dispatch without motion vectors.
-- `-mv` adds `NS_AMD_UPSCALE_MV=1` on top: the upscale is handed a
-  motion-vector surface of its own, with the vector scale at zero, so the two
-  runs differ in exactly whether one is bound. In v0.3.21 this launcher bound
-  them on the shared DLL, and the runtime - which follows the dispatch that has
-  motion vectors - went into a staging re-create loop; the private copy is what
-  keeps it out of this test.
+Both are the probe with the flicker fix switched OFF, one variable at a time -
+so a run of each next to a plain one shows the difference on your own card.
+`NeuralScreen-probe.vbs` is the fixed configuration: the two things that fix
+the flicker are on by default in this build.
+
+- `-mv-off` sets `NS_AMD_UPSCALE_MV=0`: the FSR upscale dispatch (work to
+  display) is no longer handed its own motion-vector surface. Those vectors are
+  the fix - with them removed, the alternating output of that dispatch comes
+  back, which is the defect this build closes.
+- `-shared` sets `NS_AMD_UPSCALE_PRIVATE=0`: the upscale goes back onto the same
+  upscaler DLL the runtime hooked, instead of its own private copy. The motion
+  vectors are refused on that path by the build itself, because vectors on a
+  dispatch the runtime can see make it re-create its staging on every switch
+  (measured: 92 re-creations for 1 engine job over 54 frames, which measures the
+  loop instead of the picture). So this run is the OLD picture, not a broken one.
+
+The log names which arm ran, either way:
+`the upscale dispatch's module: ...` and
+`the upscale dispatch's motion vectors: ...`.
 
 **If the program stops before the first frame** (the log ends after
 `engine surfaces at ...` and the worker is restarted): the log now names each

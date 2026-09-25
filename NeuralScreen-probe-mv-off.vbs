@@ -1,13 +1,28 @@
-' NeuralScreen-probe-private.vbs - the per-frame probe with the upscale on a
-' private copy of the upscaler (NS_AMD_PROBE_EACH=1, NS_AMD_UPSCALE_PRIVATE=1)
+' NeuralScreen-probe-mv-off.vbs - the per-frame probe with the flicker fix OFF
+' (NS_AMD_PROBE_EACH=1, NS_AMD_UPSCALE_MV=0)
 '
-' The control for NeuralScreen-probe-mv.vbs. The neural runtime hooks the
-' upscaler DLL it finds; here the upscale step runs on a second copy of the
-' same file that it never hooked, so the runtime does not see that dispatch at
-' all. Nothing else changes. If this run alone changes the flicker, the runtime
-' seeing the upscale was part of it; if not, the -mv run isolates the vectors.
-' A test, not a fix. Slow picture: a diagnosis, not a way to play.
-
+' The A/B against the shipped default. Since v0.3.24 the upscale dispatch is
+' handed motion vectors, and that is the fix: with the vectors removed the
+' alternating output of the upscale step comes back, which is the defect this
+' build closes.
+'
+' Use it to see the difference on your own card: run this launcher, then
+' NeuralScreen-probe.vbs, in the same window at the same work scale. The first
+' should flicker where the second does not. One run each, while the defect is
+' visible - the per-frame readback makes the picture slow, so this is a
+' diagnosis and not a way to play.
+'
+' Why this file exists at all: the probe is the instrument that says WHICH
+' surface carries a defect, and asking a reporter to set an environment
+' variable by hand is asking a question most of them cannot answer. One of
+' them said so plainly - "I have no experience with coding, and I don't know
+' how to set the NS_AMD_PROBE_EACH=1 environment variable" - after being asked
+' twice. A launcher named in the reply, double-clicked, is the whole
+' instruction.
+'
+' Use it for ONE run, while the defect is visible. The readback is a full
+' GPU-to-CPU sync, so the picture runs slowly: this is a diagnosis, not a way
+' to play.
 Option Explicit
 
 Dim fso, shell, dir, py, nvruntime, devpython
@@ -67,18 +82,13 @@ If Not fso.FileExists(dir & "\native\nvngx.dll") Then
     WScript.Quit 1
 End If
 
-' --- Diagnostic mode: the probe reports on every frame ---
-'
-' The variable is set in the LAUNCHED PROCESS's environment, which main.py and
-' then the worker inherit - the probe reads it with GetEnvironmentVariableA at
-' its own startup, so it has to be in place before the worker is spawned.
-shell.Environment("Process")("NS_AMD_PROBE_EACH") = "1"
 
-' --- The arm under test: the upscale on a private copy of the upscaler ---
+' --- The arm under test: the motion vectors OFF ---
 '
-' The worker's log says whether the copy loaded ("the upscale dispatch's module:
-' ...").
-shell.Environment("Process")("NS_AMD_UPSCALE_PRIVATE") = "1"
+' The private copy stays ON (it is the default and the vectors are gated on it),
+' so this launcher changes exactly one thing against the shipped build.
+shell.Environment("Process")("NS_AMD_PROBE_EACH") = "1"
+shell.Environment("Process")("NS_AMD_UPSCALE_MV") = "0"
 
 ' --- Launch with no window (window style 0), without waiting ---
 Dim extra, arg, q
