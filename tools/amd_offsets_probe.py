@@ -85,19 +85,26 @@ EXPECTED_V0217 = {
 #: the v0.3.1 table in native/amd/amd_runtime.h (rva::kV0310) had been called
 #: unverified in our own audit: the header could not say whether its entries
 #: were right, and kSyncCounter sits at 0x0 with "still unmapped". Running the
-#: probe against the v0.3.1 image reproduces ten of these eleven fields from the
+#: probe against the v0.3.1 image reproduces all eleven option fields from the
 #: instruction stream, so the table is now checked by the method rather than by
-#: reading. Tonemap is the one the option reader does not store in this build.
+#: reading.
+#:
+#: Tonemap is here on the same footing as in EXPECTED_V0217: the probe derives
+#: it (0x9acf8, the fifth byte of the option block), while the host's Table
+#: struct carries no kTonemap field at all - for either build. So this one key
+#: is checked against the image alone, not against the header.
 #:
 #: Two other projects publish v0.3.0 layouts (a MIT ReShade add-on and a
 #: GPL-3.0 Magpie fork) and agree with each other on all fifteen addresses they
-#: share - but v0.3.0 is a different build from v0.3.1, so they are a pointer,
-#: not the control. This table is the control, and the probe must reproduce it.
+#: share - and they place Tonemap at the same fifth byte, 0x97b20 there. But
+#: v0.3.0 is a different build from v0.3.1, so they are a pointer, not the
+#: control. This table is the control, and the probe must reproduce it.
 EXPECTED_V0310 = {
     "Enabled": 0x9ACF4,
     "Temporal": 0x9ACF5,
     "UseFsrInputs": 0x9ACF6,
     "UseDepth": 0x9ACF7,
+    "Tonemap": 0x9ACF8,
     "LocalTone": 0x9AD08,
     "LocalStructure": 0x9AD0C,
     "SkinStructure": 0x9AD10,

@@ -56,9 +56,13 @@ KEY_TO_FIELD = {
     "ToneChannels": "kToneChannels",
 }
 
-#: The one key the option reader does not store on this build. Named, so that a
-#: control that silently stopped covering it is visible as a change to this set.
-NOT_STORED_ON_V0310 = {"Tonemap"}
+#: Keys the host's Table struct does not carry a field for, in either build -
+#: the probe still derives them from the image, so they are checked against the
+#: binary instead of against the header. Tonemap is the ini's tone curve, and
+#: the host writes it through the same option block it writes everything else
+#: through; it simply has no named field. Naming the set keeps a key from being
+#: dropped out of the control silently.
+NOT_IN_HEADER_TABLE = {"Tonemap"}
 
 
 def fail(msg):
@@ -114,8 +118,12 @@ def main():
 
     print(f"control keys: {len(control)}")
 
-    # 1. Every control value is the header's value, through the name mapping.
+    # 1. Every control value is the header's value, through the name mapping -
+    #    except the keys the header has no field for, which are checked against
+    #    the image in step 4 instead.
     for key, want in sorted(control.items()):
+        if key in NOT_IN_HEADER_TABLE:
+            continue
         field = KEY_TO_FIELD.get(key)
         if field is None:
             problems += fail(f"control names {key}, which no field maps to")
@@ -126,16 +134,17 @@ def main():
                 f"{key}: probe control 0x{want:x} != kV0310.{field} "
                 f"0x{got:x}" if got is not None else f"{key}: {field} not in kV0310")
 
-    # 2. The control covers every field it can place, and says which it cannot.
-    #    Tonemap is excluded from the control because the option reader does not
-    #    store it on this build, so its absence is stated rather than silent.
-    placeable = set(control)
-    if placeable & NOT_STORED_ON_V0310:
-        problems += fail(
-            f"the control still carries {sorted(placeable & NOT_STORED_ON_V0310)}, "
-            f"which this build does not store")
-    if len(placeable) < 10:
-        problems += fail(f"control covers only {len(placeable)} fields")
+    # 2. Every key is either mapped to a header field or named as having none.
+    #    A key that is neither is one the control would skip without saying so.
+    for key in sorted(control):
+        mapped = key in KEY_TO_FIELD
+        declared_absent = key in NOT_IN_HEADER_TABLE
+        if mapped == declared_absent:
+            problems += fail(
+                f"{key}: mapped={mapped}, declared absent={declared_absent} - "
+                f"exactly one must hold")
+    if len(control) < 11:
+        problems += fail(f"control covers only {len(control)} fields")
 
     # 3. The probe still compares against the table it is given, and the control
     #    it carries is a live comparison rather than a decoration. Both halves
