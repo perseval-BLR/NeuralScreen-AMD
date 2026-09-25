@@ -81,6 +81,31 @@ EXPECTED_V0217 = {
     "ToneChannels": 0x8D9E4,
 }
 
+#: The same control for the SECOND build this host drives, v0.3.1. Added after
+#: the v0.3.1 table in native/amd/amd_runtime.h (rva::kV0310) had been called
+#: unverified in our own audit: the header could not say whether its entries
+#: were right, and kSyncCounter sits at 0x0 with "still unmapped". Running the
+#: probe against the v0.3.1 image reproduces ten of these eleven fields from the
+#: instruction stream, so the table is now checked by the method rather than by
+#: reading. Tonemap is the one the option reader does not store in this build.
+#:
+#: Two other projects publish v0.3.0 layouts (a MIT ReShade add-on and a
+#: GPL-3.0 Magpie fork) and agree with each other on all fifteen addresses they
+#: share - but v0.3.0 is a different build from v0.3.1, so they are a pointer,
+#: not the control. This table is the control, and the probe must reproduce it.
+EXPECTED_V0310 = {
+    "Enabled": 0x9ACF4,
+    "Temporal": 0x9ACF5,
+    "UseFsrInputs": 0x9ACF6,
+    "UseDepth": 0x9ACF7,
+    "LocalTone": 0x9AD08,
+    "LocalStructure": 0x9AD0C,
+    "SkinStructure": 0x9AD10,
+    "Scale": 0x9AD14,
+    "UseAutoMask": 0x9AD18,
+    "ToneChannels": 0x9AD1C,
+}
+
 #: The init entry point, identified by a string only that function references.
 #: It is the one entry point this probe can place structurally: its neighbours
 #: are found by which fields they touch, which is reliable only once every field
@@ -461,6 +486,9 @@ def main() -> int:
     parser.add_argument("--expect", action="store_true",
                         help="compare against the offsets the host is pinned to "
                              "(v0.2.17) and fail on any difference")
+    parser.add_argument("--expect-v0310", action="store_true",
+                        help="compare against the v0.3.1 table (rva::kV0310) and "
+                             "fail on any difference")
     parser.add_argument("--key", action="append", default=None,
                         help="restrict to one key (repeatable)")
     args = parser.parse_args()
@@ -470,6 +498,11 @@ def main() -> int:
 
     results, sects, data = derive(args.dll)
     keys = args.key or sorted(OPTION_KEYS)
+    # Which published table this run is the control for. One of the two; the
+    # entry-point anchors below belong to v0.2.17 only.
+    want_table = EXPECTED_V0310 if args.expect_v0310 else EXPECTED_V0217
+    checking = args.expect or args.expect_v0310
+    table_name = "v0.3.1 (kV0310)" if args.expect_v0310 else "v0.2.17"
     print(f"image: {args.dll.name}  ({len(data):,} bytes, "
           f"{len(functions(data, sects))} functions)")
     print()
@@ -481,7 +514,7 @@ def main() -> int:
         if not hits:
             print(f"{key:16} {'MISSING':>11}  {'-':>10}  the reader does not "
                   f"store it in this build")
-            if args.expect:
+            if checking:
                 failures.append(key)
             continue
         # A key can be handled in more than one place; the option reader is the
@@ -490,8 +523,8 @@ def main() -> int:
         section = next((s[0] for s in sects
                         if s[1] <= rva < s[1] + max(s[2], s[4])), "?")
         print(f"{key:16} {rva:#11x}  {evidence:#10x}  {section}")
-        if args.expect:
-            want = EXPECTED_V0217.get(key)
+        if checking:
+            want = want_table.get(key)
             if want is None:
                 continue
             if rva != want:
@@ -518,14 +551,15 @@ def main() -> int:
                 failures.append(name)
                 print(f"{'':16} {'':>13}  EXPECTED {want:#x} - MISMATCH")
 
-    if args.expect:
+    if checking:
         print()
         if failures:
             print(f"CONTROL FAILED for: {', '.join(sorted(set(failures)))}")
             print("The method does not reproduce the table this host relies on,")
             print("so its output for another build cannot be trusted.")
             return 1
-        print("CONTROL PASSED: every key reproduces the pinned v0.2.17 table.")
+        print(f"CONTROL PASSED: every key reproduces the pinned "
+              f"{table_name} table.")
     return 0
 
 
